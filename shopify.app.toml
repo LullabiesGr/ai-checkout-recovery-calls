@@ -2,7 +2,7 @@
 
 client_id = "b14c2c0645270d506c4bbc827807a208"
 name = "Ai Checkout Recovery Calls"
-application_url = "https://example.com"
+application_url = "https://checkout-call-recovery-ai.onrender.com"
 embedded = true
 
 [build]
@@ -20,9 +20,22 @@ api_version = "2026-04"
   topics = [ "app/scopes_update" ]
   uri = "/webhooks/app/scopes_update"
 
+ [[webhooks.subscriptions]]
+  topics = [ "checkouts/create" ]
+  uri = "/webhooks/checkouts/create"
+
+  [[webhooks.subscriptions]]
+  topics = [ "checkouts/update" ]
+  uri = "/webhooks/checkouts/update"
+
+  [[webhooks.subscriptions]]
+  topics = [ "orders/create" ]
+  uri = "/webhooks/orders/create"
+
+
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "write_products"
+scopes = "read_orders,write_products,read_checkouts"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://checkout-call-recovery-ai.onrender.com/auth/callback" ]
