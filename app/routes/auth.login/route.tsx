@@ -1,4 +1,6 @@
+// app/routes/auth.login/route.tsx
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
+import { Page, Card, TextField, Button, BlockStack } from "@shopify/polaris";
 import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { Form, useActionData, useLoaderData } from "react-router";
@@ -8,16 +10,12 @@ import { loginErrorMessage } from "./error.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const errors = loginErrorMessage(await login(request));
-
   return { errors };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const errors = loginErrorMessage(await login(request));
-
-  return {
-    errors,
-  };
+  return { errors };
 };
 
 export default function Auth() {
@@ -28,22 +26,27 @@ export default function Auth() {
 
   return (
     <AppProvider embedded={false}>
-      <s-page>
-        <Form method="post">
-        <s-section heading="Log in">
-          <s-text-field
-            name="shop"
-            label="Shop domain"
-            details="example.myshopify.com"
-            value={shop}
-            onChange={(e) => setShop(e.currentTarget.value)}
-            autocomplete="on"
-            error={errors.shop}
-          ></s-text-field>
-          <s-button type="submit">Log in</s-button>
-        </s-section>
-        </Form>
-      </s-page>
+      <Page title="Log in">
+        <Card>
+          <Form method="post">
+            <BlockStack gap="300">
+              <TextField
+                name="shop"
+                label="Shop domain"
+                helpText="example.myshopify.com"
+                value={shop}
+                onChange={setShop}
+                autoComplete="on"
+                error={errors.shop}
+              />
+              <Button submit variant="primary">
+                Log in
+              </Button>
+            </BlockStack>
+          </Form>
+        </Card>
+      </Page>
     </AppProvider>
   );
 }
+
