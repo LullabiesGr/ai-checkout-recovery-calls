@@ -1,21 +1,21 @@
-// app/routes/app._index.tsx
+// app/routes/app._index/route.tsx
 import * as React from "react";
 import { useEffect } from "react";
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useRouteError, redirect } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { authenticate } from "../shopify.server";
-import db from "../db.server";
+
+import { authenticate } from "../../shopify.server";
+import db from "../../db.server";
 import {
   ensureSettings,
   markAbandonedByDelay,
   syncAbandonedCheckoutsFromShopify,
   enqueueCallJobs,
-} from "../callRecovery.server";
+} from "../../callRecovery.server";
+
 import { DashboardView } from "../../components/dashboard/DashboardView";
-
-
 
 type LoaderData = {
   shop: string;
@@ -90,7 +90,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const settings = await ensureSettings(shop);
 
-  // operational refresh (όπως το είχες)
   await syncAbandonedCheckoutsFromShopify({ admin, shop, limit: 50 });
   await markAbandonedByDelay(shop, Number(settings.delayMinutes ?? 30));
 
@@ -105,7 +104,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     retryMinutes: Number(settings.retryMinutes ?? 180),
   });
 
-  const { isVapiConfiguredFromEnv } = await import("../lib/callInsights.server");
+  const { isVapiConfiguredFromEnv } = await import("../../lib/callInsights.server");
   const vapiConfigured = isVapiConfiguredFromEnv();
 
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
@@ -166,7 +165,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     outcome: r.outcome ?? "RECOVERED",
   }));
 
-  // blockers placeholder (δένεις μετά από tags/reasons fields)
   const reasons: Array<{ label: string; pct: number }> = [];
 
   return {
@@ -219,7 +217,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (intent === "create_test_call") {
-    // εδώ θα βάλεις αργότερα generator για test checkout/job
     return redirect(fromRequestWithSearch("/app/calls", request));
   }
 
@@ -235,7 +232,6 @@ export default function Index() {
     (fetcher.state === "loading" || fetcher.state === "submitting") && fetcher.formMethod === "POST";
 
   useEffect(() => {
-    // δείξε toast όταν γυρίσει από sync
     if (fetcher.data && fetcher.formData?.get("intent") === "sync_now") {
       shopify.toast.show("Synced");
     }
