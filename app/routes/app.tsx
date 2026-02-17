@@ -4,7 +4,7 @@ import { Outlet, useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { Page } from "@shopify/polaris";
-import { NavigationMenu } from "@shopify/app-bridge-react";
+import { NavMenu } from "@shopify/app-bridge-react";
 
 import { authenticate } from "../shopify.server";
 
@@ -30,14 +30,13 @@ export default function AppLayout() {
 
   return (
     <AppProvider embedded>
-      <NavigationMenu
-        navigationLinks={[
-          { label: "Dashboard", destination: withQS("/app") },
-          { label: "Checkouts", destination: withQS("/app/checkouts") },
-          { label: "Calls", destination: withQS("/app/calls") },
-          { label: "Settings", destination: withQS("/app/settings") },
-        ]}
-      />
+      <NavMenu>
+        <a href={withQS("/app")}>Dashboard</a>
+        <a href={withQS("/app/checkouts")}>Checkouts</a>
+        <a href={withQS("/app/calls")}>Calls</a>
+        <a href={withQS("/app/settings")}>Settings</a>
+      </NavMenu>
+
       <Page fullWidth>
         <Outlet />
       </Page>
