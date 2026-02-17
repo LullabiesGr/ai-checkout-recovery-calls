@@ -1,34 +1,140 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
+// prisma/schema.prisma
 generator client {
   provider = "prisma-client-js"
 }
 
-// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
-// enough when changing adapters.
-// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
-  provider = "sqlite"
-  url      = "file:dev.sqlite"
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Checkout {
+  id           String         @id @default(cuid())
+  shop         String
+  checkoutId   String
+  token        String?
+  email        String?
+  phone        String?
+  value        Float
+  currency     String
+  status       CheckoutStatus @default(OPEN)
+  abandonedAt  DateTime?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  raw          String?
+  customerName String?
+  itemsJson    String?
+
+  // ✅ recovered attribution (order after call)
+  recoveredAt      DateTime?
+  recoveredOrderId String?
+  recoveredAmount  Float?
+
+  @@unique([shop, checkoutId], name: "shop_checkoutId")
+  @@index([shop, status, createdAt])
+}
+
+model Order {
+  id            String   @id @default(cuid())
+  shop          String
+  orderId       String
+  checkoutId    String?
+  checkoutToken String?
+  total         Float?
+  currency      String?
+  financial     String?
+  createdAt     DateTime @default(now())
+  raw           String?
+
+  @@unique([shop, orderId], name: "shop_orderId")
+  @@index([shop, createdAt])
+}
+
+model CallJob {
+  id             String        @id @default(cuid())
+  shop           String
+  checkoutId     String
+  phone          String
+  scheduledFor   DateTime
+  status         CallJobStatus @default(QUEUED)
+  attempts       Int           @default(0)
+  provider       String?
+  providerCallId String?
+  outcome        String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  endedReason    String?
+  transcript     String?
+  recordingUrl   String?
+  sentiment      String?
+  tagsCsv        String?
+  reason         String?
+  nextAction     String?
+  followUp       String?
+  analysisJson   String?
+
+  // ✅ earned attribution per call job
+  attributedAt      DateTime?
+  attributedOrderId String?
+  attributedAmount  Float?
+
+  @@index([shop, status, scheduledFor])
+  @@index([shop, checkoutId])
+}
+
+model Settings {
+  id                String   @id @default(cuid())
+  shop              String   @unique
+  enabled           Boolean  @default(true)
+  delayMinutes      Int      @default(30)
+  maxAttempts       Int      @default(2)
+  retryMinutes      Int      @default(180)
+  minOrderValue     Float    @default(0)
+  currency          String   @default("USD")
+  callWindowStart   String   @default("09:00")
+  callWindowEnd     String   @default("19:00")
+  merchantPrompt    String?  @default("")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  vapiAssistantId   String?
+  vapiPhoneNumberId String?
+  userPrompt        String   @default("")
 }
 
 model Session {
-  id            String    @id
-  shop          String
-  state         String
-  isOnline      Boolean   @default(false)
-  scope         String?
-  expires       DateTime?
-  accessToken   String
-  userId        BigInt?
-  firstName     String?
-  lastName      String?
-  email         String?
-  accountOwner  Boolean   @default(false)
-  locale        String?
-  collaborator  Boolean?  @default(false)
-  emailVerified Boolean?  @default(false)
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
+
+  @@index([shop])
+}
+
+enum CheckoutStatus {
+  OPEN
+  ABANDONED
+  CONVERTED
+  RECOVERED
+}
+
+enum CallJobStatus {
+  QUEUED
+  CALLING
+  COMPLETED
+  FAILED
+  CANCELED
 }
