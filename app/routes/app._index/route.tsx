@@ -13,7 +13,8 @@ import {
   syncAbandonedCheckoutsFromShopify,
   enqueueCallJobs,
 } from "../callRecovery.server";
-import { DashboardView } from "../components/dashboard/DashboardView";
+import { DashboardView } from "../../components/dashboard/DashboardView";
+
 
 
 type LoaderData = {
