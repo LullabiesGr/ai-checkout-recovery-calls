@@ -1,9 +1,7 @@
-// C:\Users\Frantzopoulos\Desktop\ai-checkout-recovery-calls\app\routes\app._index.tsx
-import * as React from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { redirect, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { authenticate } from "../shopify.server";
+import { authenticate } from "../../shopify.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   await authenticate.admin(request);
@@ -11,7 +9,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const search = url.search || "";
 
-  // default landing: dashboard (keep Shopify embedded params)
   return redirect(`/app/dashboard${search}`);
 };
 

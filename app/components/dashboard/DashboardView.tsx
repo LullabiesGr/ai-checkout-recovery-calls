@@ -12,9 +12,9 @@ export type DashboardViewProps = {
   shopLabel?: string;
 
   status?: {
-    providerText?: string;   // "Vapi ready" / "Sim mode"
+    providerText?: string; // "Vapi ready" / "Sim mode"
     automationText?: string; // "Automation ON/OFF"
-    lastSyncText?: string;   // "Just now" / "2m ago"
+    lastSyncText?: string; // "Just now" / "2m ago"
   };
 
   nav?: {
@@ -102,6 +102,7 @@ function ToneDot({ tone }: { tone: Exclude<Tone, "neutral"> }) {
         background: barColor(tone),
         display: "inline-block",
         boxShadow: "0 0 0 2px rgba(0,0,0,0.06)",
+        flex: "0 0 auto",
       }}
       aria-hidden="true"
     />
@@ -115,13 +116,19 @@ function KpiCard({ k }: { k: DashboardViewProps["kpis"][number] }) {
     <s-box border="base" borderRadius="base" background="base" padding="base">
       <s-stack direction="block" gap="tight">
         <s-stack direction="inline" align="space-between" gap="base">
-          <s-text variant="bodySm" tone="subdued">{k.label}</s-text>
+          <s-text variant="bodySm" tone="subdued">
+            {k.label}
+          </s-text>
           <s-badge tone={badgeTone(k.tone)}>{k.tone === "neutral" ? "Info" : k.tone.toUpperCase()}</s-badge>
         </s-stack>
 
         <s-stack direction="inline" gap="base" align="start" style={{ alignItems: "baseline" }}>
           <s-text variant="headingLg">{k.value}</s-text>
-          {k.sub ? <s-text variant="bodySm" tone="subdued">{k.sub}</s-text> : null}
+          {k.sub ? (
+            <s-text variant="bodySm" tone="subdued">
+              {k.sub}
+            </s-text>
+          ) : null}
         </s-stack>
 
         <div style={{ height: 6, borderRadius: 999, background: "rgba(0,0,0,0.08)", overflow: "hidden" }}>
@@ -147,19 +154,61 @@ function Empty({ text }: { text: string }) {
 }
 
 export function DashboardView(props: DashboardViewProps) {
-  const summary =
-    (() => {
-      const by = (needle: string) => props.kpis.find((x) => x.label.toLowerCase().includes(needle));
-      const recoveredRev = by("recovered revenue") ?? by("recovered");
-      const atRisk = by("at-risk") ?? by("potential") ?? by("at risk");
-      const win = by("win rate");
+  const summary = (() => {
+    const by = (needle: string) => props.kpis.find((x) => x.label.toLowerCase().includes(needle));
+    const recoveredRev = by("recovered revenue") ?? by("recovered");
+    const atRisk = by("at-risk") ?? by("potential") ?? by("at risk");
+    const win = by("win rate");
 
-      const parts: string[] = [];
-      if (recoveredRev) parts.push(`${recoveredRev.label}: ${recoveredRev.value}`);
-      if (atRisk) parts.push(`${atRisk.label}: ${atRisk.value}`);
-      if (win) parts.push(`${win.label}: ${win.value}`);
-      return parts.length ? parts.join(" • ") : "Snapshot will populate once calls complete and outcomes are recorded.";
-    })();
+    const parts: string[] = [];
+    if (recoveredRev) parts.push(`${recoveredRev.label}: ${recoveredRev.value}`);
+    if (atRisk) parts.push(`${atRisk.label}: ${atRisk.value}`);
+    if (win) parts.push(`${win.label}: ${win.value}`);
+    return parts.length ? parts.join(" • ") : "Snapshot will populate once calls complete and outcomes are recorded.";
+  })();
+
+  const statusBadges = (
+    <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
+      {props.status?.providerText ? <s-badge tone="info">{props.status.providerText}</s-badge> : null}
+      {props.status?.automationText ? (
+        <s-badge tone={props.status.automationText.toUpperCase().includes("ON") ? "success" : "warning"}>
+          {props.status.automationText}
+        </s-badge>
+      ) : null}
+      {props.status?.lastSyncText ? <s-badge tone="new">{props.status.lastSyncText}</s-badge> : null}
+    </s-stack>
+  );
+
+  const navButtons = (
+    <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
+      {props.nav?.checkoutsHref ? (
+        <s-button href={props.nav.checkoutsHref} variant="secondary">
+          Open checkouts
+        </s-button>
+      ) : null}
+      {props.nav?.callsHref ? (
+        <s-button href={props.nav.callsHref} variant="secondary">
+          Open calls
+        </s-button>
+      ) : null}
+
+      <s-button-group>
+        <Form method="post">
+          <input type="hidden" name="intent" value="sync_now" />
+          <s-button type="submit" variant="secondary" slot="secondary-actions">
+            Sync now
+          </s-button>
+        </Form>
+
+        <Form method="post">
+          <input type="hidden" name="intent" value="create_test_call" />
+          <s-button type="submit" variant="primary" slot="primary-action" disabled={!props.canCreateTestCall}>
+            Create test call
+          </s-button>
+        </Form>
+      </s-button-group>
+    </s-stack>
+  );
 
   return (
     <s-page>
@@ -173,38 +222,8 @@ export function DashboardView(props: DashboardViewProps) {
             <s-divider />
 
             <s-stack direction="inline" align="space-between" gap="base" style={{ flexWrap: "wrap" }}>
-              <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
-                {props.status?.providerText ? <s-badge tone="info">{props.status.providerText}</s-badge> : null}
-                {props.status?.automationText ? (
-                  <s-badge tone={props.status.automationText.includes("ON") ? "success" : "warning"}>
-                    {props.status.automationText}
-                  </s-badge>
-                ) : null}
-                {props.status?.lastSyncText ? <s-badge tone="new">{props.status.lastSyncText}</s-badge> : null}
-              </s-stack>
-
-              <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
-                {props.nav?.checkoutsHref ? (
-                  <s-button href={props.nav.checkoutsHref} variant="secondary">Open checkouts</s-button>
-                ) : null}
-                {props.nav?.callsHref ? (
-                  <s-button href={props.nav.callsHref} variant="secondary">Open calls</s-button>
-                ) : null}
-
-                <s-button-group>
-                  <Form method="post">
-                    <input type="hidden" name="intent" value="sync_now" />
-                    <s-button type="submit" variant="secondary" slot="secondary-actions">Sync now</s-button>
-                  </Form>
-
-                  <Form method="post">
-                    <input type="hidden" name="intent" value="create_test_call" />
-                    <s-button type="submit" variant="primary" slot="primary-action" disabled={!props.canCreateTestCall}>
-                      Create test call
-                    </s-button>
-                  </Form>
-                </s-button-group>
-              </s-stack>
+              {statusBadges}
+              {navButtons}
             </s-stack>
           </s-stack>
         </s-section>
@@ -215,7 +234,9 @@ export function DashboardView(props: DashboardViewProps) {
             gap="base"
             gridTemplateColumns="@container (inline-size < 860px) repeat(2, minmax(0, 1fr)), repeat(6, minmax(0, 1fr))"
           >
-            {props.kpis.map((k) => <KpiCard key={k.label} k={k} />)}
+            {props.kpis.map((k) => (
+              <KpiCard key={k.label} k={k} />
+            ))}
           </s-grid>
         </s-query-container>
 
@@ -250,7 +271,9 @@ export function DashboardView(props: DashboardViewProps) {
                           <s-box key={p.label} border="base" borderRadius="base" padding="base" background="base">
                             <s-stack direction="block" gap="tight">
                               <s-stack direction="inline" align="space-between" gap="base">
-                                <s-text variant="bodySm" tone="subdued">{p.label}</s-text>
+                                <s-text variant="bodySm" tone="subdued">
+                                  {p.label}
+                                </s-text>
                                 <s-badge tone={badgeTone(p.tone)}>{p.value}</s-badge>
                               </s-stack>
                               <s-text variant="headingMd">{p.value}</s-text>
@@ -271,25 +294,29 @@ export function DashboardView(props: DashboardViewProps) {
                     <s-stack direction="block" gap="tight">
                       <s-stack direction="inline" align="space-between" gap="base">
                         <s-text variant="headingMd">Today’s priorities</s-text>
-                        <s-badge tone="new">{(props.priorities?.length ?? 0) ? "Actionable" : "Empty"}</s-badge>
+                        <s-badge tone="new">{props.priorities?.length ? "Actionable" : "Empty"}</s-badge>
                       </s-stack>
                       <s-divider />
 
-                      {(!props.priorities || props.priorities.length === 0) ? (
+                      {!props.priorities || props.priorities.length === 0 ? (
                         <Empty text="No priorities yet." />
                       ) : (
                         <s-stack direction="block" gap="tight">
                           {props.priorities.slice(0, 6).map((p) => (
                             <s-stack key={p.label} direction="inline" align="space-between" gap="base">
-                              <s-stack direction="inline" gap="tight" style={{ minWidth: 0 }}>
+                              <s-stack direction="inline" gap="tight" style={{ minWidth: 0, alignItems: "center" }}>
                                 <ToneDot tone={(p.tone === "neutral" ? "blue" : p.tone) as any} />
                                 <s-text style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                                   {p.label}
                                 </s-text>
                               </s-stack>
-                              <s-stack direction="inline" gap="tight">
+                              <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
                                 <s-badge tone={badgeTone(p.tone)}>{p.count}</s-badge>
-                                {p.href ? <s-button href={p.href} variant="tertiary">View</s-button> : null}
+                                {p.href ? (
+                                  <s-button href={p.href} variant="tertiary">
+                                    View
+                                  </s-button>
+                                ) : null}
                               </s-stack>
                             </s-stack>
                           ))}
@@ -303,18 +330,20 @@ export function DashboardView(props: DashboardViewProps) {
                     <s-stack direction="block" gap="tight">
                       <s-stack direction="inline" align="space-between" gap="base">
                         <s-text variant="headingMd">Recent recoveries</s-text>
-                        <s-badge tone="success">{(props.recentRecoveries?.length ?? 0) ? "Proof" : "None"}</s-badge>
+                        <s-badge tone="success">{props.recentRecoveries?.length ? "Proof" : "None"}</s-badge>
                       </s-stack>
                       <s-divider />
 
-                      {(!props.recentRecoveries || props.recentRecoveries.length === 0) ? (
+                      {!props.recentRecoveries || props.recentRecoveries.length === 0 ? (
                         <Empty text="No recovered orders yet." />
                       ) : (
                         <s-section padding="none">
                           <s-table>
                             <s-table-header-row>
                               <s-table-header listSlot="primary">Order/Checkout</s-table-header>
-                              <s-table-header listSlot="inline" format="currency">Amount</s-table-header>
+                              <s-table-header listSlot="inline" format="currency">
+                                Amount
+                              </s-table-header>
                               <s-table-header listSlot="secondary">When</s-table-header>
                               <s-table-header listSlot="secondary">Outcome</s-table-header>
                             </s-table-header-row>
@@ -357,8 +386,22 @@ export function DashboardView(props: DashboardViewProps) {
                                 {r.label}
                               </s-text>
                               <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
-                                <div style={{ width: 140, height: 6, borderRadius: 999, background: "rgba(0,0,0,0.08)", overflow: "hidden" }}>
-                                  <div style={{ width: `${clampPct(r.pct)}%`, height: "100%", background: "rgba(178,132,0,0.95)" }} />
+                                <div
+                                  style={{
+                                    width: 140,
+                                    height: 6,
+                                    borderRadius: 999,
+                                    background: "rgba(0,0,0,0.08)",
+                                    overflow: "hidden",
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      width: `${clampPct(r.pct)}%`,
+                                      height: "100%",
+                                      background: "rgba(178,132,0,0.95)",
+                                    }}
+                                  />
                                 </div>
                                 <s-text tone="subdued">{clampPct(r.pct)}%</s-text>
                               </s-stack>
@@ -377,7 +420,7 @@ export function DashboardView(props: DashboardViewProps) {
                       </s-stack>
                       <s-divider />
 
-                      {(!props.recommendations || props.recommendations.length === 0) ? (
+                      {!props.recommendations || props.recommendations.length === 0 ? (
                         <Empty text="No recommendations yet." />
                       ) : (
                         <s-stack direction="block" gap="tight">
@@ -397,7 +440,7 @@ export function DashboardView(props: DashboardViewProps) {
               <s-stack direction="block" gap="tight">
                 <s-stack direction="inline" align="space-between" gap="base">
                   <s-text variant="headingMd">Live activity</s-text>
-                  <s-badge tone={(props.live.length ? "new" : "info")}>{props.live.length ? "Live" : "Idle"}</s-badge>
+                  <s-badge tone={props.live.length ? "new" : "info"}>{props.live.length ? "Live" : "Idle"}</s-badge>
                 </s-stack>
                 <s-divider />
 
@@ -407,7 +450,7 @@ export function DashboardView(props: DashboardViewProps) {
                   <s-stack direction="block" gap="tight">
                     {props.live.slice(0, 10).map((r, i) => (
                       <s-stack key={`${r.label}-${i}`} direction="inline" align="space-between" gap="base">
-                        <s-stack direction="inline" gap="tight" style={{ minWidth: 0 }}>
+                        <s-stack direction="inline" gap="tight" style={{ minWidth: 0, alignItems: "center" }}>
                           <ToneDot tone={r.tone} />
                           <s-text style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                             {r.label}
