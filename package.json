@@ -1,8 +1,10 @@
 {
   "name": "ai-checkout-recovery-calls",
   "private": true,
+  "type": "module",
   "scripts": {
     "build": "react-router build",
+    "postbuild": "node scripts/patch-rr-server-build.mjs",
     "dev": "shopify app dev",
     "config:link": "shopify app config link",
     "generate": "shopify app generate",
@@ -19,16 +21,15 @@
     "vite": "vite",
     "typecheck": "react-router typegen && tsc --noEmit"
   },
-  "type": "module",
   "engines": {
     "node": "20.x"
   },
   "dependencies": {
     "@prisma/client": "^6.16.3",
-    "@react-router/dev": "^7.12.0",
-    "@react-router/fs-routes": "^7.12.0",
-    "@react-router/node": "^7.12.0",
-    "@react-router/serve": "^7.12.0",
+    "@react-router/dev": "7.13.0",
+    "@react-router/fs-routes": "7.13.0",
+    "@react-router/node": "7.13.0",
+    "@react-router/serve": "7.13.0",
     "@shopify/app-bridge-react": "^4.2.10",
     "@shopify/polaris": "^12.27.0",
     "@shopify/polaris-icons": "^9.3.1",
@@ -38,7 +39,7 @@
     "prisma": "^6.16.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router": "^7.12.0",
+    "react-router": "7.13.0",
     "vite-tsconfig-paths": "^5.1.4"
   },
   "devDependencies": {
