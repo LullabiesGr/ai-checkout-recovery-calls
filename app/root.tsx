@@ -9,7 +9,6 @@ import {
   ScrollRestoration,
   useLoaderData,
   useNavigate,
-  json,
 } from "react-router";
 
 import polarisStyles from "@shopify/polaris/build/esm/styles.css?url";
@@ -19,9 +18,11 @@ import enTranslations from "@shopify/polaris/locales/en.json";
 export const links: LinksFunction = () => [{ rel: "stylesheet", href: polarisStyles }];
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  return json({
+  // React Router loaders μπορούν να επιστρέψουν plain data.
+  // Δεν χρειάζεσαι json() helper.
+  return {
     shopifyApiKey: process.env.SHOPIFY_API_KEY ?? "",
-  });
+  };
 }
 
 export default function Root() {
@@ -36,8 +37,7 @@ export default function Root() {
     };
 
     document.addEventListener("shopify:navigate", handleNavigate as EventListener);
-    return () =>
-      document.removeEventListener("shopify:navigate", handleNavigate as EventListener);
+    return () => document.removeEventListener("shopify:navigate", handleNavigate as EventListener);
   }, [navigate]);
 
   return (
