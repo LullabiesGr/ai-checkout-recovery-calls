@@ -25,9 +25,9 @@ export type DashboardViewProps = {
   shopLabel?: string;
 
   status?: {
-    providerText?: string; // "Vapi ready" / "Sim mode"
-    automationText?: string; // "Automation ON/OFF"
-    lastSyncText?: string; // "Just now" / "2m ago"
+    providerText?: string;
+    automationText?: string;
+    lastSyncText?: string;
   };
 
   nav?: {
@@ -35,12 +35,6 @@ export type DashboardViewProps = {
     callsHref: string;
   };
 
-  /**
-   * KPI notes:
-   * - `key` lets the dashboard reliably pick the headline metrics (no label guessing).
-   * - `series` draws a tiny sparkline if provided (7–30 points ideal).
-   * - `deltaText` renders as a badge (e.g. "+12% vs prev 7d").
-   */
   kpis: Array<{
     key?: KpiKey;
     label: string;
@@ -49,17 +43,12 @@ export type DashboardViewProps = {
     tone: Tone;
     barPct?: number | null;
 
-    series?: number[]; // optional sparkline points
-    deltaText?: string; // optional badge text
-    deltaTone?: Tone; // optional (defaults derived from tone)
+    series?: number[];
+    deltaText?: string;
+    deltaTone?: Tone;
   }>;
 
-  pipeline: Array<{
-    label: string;
-    value: number;
-    tone: Exclude<Tone, "neutral">;
-  }>;
-
+  pipeline: Array<{ label: string; value: number; tone: Exclude<Tone, "neutral"> }>;
   live: LiveRow[];
   reasons: ReasonRow[];
 
@@ -74,10 +63,6 @@ export type DashboardViewProps = {
 
   recommendations?: string[];
 
-  /**
-   * Optional settings snapshot (fast “confidence” proof for the merchant).
-   * Example items: Delay, Max attempts, Discount, Follow-up SMS.
-   */
   settingsSnapshot?: Array<{ label: string; value: string; tone?: Tone; href?: string }>;
 
   canCreateTestCall: boolean;
@@ -155,7 +140,7 @@ function ToneDot({ tone }: { tone: Exclude<Tone, "neutral"> }) {
 function Sparkline({
   points,
   tone,
-  width = 120,
+  width = 140,
   height = 28,
 }: {
   points?: number[];
@@ -181,7 +166,6 @@ function Sparkline({
   const stroke = barColor(tone);
   const fill = subtleBg(tone);
 
-  // light area fill under the line
   const areaD =
     `M 0 ${height.toFixed(2)} ` +
     coords.map((p) => `L ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ") +
@@ -215,7 +199,7 @@ function SectionHeader({
   right?: React.ReactNode;
 }) {
   return (
-    <s-stack direction="inline" align="space-between" gap="base" style={{ flexWrap: "wrap" }}>
+    <s-stack direction="inline" align="space-between" gap="base" style={{ flexWrap: "wrap", alignItems: "center" }}>
       <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
         <s-text variant="headingMd">{title}</s-text>
         {badgeText ? <s-badge tone={bt}>{badgeText}</s-badge> : null}
@@ -225,95 +209,8 @@ function SectionHeader({
   );
 }
 
-function KpiCard({ k }: { k: DashboardViewProps["kpis"][number] }) {
-  const pct = typeof k.barPct === "number" ? clampPct(k.barPct) : null;
-  const deltaTone = k.deltaTone ?? k.tone;
-
-  return (
-    <s-box border="base" borderRadius="base" background="base" padding="base">
-      <s-stack direction="block" gap="tight">
-        <s-stack direction="inline" align="space-between" gap="base">
-          <s-text variant="bodySm" tone="subdued">
-            {k.label}
-          </s-text>
-
-          <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
-            {k.deltaText ? <s-badge tone={badgeTone(deltaTone)}>{k.deltaText}</s-badge> : null}
-            <s-badge tone={badgeTone(k.tone)}>{k.tone === "neutral" ? "Info" : k.tone.toUpperCase()}</s-badge>
-          </s-stack>
-        </s-stack>
-
-        <s-stack direction="inline" gap="base" align="start" style={{ alignItems: "baseline" }}>
-          <s-text variant="headingLg">{k.value}</s-text>
-          {k.sub ? (
-            <s-text variant="bodySm" tone="subdued">
-              {k.sub}
-            </s-text>
-          ) : null}
-        </s-stack>
-
-        <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center" }}>
-          <div style={{ height: 6, borderRadius: 999, background: "rgba(0,0,0,0.08)", overflow: "hidden", flex: "1 1 auto" }}>
-            <div
-              style={{
-                width: `${pct ?? 40}%`,
-                height: "100%",
-                background: barColor(k.tone),
-              }}
-            />
-          </div>
-
-          <div style={{ flex: "0 0 auto" }}>
-            <Sparkline points={k.series} tone={k.tone} />
-          </div>
-        </s-stack>
-      </s-stack>
-    </s-box>
-  );
-}
-
-function HeroMetric({
-  k,
-  hint,
-}: {
-  k: DashboardViewProps["kpis"][number];
-  hint?: string;
-}) {
-  const pct = typeof k.barPct === "number" ? clampPct(k.barPct) : null;
-
-  return (
-    <s-box border="base" borderRadius="base" background="base" padding="base" style={{ background: subtleBg(k.tone) }}>
-      <s-stack direction="block" gap="tight">
-        <s-stack direction="inline" align="space-between" gap="base">
-          <s-text variant="bodySm" tone="subdued">
-            {k.label}
-          </s-text>
-          <s-badge tone={badgeTone(k.tone)}>{k.tone === "neutral" ? "Info" : k.tone.toUpperCase()}</s-badge>
-        </s-stack>
-
-        <s-stack direction="inline" align="space-between" gap="base" style={{ flexWrap: "wrap", alignItems: "baseline" }}>
-          <s-stack direction="block" gap="tight">
-            <s-text variant="headingLg">{k.value}</s-text>
-            {k.sub ? (
-              <s-text variant="bodySm" tone="subdued">
-                {k.sub}
-              </s-text>
-            ) : hint ? (
-              <s-text variant="bodySm" tone="subdued">
-                {hint}
-              </s-text>
-            ) : null}
-          </s-stack>
-
-          <Sparkline points={k.series} tone={k.tone} width={180} height={36} />
-        </s-stack>
-
-        <div style={{ height: 8, borderRadius: 999, background: "rgba(0,0,0,0.08)", overflow: "hidden" }}>
-          <div style={{ width: `${pct ?? 45}%`, height: "100%", background: barColor(k.tone) }} />
-        </div>
-      </s-stack>
-    </s-box>
-  );
+function kpiId(k: DashboardViewProps["kpis"][number]) {
+  return String(k.key ?? k.label).toLowerCase().trim();
 }
 
 function pickKpi(
@@ -342,6 +239,104 @@ function severityToneFromPct(pct: number): Exclude<Tone, "neutral"> {
   return "blue";
 }
 
+function PrimaryKpiCard({ k }: { k: DashboardViewProps["kpis"][number] }) {
+  const pct = typeof k.barPct === "number" ? clampPct(k.barPct) : null;
+  const deltaTone = k.deltaTone ?? k.tone;
+
+  return (
+    <s-box border="base" borderRadius="base" background="base" padding="base" style={{ background: subtleBg(k.tone) }}>
+      <s-stack direction="block" gap="tight">
+        <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center" }}>
+          <s-text variant="bodySm" tone="subdued">
+            {k.label}
+          </s-text>
+          <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
+            {k.deltaText ? <s-badge tone={badgeTone(deltaTone)}>{k.deltaText}</s-badge> : null}
+            <s-badge tone={badgeTone(k.tone)}>{k.tone === "neutral" ? "Info" : k.tone.toUpperCase()}</s-badge>
+          </s-stack>
+        </s-stack>
+
+        <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "baseline" }}>
+          <s-stack direction="block" gap="tight">
+            <s-text variant="headingLg">{k.value}</s-text>
+            {k.sub ? (
+              <s-text variant="bodySm" tone="subdued">
+                {k.sub}
+              </s-text>
+            ) : null}
+          </s-stack>
+          <Sparkline points={k.series} tone={k.tone} width={170} height={34} />
+        </s-stack>
+
+        {pct !== null ? (
+          <div style={{ height: 4, borderRadius: 999, background: "rgba(0,0,0,0.08)", overflow: "hidden" }}>
+            <div style={{ width: `${pct}%`, height: "100%", background: barColor(k.tone) }} />
+          </div>
+        ) : null}
+      </s-stack>
+    </s-box>
+  );
+}
+
+function CompactKpiCard({ k }: { k: DashboardViewProps["kpis"][number] }) {
+  const pct = typeof k.barPct === "number" ? clampPct(k.barPct) : null;
+  const deltaTone = k.deltaTone ?? k.tone;
+
+  return (
+    <s-box border="base" borderRadius="base" background="base" padding="base">
+      <s-stack direction="block" gap="tight">
+        <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center" }}>
+          <s-text variant="bodySm" tone="subdued">
+            {k.label}
+          </s-text>
+          <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
+            {k.deltaText ? <s-badge tone={badgeTone(deltaTone)}>{k.deltaText}</s-badge> : null}
+            <s-badge tone={badgeTone(k.tone)}>{k.tone === "neutral" ? "Info" : k.tone.toUpperCase()}</s-badge>
+          </s-stack>
+        </s-stack>
+
+        <s-stack direction="inline" gap="base" style={{ alignItems: "baseline" }}>
+          <s-text variant="headingMd">{k.value}</s-text>
+          {k.sub ? (
+            <s-text variant="bodySm" tone="subdued">
+              {k.sub}
+            </s-text>
+          ) : null}
+        </s-stack>
+
+        {pct !== null ? (
+          <div style={{ height: 4, borderRadius: 999, background: "rgba(0,0,0,0.08)", overflow: "hidden" }}>
+            <div style={{ width: `${pct}%`, height: "100%", background: barColor(k.tone) }} />
+          </div>
+        ) : null}
+      </s-stack>
+    </s-box>
+  );
+}
+
+function parseLive(label: string): { event: string; status: string; attempt?: string } {
+  const mAttempts = label.match(/\(attempts?\s+(\d+)\)/i);
+  const attempt = mAttempts?.[1];
+
+  const statusMatch = label.match(/\b(COMPLETED|CALLING|QUEUED|FAILED|NO ANSWER|VOICEMAIL|BUSY|CANCELED|CANCELLED)\b/i);
+  const status = (statusMatch?.[1] ?? "").toUpperCase();
+
+  const isCall = /^\s*Call\b/i.test(label);
+  if (isCall) {
+    return {
+      event: `Call${attempt ? ` • Attempt ${attempt}` : ""}`,
+      status: status || "CALL",
+      attempt,
+    };
+  }
+
+  return {
+    event: label.replace(/\s*\(attempts?\s+\d+\)\s*/i, "").trim(),
+    status: status || "EVENT",
+    attempt,
+  };
+}
+
 export function DashboardView(props: DashboardViewProps) {
   const recovered = pickKpi(props.kpis, {
     keyIncludes: ["recovered"],
@@ -351,15 +346,36 @@ export function DashboardView(props: DashboardViewProps) {
     keyIncludes: ["at_risk", "risk", "potential"],
     labelIncludes: ["at-risk", "at risk", "potential"],
   });
-  const win = pickKpi(props.kpis, { keyIncludes: ["win"], labelIncludes: ["win rate"] });
-  const answerRate = pickKpi(props.kpis, { keyIncludes: ["answer"], labelIncludes: ["answer rate", "reach rate"] });
+
+  const primary: DashboardViewProps["kpis"] = [];
+  if (recovered) primary.push(recovered);
+  if (atRisk && (!recovered || kpiId(atRisk) !== kpiId(recovered))) primary.push(atRisk);
+
+  // fallback: ensure 2 primary cards when possible
+  if (primary.length < 2) {
+    for (const k of props.kpis) {
+      if (primary.length >= 2) break;
+      if (primary.some((p) => kpiId(p) === kpiId(k))) continue;
+      primary.push(k);
+    }
+  }
+
+  const primaryIds = new Set(primary.map(kpiId));
+  const secondary = props.kpis.filter((k) => !primaryIds.has(kpiId(k)));
 
   const summary = (() => {
+    const by = (needle: string) => props.kpis.find((x) => x.label.toLowerCase().includes(needle));
+    const recoveredRev = recovered ?? by("recovered revenue") ?? by("recovered");
+    const atRiskRev = atRisk ?? by("at-risk") ?? by("potential") ?? by("at risk");
+    const win = by("win rate");
+    const answer = by("answer rate") ?? by("reach rate");
+
     const parts: string[] = [];
-    if (recovered) parts.push(`${recovered.label}: ${recovered.value}`);
-    if (atRisk) parts.push(`${atRisk.label}: ${atRisk.value}`);
+    if (recoveredRev) parts.push(`${recoveredRev.label}: ${recoveredRev.value}`);
+    if (atRiskRev) parts.push(`${atRiskRev.label}: ${atRiskRev.value}`);
     if (win) parts.push(`${win.label}: ${win.value}`);
-    if (answerRate) parts.push(`${answerRate.label}: ${answerRate.value}`);
+    if (answer) parts.push(`${answer.label}: ${answer.value}`);
+
     return parts.length ? parts.join(" • ") : "Snapshot will populate once calls complete and outcomes are recorded.";
   })();
 
@@ -406,8 +422,10 @@ export function DashboardView(props: DashboardViewProps) {
     </s-stack>
   );
 
-  const headlineLeft = recovered ?? props.kpis[0] ?? null;
-  const headlineRight = atRisk ?? props.kpis[1] ?? null;
+  // avoid repeat() because it renders as single-column in your screenshots
+  const cols2 = "@container (inline-size < 860px) 1fr, 1fr 1fr";
+  const cols3 = "@container (inline-size < 860px) 1fr, 1fr 1fr 1fr";
+  const cols4 = "@container (inline-size < 860px) 1fr 1fr, 1fr 1fr 1fr 1fr";
 
   return (
     <s-page>
@@ -427,31 +445,34 @@ export function DashboardView(props: DashboardViewProps) {
           </s-stack>
         </s-section>
 
-        {/* Headline value (merchant sees money first) */}
-        {headlineLeft || headlineRight ? (
-          <s-query-container>
-            <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 1fr 1fr">
-              {headlineLeft ? <HeroMetric k={headlineLeft} hint="Primary revenue impact." /> : null}
-              {headlineRight ? <HeroMetric k={headlineRight} hint="Money currently left on the table." /> : null}
-            </s-grid>
-          </s-query-container>
-        ) : null}
-
-        {/* KPIs */}
+        {/* Primary value (2 cards, no duplicates below) */}
         <s-query-container>
-          <s-grid
-            gap="base"
-            gridTemplateColumns="@container (inline-size < 860px) repeat(2, minmax(0, 1fr)), repeat(4, minmax(0, 1fr))"
-          >
-            {props.kpis.map((k) => (
-              <KpiCard key={k.key ?? k.label} k={k} />
+          <s-grid gap="base" gridTemplateColumns={cols2}>
+            {primary.slice(0, 2).map((k) => (
+              <PrimaryKpiCard key={kpiId(k)} k={k} />
             ))}
           </s-grid>
         </s-query-container>
 
-        {/* Value strip */}
+        {/* Secondary KPIs (compact grid) */}
+        {secondary.length ? (
+          <s-query-container>
+            <s-grid gap="base" gridTemplateColumns={cols4}>
+              {secondary.slice(0, 8).map((k) => (
+                <CompactKpiCard key={kpiId(k)} k={k} />
+              ))}
+            </s-grid>
+          </s-query-container>
+        ) : null}
+
+        {/* Summary strip (small) */}
         <s-section>
-          <s-stack direction="inline" align="space-between" gap="base" style={{ flexWrap: "wrap", alignItems: "center" }}>
+          <s-stack
+            direction="inline"
+            align="space-between"
+            gap="base"
+            style={{ flexWrap: "wrap", alignItems: "center" }}
+          >
             <s-text>{summary}</s-text>
             {props.settingsSnapshot && props.settingsSnapshot.length ? (
               <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
@@ -470,7 +491,7 @@ export function DashboardView(props: DashboardViewProps) {
           <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 2fr 1fr">
             {/* Left */}
             <s-stack direction="block" gap="base">
-              {/* Pipeline */}
+              {/* Pipeline (compact 3 columns) */}
               <s-section>
                 <s-stack direction="block" gap="tight">
                   <SectionHeader title="Recovery pipeline" badgeText="Funnel" badgeTone="new" />
@@ -480,20 +501,21 @@ export function DashboardView(props: DashboardViewProps) {
                     <Empty text="No pipeline data yet." />
                   ) : (
                     <s-query-container>
-                      <s-grid
-                        gap="base"
-                        gridTemplateColumns="@container (inline-size < 860px) repeat(2, minmax(0, 1fr)), repeat(6, minmax(0, 1fr))"
-                      >
-                        {props.pipeline.map((p) => (
-                          <s-box key={p.label} border="base" borderRadius="base" padding="base" background="base">
-                            <s-stack direction="block" gap="tight">
-                              <s-stack direction="inline" align="space-between" gap="base">
-                                <s-text variant="bodySm" tone="subdued">
-                                  {p.label}
-                                </s-text>
-                                <s-badge tone={badgeTone(p.tone)}>{p.value}</s-badge>
-                              </s-stack>
-                              <s-text variant="headingMd">{p.value}</s-text>
+                      <s-grid gap="base" gridTemplateColumns={cols3}>
+                        {props.pipeline.slice(0, 6).map((p) => (
+                          <s-box
+                            key={p.label}
+                            border="base"
+                            borderRadius="base"
+                            background="base"
+                            padding="base"
+                            style={{ padding: 12 }}
+                          >
+                            <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center" }}>
+                              <s-text variant="bodySm" tone="subdued">
+                                {p.label}
+                              </s-text>
+                              <s-badge tone={badgeTone(p.tone)}>{p.value}</s-badge>
                             </s-stack>
                           </s-box>
                         ))}
@@ -597,7 +619,8 @@ export function DashboardView(props: DashboardViewProps) {
                       ) : (
                         <s-stack direction="block" gap="tight">
                           {props.reasons.slice(0, 8).map((r) => {
-                            const t = severityToneFromPct(clampPct(r.pct));
+                            const pct = clampPct(r.pct);
+                            const t = severityToneFromPct(pct);
                             return (
                               <s-stack key={r.label} direction="inline" align="space-between" gap="base">
                                 <s-text style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
@@ -606,22 +629,16 @@ export function DashboardView(props: DashboardViewProps) {
                                 <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
                                   <div
                                     style={{
-                                      width: 140,
-                                      height: 6,
+                                      width: 120,
+                                      height: 4,
                                       borderRadius: 999,
                                       background: "rgba(0,0,0,0.08)",
                                       overflow: "hidden",
                                     }}
                                   >
-                                    <div
-                                      style={{
-                                        width: `${clampPct(r.pct)}%`,
-                                        height: "100%",
-                                        background: barColor(t),
-                                      }}
-                                    />
+                                    <div style={{ width: `${pct}%`, height: "100%", background: barColor(t) }} />
                                   </div>
-                                  <s-text tone="subdued">{clampPct(r.pct)}%</s-text>
+                                  <s-text tone="subdued">{pct}%</s-text>
                                 </s-stack>
                               </s-stack>
                             );
@@ -651,8 +668,9 @@ export function DashboardView(props: DashboardViewProps) {
               </s-query-container>
             </s-stack>
 
-            {/* Right: Live + Ops */}
+            {/* Right: Live + Settings */}
             <s-stack direction="block" gap="base">
+              {/* Live activity as table (readable) */}
               <s-section>
                 <s-stack direction="block" gap="tight">
                   <SectionHeader
@@ -665,28 +683,45 @@ export function DashboardView(props: DashboardViewProps) {
                   {props.live.length === 0 ? (
                     <Empty text="No recent activity." />
                   ) : (
-                    <s-stack direction="block" gap="tight">
-                      {props.live.slice(0, 10).map((r, i) => (
-                        <s-stack key={`${r.label}-${i}`} direction="inline" align="space-between" gap="base">
-                          <s-stack direction="inline" gap="tight" style={{ minWidth: 0, alignItems: "center" }}>
-                            <ToneDot tone={r.tone} />
-                            <s-text style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                              {r.label}
-                            </s-text>
-                          </s-stack>
-                          <s-text tone="subdued">{r.whenText}</s-text>
-                        </s-stack>
-                      ))}
-                    </s-stack>
+                    <s-section padding="none">
+                      <s-table>
+                        <s-table-header-row>
+                          <s-table-header listSlot="primary">Event</s-table-header>
+                          <s-table-header listSlot="inline">Status</s-table-header>
+                          <s-table-header listSlot="secondary">When</s-table-header>
+                        </s-table-header-row>
+                        <s-table-body>
+                          {props.live.slice(0, 10).map((r, i) => {
+                            const parsed = parseLive(r.label);
+                            return (
+                              <s-table-row key={`${r.label}-${i}`}>
+                                <s-table-cell>
+                                  <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
+                                    <ToneDot tone={r.tone} />
+                                    <s-text>{parsed.event}</s-text>
+                                  </s-stack>
+                                </s-table-cell>
+                                <s-table-cell>
+                                  <s-badge tone={badgeTone(r.tone)}>{parsed.status}</s-badge>
+                                </s-table-cell>
+                                <s-table-cell>
+                                  <s-text tone="subdued">{r.whenText}</s-text>
+                                </s-table-cell>
+                              </s-table-row>
+                            );
+                          })}
+                        </s-table-body>
+                      </s-table>
+                    </s-section>
                   )}
                 </s-stack>
               </s-section>
 
-              {/* Settings snapshot (full list) */}
+              {/* Settings snapshot */}
               {props.settingsSnapshot && props.settingsSnapshot.length ? (
                 <s-section>
                   <s-stack direction="block" gap="tight">
-                    <SectionHeader title="Automation settings" badgeText="Active config" badgeTone="new" />
+                    <SectionHeader title="Automation settings" badgeText="Active" badgeTone="new" />
                     <s-divider />
 
                     <s-stack direction="block" gap="tight">
