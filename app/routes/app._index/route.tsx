@@ -1,324 +1,428 @@
-// app/routes/app._index/route.tsx
+// app/components/dashboard/DashboardView.tsx
 import * as React from "react";
-import { useEffect } from "react";
-import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData, useRouteError, redirect } from "react-router";
-import { useAppBridge } from "@shopify/app-bridge-react";
-import { boundary } from "@shopify/shopify-app-react-router/server";
+import { Form } from "react-router";
 
-import { authenticate } from "../../shopify.server";
-import db from "../../db.server";
-import {
-  ensureSettings,
-  markAbandonedByDelay,
-  syncAbandonedCheckoutsFromShopify,
-  enqueueCallJobs,
-} from "../../callRecovery.server";
+type Tone = "green" | "blue" | "amber" | "red" | "neutral";
 
-import { DashboardView } from "../../components/dashboard/DashboardView";
+type ReasonRow = { label: string; pct: number };
+type LiveRow = { label: string; whenText: string; tone: Exclude<Tone, "neutral"> };
 
-type LoaderData = {
-  shop: string;
-  currency: string;
-  vapiConfigured: boolean;
-  enabled: boolean;
+export type DashboardViewProps = {
+  title: string;
+  shopLabel?: string;
 
-  stats: {
-    openCount7d: number;
-    abandonedCount7d: number;
-    convertedCount7d: number;
-
-    potentialRevenue7d: number;
-    recoveredRevenue7d: number;
-
-    queuedCalls: number;
-    callingNow: number;
-    completedCalls7d: number;
-
-    winRate7dPct: number;
+  status?: {
+    providerText?: string;   // "Vapi ready" / "Sim mode"
+    automationText?: string; // "Automation ON/OFF"
+    lastSyncText?: string;   // "Just now" / "2m ago"
   };
 
-  live: Array<{ label: string; whenText: string; tone: "green" | "blue" | "amber" | "red" }>;
-  reasons: Array<{ label: string; pct: number }>;
+  nav?: {
+    checkoutsHref: string;
+    callsHref: string;
+  };
 
-  recentRecoveries: Array<{ orderOrCheckout: string; amount: string; whenText: string; outcome?: string }>;
+  kpis: Array<{
+    label: string;
+    value: string;
+    sub?: string;
+    tone: Tone;
+    barPct?: number | null;
+  }>;
+
+  pipeline: Array<{ label: string; value: number; tone: Exclude<Tone, "neutral"> }>;
+  live: LiveRow[];
+  reasons: ReasonRow[];
+
+  priorities?: Array<{ label: string; count: number; tone: Tone; href?: string }>;
+
+  recentRecoveries?: Array<{
+    orderOrCheckout: string;
+    amount: string;
+    whenText: string;
+    outcome?: string;
+  }>;
+
+  recommendations?: string[];
+
+  canCreateTestCall: boolean;
 };
 
-function withSearch(path: string) {
-  if (typeof window === "undefined") return path;
-  const s = window.location.search || "";
-  if (!s) return path;
-  if (path.includes("?")) return path;
-  return `${path}${s.startsWith("?") ? s : `?${s}`}`;
-}
-
-function fromRequestWithSearch(path: string, request: Request) {
-  const url = new URL(request.url);
-  if (!url.search) return path;
-  if (path.includes("?")) return path;
-  return `${path}${url.search}`;
-}
-
-function fmtAgo(d: Date) {
-  const ms = Date.now() - d.getTime();
-  const sec = Math.max(1, Math.floor(ms / 1000));
-  const min = Math.floor(sec / 60);
-  const hr = Math.floor(min / 60);
-  const day = Math.floor(hr / 24);
-  if (day > 0) return `${day}d ago`;
-  if (hr > 0) return `${hr}h ago`;
-  if (min > 0) return `${min}m ago`;
-  return `${sec}s ago`;
-}
-
-function toneForJob(status: string, outcome?: string | null): "green" | "blue" | "amber" | "red" {
-  const s = String(status || "").toUpperCase();
-  const o = String(outcome || "").toUpperCase();
-  if (s === "FAILED") return "red";
-  if (s === "CALLING") return "blue";
-  if (s === "QUEUED") return "amber";
-  if (s === "COMPLETED") {
-    if (o.includes("RECOVER")) return "green";
-    return "blue";
-  }
-  return "blue";
-}
-
-export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
-  const shop = session.shop;
-
-  const settings = await ensureSettings(shop);
-
-  await syncAbandonedCheckoutsFromShopify({ admin, shop, limit: 50 });
-  await markAbandonedByDelay(shop, Number(settings.delayMinutes ?? 30));
-
-  await enqueueCallJobs({
-    shop,
-    enabled: Boolean(settings.enabled),
-    minOrderValue: Number(settings.minOrderValue ?? 0),
-    callWindowStart: String(settings.callWindowStart ?? "09:00"),
-    callWindowEnd: String(settings.callWindowEnd ?? "19:00"),
-    delayMinutes: Number(settings.delayMinutes ?? 30),
-    maxAttempts: Number(settings.maxAttempts ?? 2),
-    retryMinutes: Number(settings.retryMinutes ?? 180),
-  });
-
-  const { isVapiConfiguredFromEnv } = await import("../../lib/callInsights.server");
-  const vapiConfigured = isVapiConfiguredFromEnv();
-
-  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-
-  const [
-    openCount7d,
-    abandonedCount7d,
-    convertedCount7d,
-    potentialAgg,
-    queuedCalls,
-    callingNow,
-    completedCalls7d,
-    recoveredAgg,
-    recentJobs,
-    recentRecoveredJobs,
-  ] = await Promise.all([
-    db.checkout.count({ where: { shop, status: "OPEN", createdAt: { gte: since } } }),
-    db.checkout.count({ where: { shop, status: "ABANDONED", abandonedAt: { gte: since } } }),
-    db.checkout.count({ where: { shop, status: "CONVERTED", updatedAt: { gte: since } } }),
-    db.checkout.aggregate({ where: { shop, status: "ABANDONED", abandonedAt: { gte: since } }, _sum: { value: true } }),
-    db.callJob.count({ where: { shop, status: "QUEUED" } }),
-    db.callJob.count({ where: { shop, status: "CALLING" } }),
-    db.callJob.count({ where: { shop, status: "COMPLETED", createdAt: { gte: since } } }),
-    db.callJob.aggregate({ where: { shop, attributedAt: { gte: since } }, _sum: { attributedAmount: true } }),
-    db.callJob.findMany({
-      where: { shop },
-      orderBy: { updatedAt: "desc" },
-      take: 10,
-      select: { status: true, outcome: true, checkoutId: true, updatedAt: true },
-    }),
-    db.callJob.findMany({
-      where: { shop, attributedAt: { gte: since }, attributedOrderId: { not: null } },
-      orderBy: { attributedAt: "desc" },
-      take: 5,
-      select: { checkoutId: true, attributedOrderId: true, attributedAmount: true, attributedAt: true, outcome: true },
-    }),
-  ]);
-
-  const currency = String(settings.currency || "USD");
-  const money = (n: number) =>
-    new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: 2 }).format(n);
-
-  const potentialRevenue7d = Number(potentialAgg._sum.value ?? 0);
-  const recoveredRevenue7d = Number((recoveredAgg as any)?._sum?.attributedAmount ?? 0);
-
-  const winRate7dPct = completedCalls7d > 0 ? Math.round((convertedCount7d / completedCalls7d) * 100) : 0;
-
-  const live = recentJobs.map((j) => ({
-    label: `${j.status}${j.outcome ? ` • ${j.outcome}` : ""} • ${String(j.checkoutId).slice(0, 10)}`,
-    whenText: fmtAgo(new Date(j.updatedAt)),
-    tone: toneForJob(j.status, j.outcome),
-  }));
-
-  const recentRecoveries = recentRecoveredJobs.map((r) => ({
-    orderOrCheckout: r.attributedOrderId ? `Order ${r.attributedOrderId}` : `Checkout ${String(r.checkoutId).slice(0, 10)}`,
-    amount: money(Number(r.attributedAmount ?? 0)),
-    whenText: r.attributedAt ? fmtAgo(new Date(r.attributedAt)) : "-",
-    outcome: r.outcome ?? "RECOVERED",
-  }));
-
-  const reasons: Array<{ label: string; pct: number }> = [];
-
-  return {
-    shop,
-    currency,
-    vapiConfigured,
-    enabled: Boolean(settings.enabled),
-    stats: {
-      openCount7d,
-      abandonedCount7d,
-      convertedCount7d,
-      potentialRevenue7d,
-      recoveredRevenue7d,
-      queuedCalls,
-      callingNow,
-      completedCalls7d,
-      winRate7dPct,
-    },
-    live,
-    reasons,
-    recentRecoveries,
-  } satisfies LoaderData;
-};
-
-export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
-  const shop = session.shop;
-
-  const form = await request.formData();
-  const intent = String(form.get("intent") ?? "");
-
-  if (intent === "sync_now") {
-    const settings = await ensureSettings(shop);
-
-    await syncAbandonedCheckoutsFromShopify({ admin, shop, limit: 50 });
-    await markAbandonedByDelay(shop, Number(settings.delayMinutes ?? 30));
-
-    await enqueueCallJobs({
-      shop,
-      enabled: Boolean(settings.enabled),
-      minOrderValue: Number(settings.minOrderValue ?? 0),
-      callWindowStart: String(settings.callWindowStart ?? "09:00"),
-      callWindowEnd: String(settings.callWindowEnd ?? "19:00"),
-      delayMinutes: Number(settings.delayMinutes ?? 30),
-      maxAttempts: Number(settings.maxAttempts ?? 2),
-      retryMinutes: Number(settings.retryMinutes ?? 180),
-    });
-
-    return redirect(fromRequestWithSearch("/app", request));
-  }
-
-  if (intent === "create_test_call") {
-    return redirect(fromRequestWithSearch("/app/calls", request));
-  }
-
-  return redirect(fromRequestWithSearch("/app", request));
-};
-
-export default function Index() {
-  const d = useLoaderData<typeof loader>();
-  const fetcher = useFetcher<typeof action>();
-  const shopify = useAppBridge();
-
-  const isLoading =
-    (fetcher.state === "loading" || fetcher.state === "submitting") && fetcher.formMethod === "POST";
-
-  useEffect(() => {
-    if (fetcher.data && fetcher.formData?.get("intent") === "sync_now") {
-      shopify.toast.show("Synced");
+declare global {
+  namespace JSX {
+    interface IntrinsicElements {
+      "s-page": any;
+      "s-section": any;
+      "s-box": any;
+      "s-text": any;
+      "s-badge": any;
+      "s-divider": any;
+      "s-grid": any;
+      "s-stack": any;
+      "s-query-container": any;
+      "s-table": any;
+      "s-table-header-row": any;
+      "s-table-header": any;
+      "s-table-body": any;
+      "s-table-row": any;
+      "s-table-cell": any;
+      "s-button": any;
+      "s-button-group": any;
     }
-  }, [fetcher.data, fetcher.formData, shopify]);
+  }
+}
 
-  const money = (n: number) =>
-    new Intl.NumberFormat(undefined, { style: "currency", currency: d.currency, maximumFractionDigits: 2 }).format(n);
+function clampPct(n: number) {
+  return Math.max(0, Math.min(100, n));
+}
 
-  const recoveredPct =
-    d.stats.potentialRevenue7d > 0 ? Math.round((d.stats.recoveredRevenue7d / d.stats.potentialRevenue7d) * 100) : null;
+function badgeTone(t: Tone): "success" | "info" | "warning" | "critical" | "new" {
+  if (t === "green") return "success";
+  if (t === "blue") return "info";
+  if (t === "amber") return "warning";
+  if (t === "red") return "critical";
+  return "new";
+}
 
+function barColor(t: Tone) {
+  if (t === "green") return "rgba(0,128,96,0.95)";
+  if (t === "blue") return "rgba(0,91,211,0.95)";
+  if (t === "amber") return "rgba(178,132,0,0.95)";
+  if (t === "red") return "rgba(216,44,13,0.95)";
+  return "rgba(128,133,144,0.95)";
+}
+
+function ToneDot({ tone }: { tone: Exclude<Tone, "neutral"> }) {
   return (
-    <DashboardView
-      title="Dashboard"
-      shopLabel={d.shop}
-      status={{
-        providerText: d.vapiConfigured ? "Vapi ready" : "Sim mode",
-        automationText: d.enabled ? "Automation ON" : "Automation OFF",
-        lastSyncText: isLoading ? "Syncing…" : "Up to date",
+    <span
+      style={{
+        width: 10,
+        height: 10,
+        borderRadius: 999,
+        background: barColor(tone),
+        display: "inline-block",
+        boxShadow: "0 0 0 2px rgba(0,0,0,0.06)",
       }}
-      nav={{
-        checkoutsHref: withSearch("/app/checkouts"),
-        callsHref: withSearch("/app/calls"),
-      }}
-      kpis={[
-        {
-          label: "Recovered revenue (7d)",
-          value: money(d.stats.recoveredRevenue7d),
-          sub: recoveredPct == null ? "—" : `${recoveredPct}% of at-risk`,
-          tone: d.stats.recoveredRevenue7d > 0 ? "green" : "neutral",
-          barPct: recoveredPct ?? null,
-        },
-        {
-          label: "Recovered orders (7d)",
-          value: String(d.stats.convertedCount7d),
-          sub: "Converted checkouts",
-          tone: d.stats.convertedCount7d > 0 ? "green" : "neutral",
-          barPct: d.stats.winRate7dPct || null,
-        },
-        {
-          label: "Win rate (7d)",
-          value: `${d.stats.winRate7dPct}%`,
-          sub: "Recovered / Completed",
-          tone: d.stats.winRate7dPct >= 20 ? "blue" : d.stats.winRate7dPct > 0 ? "amber" : "neutral",
-          barPct: d.stats.winRate7dPct,
-        },
-        {
-          label: "At-risk revenue (7d)",
-          value: money(d.stats.potentialRevenue7d),
-          sub: "Abandoned carts total",
-          tone: d.stats.potentialRevenue7d > 0 ? "amber" : "neutral",
-          barPct: 100,
-        },
-        {
-          label: "Calls queued",
-          value: String(d.stats.queuedCalls),
-          sub: "Ready to dial",
-          tone: d.stats.queuedCalls > 0 ? "amber" : "neutral",
-          barPct: d.stats.queuedCalls > 0 ? 70 : 10,
-        },
-        {
-          label: "Calling now",
-          value: String(d.stats.callingNow),
-          sub: "Live calls",
-          tone: d.stats.callingNow > 0 ? "blue" : "neutral",
-          barPct: d.stats.callingNow > 0 ? 70 : 10,
-        },
-      ]}
-      pipeline={[
-        { label: "Open", value: d.stats.openCount7d, tone: "blue" },
-        { label: "Abandoned", value: d.stats.abandonedCount7d, tone: "amber" },
-        { label: "Queued", value: d.stats.queuedCalls, tone: "amber" },
-        { label: "Calling", value: d.stats.callingNow, tone: "blue" },
-        { label: "Completed (7d)", value: d.stats.completedCalls7d, tone: "blue" },
-        { label: "Recovered (7d)", value: d.stats.convertedCount7d, tone: "green" },
-      ]}
-      live={d.live}
-      reasons={d.reasons}
-      recentRecoveries={d.recentRecoveries}
-      recommendations={[]}
-      canCreateTestCall={d.vapiConfigured}
+      aria-hidden="true"
     />
   );
 }
 
-export const headers: HeadersFunction = (headersArgs) => boundary.headers(headersArgs);
+function KpiCard({ k }: { k: DashboardViewProps["kpis"][number] }) {
+  const pct = typeof k.barPct === "number" ? clampPct(k.barPct) : null;
 
-export function ErrorBoundary() {
-  return boundary.error(useRouteError());
+  return (
+    <s-box border="base" borderRadius="base" background="base" padding="base">
+      <s-stack direction="block" gap="tight">
+        <s-stack direction="inline" align="space-between" gap="base">
+          <s-text variant="bodySm" tone="subdued">{k.label}</s-text>
+          <s-badge tone={badgeTone(k.tone)}>{k.tone === "neutral" ? "Info" : k.tone.toUpperCase()}</s-badge>
+        </s-stack>
+
+        <s-stack direction="inline" gap="base" align="start" style={{ alignItems: "baseline" }}>
+          <s-text variant="headingLg">{k.value}</s-text>
+          {k.sub ? <s-text variant="bodySm" tone="subdued">{k.sub}</s-text> : null}
+        </s-stack>
+
+        <div style={{ height: 6, borderRadius: 999, background: "rgba(0,0,0,0.08)", overflow: "hidden" }}>
+          <div
+            style={{
+              width: `${pct ?? 40}%`,
+              height: "100%",
+              background: barColor(k.tone),
+            }}
+          />
+        </div>
+      </s-stack>
+    </s-box>
+  );
+}
+
+function Empty({ text }: { text: string }) {
+  return (
+    <s-box padding="base">
+      <s-text tone="subdued">{text}</s-text>
+    </s-box>
+  );
+}
+
+export function DashboardView(props: DashboardViewProps) {
+  const summary =
+    (() => {
+      const by = (needle: string) => props.kpis.find((x) => x.label.toLowerCase().includes(needle));
+      const recoveredRev = by("recovered revenue") ?? by("recovered");
+      const atRisk = by("at-risk") ?? by("potential") ?? by("at risk");
+      const win = by("win rate");
+
+      const parts: string[] = [];
+      if (recoveredRev) parts.push(`${recoveredRev.label}: ${recoveredRev.value}`);
+      if (atRisk) parts.push(`${atRisk.label}: ${atRisk.value}`);
+      if (win) parts.push(`${win.label}: ${win.value}`);
+      return parts.length ? parts.join(" • ") : "Snapshot will populate once calls complete and outcomes are recorded.";
+    })();
+
+  return (
+    <s-page>
+      <s-stack direction="block" gap="base">
+        {/* Header */}
+        <s-section>
+          <s-stack direction="block" gap="tight">
+            <s-text variant="headingLg">{props.title}</s-text>
+            {props.shopLabel ? <s-text tone="subdued">{props.shopLabel}</s-text> : null}
+
+            <s-divider />
+
+            <s-stack direction="inline" align="space-between" gap="base" style={{ flexWrap: "wrap" }}>
+              <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
+                {props.status?.providerText ? <s-badge tone="info">{props.status.providerText}</s-badge> : null}
+                {props.status?.automationText ? (
+                  <s-badge tone={props.status.automationText.includes("ON") ? "success" : "warning"}>
+                    {props.status.automationText}
+                  </s-badge>
+                ) : null}
+                {props.status?.lastSyncText ? <s-badge tone="new">{props.status.lastSyncText}</s-badge> : null}
+              </s-stack>
+
+              <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
+                {props.nav?.checkoutsHref ? (
+                  <s-button href={props.nav.checkoutsHref} variant="secondary">Open checkouts</s-button>
+                ) : null}
+                {props.nav?.callsHref ? (
+                  <s-button href={props.nav.callsHref} variant="secondary">Open calls</s-button>
+                ) : null}
+
+                <s-button-group>
+                  <Form method="post">
+                    <input type="hidden" name="intent" value="sync_now" />
+                    <s-button type="submit" variant="secondary" slot="secondary-actions">Sync now</s-button>
+                  </Form>
+
+                  <Form method="post">
+                    <input type="hidden" name="intent" value="create_test_call" />
+                    <s-button type="submit" variant="primary" slot="primary-action" disabled={!props.canCreateTestCall}>
+                      Create test call
+                    </s-button>
+                  </Form>
+                </s-button-group>
+              </s-stack>
+            </s-stack>
+          </s-stack>
+        </s-section>
+
+        {/* KPIs */}
+        <s-query-container>
+          <s-grid
+            gap="base"
+            gridTemplateColumns="@container (inline-size < 860px) repeat(2, minmax(0, 1fr)), repeat(6, minmax(0, 1fr))"
+          >
+            {props.kpis.map((k) => <KpiCard key={k.label} k={k} />)}
+          </s-grid>
+        </s-query-container>
+
+        {/* Value strip */}
+        <s-section>
+          <s-text>{summary}</s-text>
+        </s-section>
+
+        {/* Main grid */}
+        <s-query-container>
+          <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 2fr 1fr">
+            {/* Left */}
+            <s-stack direction="block" gap="base">
+              {/* Pipeline */}
+              <s-section>
+                <s-stack direction="block" gap="tight">
+                  <s-stack direction="inline" align="space-between" gap="base">
+                    <s-text variant="headingMd">Recovery pipeline</s-text>
+                    <s-badge tone="new">Operational</s-badge>
+                  </s-stack>
+                  <s-divider />
+
+                  {props.pipeline.length === 0 ? (
+                    <Empty text="No pipeline data yet." />
+                  ) : (
+                    <s-query-container>
+                      <s-grid
+                        gap="base"
+                        gridTemplateColumns="@container (inline-size < 860px) repeat(2, minmax(0, 1fr)), repeat(6, minmax(0, 1fr))"
+                      >
+                        {props.pipeline.map((p) => (
+                          <s-box key={p.label} border="base" borderRadius="base" padding="base" background="base">
+                            <s-stack direction="block" gap="tight">
+                              <s-stack direction="inline" align="space-between" gap="base">
+                                <s-text variant="bodySm" tone="subdued">{p.label}</s-text>
+                                <s-badge tone={badgeTone(p.tone)}>{p.value}</s-badge>
+                              </s-stack>
+                              <s-text variant="headingMd">{p.value}</s-text>
+                            </s-stack>
+                          </s-box>
+                        ))}
+                      </s-grid>
+                    </s-query-container>
+                  )}
+                </s-stack>
+              </s-section>
+
+              {/* Priorities + Proof */}
+              <s-query-container>
+                <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 1fr 1fr">
+                  {/* Priorities */}
+                  <s-section>
+                    <s-stack direction="block" gap="tight">
+                      <s-stack direction="inline" align="space-between" gap="base">
+                        <s-text variant="headingMd">Today’s priorities</s-text>
+                        <s-badge tone="new">{(props.priorities?.length ?? 0) ? "Actionable" : "Empty"}</s-badge>
+                      </s-stack>
+                      <s-divider />
+
+                      {(!props.priorities || props.priorities.length === 0) ? (
+                        <Empty text="No priorities yet." />
+                      ) : (
+                        <s-stack direction="block" gap="tight">
+                          {props.priorities.slice(0, 6).map((p) => (
+                            <s-stack key={p.label} direction="inline" align="space-between" gap="base">
+                              <s-stack direction="inline" gap="tight" style={{ minWidth: 0 }}>
+                                <ToneDot tone={(p.tone === "neutral" ? "blue" : p.tone) as any} />
+                                <s-text style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                  {p.label}
+                                </s-text>
+                              </s-stack>
+                              <s-stack direction="inline" gap="tight">
+                                <s-badge tone={badgeTone(p.tone)}>{p.count}</s-badge>
+                                {p.href ? <s-button href={p.href} variant="tertiary">View</s-button> : null}
+                              </s-stack>
+                            </s-stack>
+                          ))}
+                        </s-stack>
+                      )}
+                    </s-stack>
+                  </s-section>
+
+                  {/* Recent recoveries */}
+                  <s-section>
+                    <s-stack direction="block" gap="tight">
+                      <s-stack direction="inline" align="space-between" gap="base">
+                        <s-text variant="headingMd">Recent recoveries</s-text>
+                        <s-badge tone="success">{(props.recentRecoveries?.length ?? 0) ? "Proof" : "None"}</s-badge>
+                      </s-stack>
+                      <s-divider />
+
+                      {(!props.recentRecoveries || props.recentRecoveries.length === 0) ? (
+                        <Empty text="No recovered orders yet." />
+                      ) : (
+                        <s-section padding="none">
+                          <s-table>
+                            <s-table-header-row>
+                              <s-table-header listSlot="primary">Order/Checkout</s-table-header>
+                              <s-table-header listSlot="inline" format="currency">Amount</s-table-header>
+                              <s-table-header listSlot="secondary">When</s-table-header>
+                              <s-table-header listSlot="secondary">Outcome</s-table-header>
+                            </s-table-header-row>
+                            <s-table-body>
+                              {props.recentRecoveries.slice(0, 5).map((r, idx) => (
+                                <s-table-row key={`${r.orderOrCheckout}-${idx}`}>
+                                  <s-table-cell>{r.orderOrCheckout}</s-table-cell>
+                                  <s-table-cell>{r.amount}</s-table-cell>
+                                  <s-table-cell>{r.whenText}</s-table-cell>
+                                  <s-table-cell>{r.outcome ?? "-"}</s-table-cell>
+                                </s-table-row>
+                              ))}
+                            </s-table-body>
+                          </s-table>
+                        </s-section>
+                      )}
+                    </s-stack>
+                  </s-section>
+                </s-grid>
+              </s-query-container>
+
+              {/* Blockers + Recommendations */}
+              <s-query-container>
+                <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 1fr 1fr">
+                  <s-section>
+                    <s-stack direction="block" gap="tight">
+                      <s-stack direction="inline" align="space-between" gap="base">
+                        <s-text variant="headingMd">Top blockers</s-text>
+                        <s-badge tone="info">7d</s-badge>
+                      </s-stack>
+                      <s-divider />
+
+                      {props.reasons.length === 0 ? (
+                        <Empty text="No blocker data yet." />
+                      ) : (
+                        <s-stack direction="block" gap="tight">
+                          {props.reasons.slice(0, 8).map((r) => (
+                            <s-stack key={r.label} direction="inline" align="space-between" gap="base">
+                              <s-text style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                {r.label}
+                              </s-text>
+                              <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
+                                <div style={{ width: 140, height: 6, borderRadius: 999, background: "rgba(0,0,0,0.08)", overflow: "hidden" }}>
+                                  <div style={{ width: `${clampPct(r.pct)}%`, height: "100%", background: "rgba(178,132,0,0.95)" }} />
+                                </div>
+                                <s-text tone="subdued">{clampPct(r.pct)}%</s-text>
+                              </s-stack>
+                            </s-stack>
+                          ))}
+                        </s-stack>
+                      )}
+                    </s-stack>
+                  </s-section>
+
+                  <s-section>
+                    <s-stack direction="block" gap="tight">
+                      <s-stack direction="inline" align="space-between" gap="base">
+                        <s-text variant="headingMd">What to change next</s-text>
+                        <s-badge tone="info">Settings</s-badge>
+                      </s-stack>
+                      <s-divider />
+
+                      {(!props.recommendations || props.recommendations.length === 0) ? (
+                        <Empty text="No recommendations yet." />
+                      ) : (
+                        <s-stack direction="block" gap="tight">
+                          {props.recommendations.slice(0, 6).map((t, i) => (
+                            <s-text key={`${t}-${i}`}>• {t}</s-text>
+                          ))}
+                        </s-stack>
+                      )}
+                    </s-stack>
+                  </s-section>
+                </s-grid>
+              </s-query-container>
+            </s-stack>
+
+            {/* Right: Live */}
+            <s-section>
+              <s-stack direction="block" gap="tight">
+                <s-stack direction="inline" align="space-between" gap="base">
+                  <s-text variant="headingMd">Live activity</s-text>
+                  <s-badge tone={(props.live.length ? "new" : "info")}>{props.live.length ? "Live" : "Idle"}</s-badge>
+                </s-stack>
+                <s-divider />
+
+                {props.live.length === 0 ? (
+                  <Empty text="No recent activity." />
+                ) : (
+                  <s-stack direction="block" gap="tight">
+                    {props.live.slice(0, 10).map((r, i) => (
+                      <s-stack key={`${r.label}-${i}`} direction="inline" align="space-between" gap="base">
+                        <s-stack direction="inline" gap="tight" style={{ minWidth: 0 }}>
+                          <ToneDot tone={r.tone} />
+                          <s-text style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {r.label}
+                          </s-text>
+                        </s-stack>
+                        <s-text tone="subdued">{r.whenText}</s-text>
+                      </s-stack>
+                    ))}
+                  </s-stack>
+                )}
+              </s-stack>
+            </s-section>
+          </s-grid>
+        </s-query-container>
+      </s-stack>
+    </s-page>
+  );
 }

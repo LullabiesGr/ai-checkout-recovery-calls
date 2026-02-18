@@ -5,18 +5,12 @@ import { Form, useLoaderData, useRevalidator, useRouteError } from "react-router
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import {
-  ensureSettings,
-  markAbandonedByDelay,
-  syncAbandonedCheckoutsFromShopify,
-  enqueueCallJobs,
-} from "../callRecovery.server";
+import { ensureSettings } from "../callRecovery.server";
 import { createVapiCallForJob } from "../callProvider.server";
 
 function safeStr(v: any) {
   return v == null ? "" : String(v);
 }
-
 function formatWhen(iso: string) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "-";
@@ -136,24 +130,11 @@ type LoaderData = {
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  const settings = await ensureSettings(shop);
-
-  await syncAbandonedCheckoutsFromShopify({ admin, shop, limit: 50 });
-  await markAbandonedByDelay(shop, settings.delayMinutes);
-
-  await enqueueCallJobs({
-    shop,
-    enabled: Boolean(settings.enabled),
-    minOrderValue: Number(settings.minOrderValue ?? 0),
-    callWindowStart: String(settings.callWindowStart ?? "09:00"),
-    callWindowEnd: String(settings.callWindowEnd ?? "19:00"),
-    delayMinutes: Number(settings.delayMinutes ?? 30),
-    maxAttempts: Number(settings.maxAttempts ?? 2),
-    retryMinutes: Number(settings.retryMinutes ?? 180),
-  });
+  // FAST: no Shopify sync/enqueue here
+  await ensureSettings(shop);
 
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
@@ -165,7 +146,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       where: { shop },
       orderBy: { createdAt: "desc" },
       take: 80,
-      select: { id: true, checkoutId: true, status: true, scheduledFor: true, createdAt: true, attempts: true, providerCallId: true, recordingUrl: true },
+      select: {
+        id: true,
+        checkoutId: true,
+        status: true,
+        scheduledFor: true,
+        createdAt: true,
+        attempts: true,
+        providerCallId: true,
+        recordingUrl: true,
+      },
     }),
   ]);
 
@@ -472,14 +462,10 @@ export default function Calls() {
                         <StatusPill status={r.status} />
                       </td>
                       <td style={cell}>
-                        <Pill tone={outcomeTone(r.callOutcome)}>
-                          {r.callOutcome ? String(r.callOutcome).toUpperCase() : "—"}
-                        </Pill>
+                        <Pill tone={outcomeTone(r.callOutcome)}>{r.callOutcome ? String(r.callOutcome).toUpperCase() : "—"}</Pill>
                       </td>
                       <td style={cell}>
-                        <Pill tone={outcomeTone(r.openaiOutcome)}>
-                          {r.openaiOutcome ? String(r.openaiOutcome).toUpperCase() : "—"}
-                        </Pill>
+                        <Pill tone={outcomeTone(r.openaiOutcome)}>{r.openaiOutcome ? String(r.openaiOutcome).toUpperCase() : "—"}</Pill>
                       </td>
                       <td style={cell}>
                         <Pill>{r.aiStatus ? `AI: ${String(r.aiStatus).toUpperCase()}` : "AI: —"}</Pill>
@@ -682,5 +668,4 @@ export default function Calls() {
 export function ErrorBoundary() {
   return boundary.error(useRouteError());
 }
-
 export const headers: HeadersFunction = (headersArgs) => boundary.headers(headersArgs);

@@ -1,11 +1,27 @@
 // app/routes/app.settings.tsx
 import * as React from "react";
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Form, useLoaderData, useRouteError } from "react-router";
+import { useLoaderData, useRouteError, useFetcher } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { ensureSettings } from "../callRecovery.server";
+
+import {
+  Page,
+  Layout,
+  Card,
+  FormLayout,
+  TextField,
+  Select,
+  Checkbox,
+  InlineStack,
+  BlockStack,
+  Banner,
+  Text,
+  Button,
+  Divider,
+} from "@shopify/polaris";
 
 /* =========================
    Types
@@ -34,7 +50,7 @@ type ExtrasRow = {
 
 type LoaderData = {
   shop: string;
-  saved?: boolean;
+  saved: boolean;
   settings: {
     enabled: boolean;
     delayMinutes: number;
@@ -45,7 +61,6 @@ type LoaderData = {
     callWindowStart: string;
     callWindowEnd: string;
 
-    // playbook (stored in SQL columns on "Settings")
     tone: Tone;
     goal: Goal;
     maxCallSeconds: number;
@@ -62,7 +77,6 @@ type LoaderData = {
     followupEmailEnabled: boolean;
     followupSmsEnabled: boolean;
 
-    // merchant custom prompt (Prisma column: userPrompt)
     userPrompt: string;
   };
 };
@@ -116,6 +130,12 @@ function pickCurrency(v: any): string {
   const s = String(v ?? "").trim().toUpperCase();
   if (s === "USD" || s === "EUR" || s === "GBP") return s;
   return "USD";
+}
+function withRequestSearch(path: string, request: Request) {
+  const u = new URL(request.url);
+  if (!u.search) return path;
+  if (path.includes("?")) return path;
+  return `${path}${u.search}`;
 }
 
 async function readSettingsExtras(shop: string): Promise<ExtrasRow | null> {
@@ -192,6 +212,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const b: any = base as any;
   const extras = await readSettingsExtras(shop);
 
+  const url = new URL(request.url);
+  const saved = url.searchParams.get("saved") === "1";
+
   const settings: LoaderData["settings"] = {
     enabled: Boolean(base.enabled),
     delayMinutes: Number(base.delayMinutes ?? 30),
@@ -221,7 +244,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     userPrompt: String((base as any).userPrompt ?? ""),
   };
 
-  return { shop, settings } satisfies LoaderData;
+  return { shop, saved, settings } satisfies LoaderData;
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -246,27 +269,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const tone = pickTone(fd.get("tone") ?? extras?.tone ?? "neutral");
   const goal = pickGoal(fd.get("goal") ?? extras?.goal ?? "complete_checkout");
   const maxCallSeconds = clamp(toInt(fd.get("maxCallSeconds"), Number(extras?.max_call_seconds ?? 120)), 45, 300);
-  const maxFollowupQuestions = clamp(
-    toInt(fd.get("maxFollowupQuestions"), Number(extras?.max_followup_questions ?? 1)),
-    0,
-    3
-  );
+  const maxFollowupQuestions = clamp(toInt(fd.get("maxFollowupQuestions"), Number(extras?.max_followup_questions ?? 1)), 0, 3);
 
   const discountEnabled = toBool(fd.get("discountEnabled"));
-  const maxDiscountPercent = clamp(
-    toInt(fd.get("maxDiscountPercent"), Number(extras?.max_discount_percent ?? 10)),
-    0,
-    50
-  );
+  const maxDiscountPercent = clamp(toInt(fd.get("maxDiscountPercent"), Number(extras?.max_discount_percent ?? 10)), 0, 50);
   const offerRule = pickOfferRule(fd.get("offerRule") ?? extras?.offer_rule ?? "ask_only");
   const minCartValueForDiscount = toFloatOrNull(fd.get("minCartValueForDiscount"));
   const couponPrefixRaw = String(fd.get("couponPrefix") ?? "").trim();
   const couponPrefix = couponPrefixRaw ? couponPrefixRaw.slice(0, 12) : null;
-  const couponValidityHours = clamp(
-    toInt(fd.get("couponValidityHours"), Number(extras?.coupon_validity_hours ?? 24)),
-    1,
-    168
-  );
+  const couponValidityHours = clamp(toInt(fd.get("couponValidityHours"), Number(extras?.coupon_validity_hours ?? 24)), 1, 168);
   const freeShippingEnabled = toBool(fd.get("freeShippingEnabled"));
 
   const followupEmailEnabled = toBool(fd.get("followupEmailEnabled"));
@@ -274,7 +285,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const userPrompt = String(fd.get("userPrompt") ?? "").trim();
 
-  // Prisma fields
   await db.settings.update({
     where: { shop },
     data: {
@@ -287,14 +297,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       callWindowStart,
       callWindowEnd,
       userPrompt,
-
-      // keep these null (global ENV, not per user)
       vapiAssistantId: null,
       vapiPhoneNumberId: null,
     } as any,
   });
 
-  // SQL-only extra columns
   await writeSettingsExtras(shop, {
     tone,
     goal,
@@ -311,273 +318,319 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     followupSmsEnabled,
   });
 
-  return new Response(null, { status: 303, headers: { Location: "/app/settings?saved=1" } });
+  return new Response(null, { status: 303, headers: { Location: withRequestSearch("/app/settings?saved=1", request) } });
 };
 
 /* =========================
-   UI
+   UI (Polaris)
    ========================= */
 export default function Settings() {
-  const { shop, settings } = useLoaderData<typeof loader>();
-  const saved = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("saved") === "1" : false;
+  const { shop, saved, settings } = useLoaderData<typeof loader>();
+  const fetcher = useFetcher<typeof action>();
 
-  const card: React.CSSProperties = {
-    border: "1px solid rgba(0,0,0,0.08)",
-    borderRadius: 16,
-    background: "white",
-    padding: 14,
-    boxShadow: "0 1px 0 rgba(0,0,0,0.03)",
-  };
+  const [enabled, setEnabled] = React.useState(settings.enabled);
+  const [delayMinutes, setDelayMinutes] = React.useState(String(settings.delayMinutes));
+  const [maxAttempts, setMaxAttempts] = React.useState(String(settings.maxAttempts));
+  const [retryMinutes, setRetryMinutes] = React.useState(String(settings.retryMinutes));
+  const [minOrderValue, setMinOrderValue] = React.useState(String(settings.minOrderValue));
+  const [currency, setCurrency] = React.useState(pickCurrency(settings.currency));
+  const [callWindowStart, setCallWindowStart] = React.useState(settings.callWindowStart);
+  const [callWindowEnd, setCallWindowEnd] = React.useState(settings.callWindowEnd);
 
-  const label: React.CSSProperties = {
-    fontSize: 12,
-    fontWeight: 1000,
-    color: "rgba(17,24,39,0.55)",
-    marginBottom: 6,
-  };
+  const [goal, setGoal] = React.useState<Goal>(settings.goal);
+  const [tone, setTone] = React.useState<Tone>(settings.tone);
+  const [maxCallSeconds, setMaxCallSeconds] = React.useState(String(settings.maxCallSeconds));
+  const [maxFollowupQuestions, setMaxFollowupQuestions] = React.useState(String(settings.maxFollowupQuestions));
 
-  const input: React.CSSProperties = {
-    width: "100%",
-    borderRadius: 12,
-    border: "1px solid rgba(0,0,0,0.12)",
-    padding: "10px 12px",
-    fontWeight: 900,
-    outline: "none",
-  };
+  const [discountEnabled, setDiscountEnabled] = React.useState(settings.discountEnabled);
+  const [maxDiscountPercent, setMaxDiscountPercent] = React.useState(String(settings.maxDiscountPercent));
+  const [offerRule, setOfferRule] = React.useState<OfferRule>(settings.offerRule);
+  const [minCartValueForDiscount, setMinCartValueForDiscount] = React.useState(
+    settings.minCartValueForDiscount == null ? "" : String(settings.minCartValueForDiscount)
+  );
+  const [couponPrefix, setCouponPrefix] = React.useState(settings.couponPrefix ?? "");
+  const [couponValidityHours, setCouponValidityHours] = React.useState(String(settings.couponValidityHours));
+  const [freeShippingEnabled, setFreeShippingEnabled] = React.useState(settings.freeShippingEnabled);
 
-  const select: React.CSSProperties = input;
+  const [followupEmailEnabled, setFollowupEmailEnabled] = React.useState(settings.followupEmailEnabled);
+  const [followupSmsEnabled, setFollowupSmsEnabled] = React.useState(settings.followupSmsEnabled);
+
+  const [userPrompt, setUserPrompt] = React.useState(settings.userPrompt ?? "");
+
+  const isSaving = fetcher.state === "submitting" || fetcher.state === "loading";
+
+  const goalOptions = [
+    { label: "Complete checkout", value: "complete_checkout" },
+    { label: "Qualify + follow-up", value: "qualify_and_follow_up" },
+    { label: "Support only", value: "support_only" },
+  ];
+  const toneOptions = [
+    { label: "Neutral", value: "neutral" },
+    { label: "Friendly", value: "friendly" },
+    { label: "Premium", value: "premium" },
+    { label: "Urgent", value: "urgent" },
+  ];
+  const currencyOptions = [
+    { label: "USD", value: "USD" },
+    { label: "EUR", value: "EUR" },
+    { label: "GBP", value: "GBP" },
+  ];
+  const offerOptions = [
+    { label: "Only if customer asks", value: "ask_only" },
+    { label: "If price objection", value: "price_objection" },
+    { label: "After first objection", value: "after_first_objection" },
+    { label: "Offer proactively", value: "always" },
+  ];
 
   return (
-    <div style={{ padding: 16, maxWidth: 980 }}>
-      <div style={{ display: "grid", gap: 8 }}>
-        <div style={{ fontWeight: 1100, fontSize: 18, color: "rgba(17,24,39,0.92)" }}>Settings</div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <span
-            style={{
-              display: "inline-flex",
-              padding: "3px 10px",
-              borderRadius: 999,
-              border: "1px solid rgba(0,0,0,0.10)",
-              background: "rgba(0,0,0,0.04)",
-              fontWeight: 950,
-              fontSize: 12,
-            }}
-          >
-            {shop}
-          </span>
-          <span style={{ fontSize: 12, fontWeight: 900, color: "rgba(17,24,39,0.45)" }}>
-            Vapi Assistant ID + Phone Number ID are global (ENV), not per user.
-          </span>
+    <Page
+      title="Settings"
+      subtitle={shop}
+      primaryAction={{
+        content: isSaving ? "Saving…" : "Save",
+        onAction: () => {
+          const form = document.getElementById("settings-form") as HTMLFormElement | null;
+          form?.requestSubmit?.();
+        },
+        loading: isSaving,
+      }}
+    >
+      <Layout>
+        <Layout.Section>
           {saved ? (
-            <span
-              style={{
-                display: "inline-flex",
-                padding: "3px 10px",
-                borderRadius: 999,
-                border: "1px solid rgba(16,185,129,0.25)",
-                background: "rgba(16,185,129,0.10)",
-                color: "#065f46",
-                fontWeight: 950,
-                fontSize: 12,
-              }}
-            >
-              Saved
-            </span>
+            <Banner tone="success" title="Saved" />
           ) : null}
-        </div>
-      </div>
 
-      <Form method="post" style={{ marginTop: 12, display: "grid", gap: 12 }}>
-        <div style={card}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-            <div style={{ fontWeight: 1050 }}>Enable calling</div>
-            <label style={{ display: "inline-flex", alignItems: "center", gap: 10, fontWeight: 950 }}>
-              <input type="checkbox" name="enabled" defaultChecked={settings.enabled} />
-              Enabled
-            </label>
-          </div>
-        </div>
+          <fetcher.Form method="post" id="settings-form">
+            <BlockStack gap="400">
+              <Card>
+                <BlockStack gap="300">
+                  <InlineStack align="space-between">
+                    <Text as="h2" variant="headingMd">
+                      Enable calling
+                    </Text>
+                    <Checkbox label="Enabled" checked={enabled} onChange={setEnabled} />
+                  </InlineStack>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-          <div style={card}>
-            <div style={label}>Delay minutes</div>
-            <input style={input} name="delayMinutes" defaultValue={settings.delayMinutes} />
-          </div>
-          <div style={card}>
-            <div style={label}>Max attempts</div>
-            <input style={input} name="maxAttempts" defaultValue={settings.maxAttempts} />
-          </div>
-          <div style={card}>
-            <div style={label}>Retry minutes</div>
-            <input style={input} name="retryMinutes" defaultValue={settings.retryMinutes} />
-          </div>
-        </div>
+                  <input type="hidden" name="enabled" value={enabled ? "on" : ""} />
+                </BlockStack>
+              </Card>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-          <div style={card}>
-            <div style={label}>Min order value</div>
-            <input style={input} name="minOrderValue" defaultValue={settings.minOrderValue} />
-          </div>
-          <div style={card}>
-            <div style={label}>Currency</div>
-            <select style={select} name="currency" defaultValue={pickCurrency(settings.currency)}>
-              <option value="USD">USD</option>
-              <option value="EUR">EUR</option>
-              <option value="GBP">GBP</option>
-            </select>
-          </div>
-          <div style={card}>
-            <div style={label}>Call window</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <input style={input} name="callWindowStart" defaultValue={settings.callWindowStart} />
-              <input style={input} name="callWindowEnd" defaultValue={settings.callWindowEnd} />
-            </div>
-          </div>
-        </div>
+              <Card>
+                <BlockStack gap="300">
+                  <Text as="h2" variant="headingMd">
+                    Automation rules
+                  </Text>
 
-        <div style={card}>
-          <div style={{ fontWeight: 1050, marginBottom: 10 }}>Agent playbook</div>
+                  <FormLayout>
+                    <FormLayout.Group>
+                      <TextField
+                        label="Delay minutes"
+                        name="delayMinutes"
+                        value={delayMinutes}
+                        onChange={setDelayMinutes}
+                        autoComplete="off"
+                      />
+                      <TextField
+                        label="Max attempts"
+                        name="maxAttempts"
+                        value={maxAttempts}
+                        onChange={setMaxAttempts}
+                        autoComplete="off"
+                      />
+                      <TextField
+                        label="Retry minutes"
+                        name="retryMinutes"
+                        value={retryMinutes}
+                        onChange={setRetryMinutes}
+                        autoComplete="off"
+                      />
+                    </FormLayout.Group>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div>
-              <div style={label}>Goal</div>
-              <select style={select} name="goal" defaultValue={settings.goal}>
-                <option value="complete_checkout">Complete checkout</option>
-                <option value="qualify_and_follow_up">Qualify + follow-up</option>
-                <option value="support_only">Support only</option>
-              </select>
-            </div>
+                    <FormLayout.Group>
+                      <TextField
+                        label="Min order value"
+                        name="minOrderValue"
+                        value={minOrderValue}
+                        onChange={setMinOrderValue}
+                        autoComplete="off"
+                      />
+                      <Select label="Currency" name="currency" options={currencyOptions} value={currency} onChange={setCurrency} />
+                    </FormLayout.Group>
 
-            <div>
-              <div style={label}>Tone</div>
-              <select style={select} name="tone" defaultValue={settings.tone}>
-                <option value="neutral">Neutral</option>
-                <option value="friendly">Friendly</option>
-                <option value="premium">Premium</option>
-                <option value="urgent">Urgent</option>
-              </select>
-            </div>
+                    <FormLayout.Group>
+                      <TextField
+                        label="Call window start (HH:MM)"
+                        name="callWindowStart"
+                        value={callWindowStart}
+                        onChange={setCallWindowStart}
+                        autoComplete="off"
+                      />
+                      <TextField
+                        label="Call window end (HH:MM)"
+                        name="callWindowEnd"
+                        value={callWindowEnd}
+                        onChange={setCallWindowEnd}
+                        autoComplete="off"
+                      />
+                    </FormLayout.Group>
+                  </FormLayout>
+                </BlockStack>
+              </Card>
 
-            <div>
-              <div style={label}>Max call length (seconds)</div>
-              <input style={input} name="maxCallSeconds" type="number" defaultValue={settings.maxCallSeconds} />
-            </div>
+              <Card>
+                <BlockStack gap="300">
+                  <Text as="h2" variant="headingMd">
+                    Agent playbook
+                  </Text>
 
-            <div>
-              <div style={label}>Max follow-up questions</div>
-              <input style={input} name="maxFollowupQuestions" type="number" defaultValue={settings.maxFollowupQuestions} />
-            </div>
-          </div>
-        </div>
+                  <FormLayout>
+                    <FormLayout.Group>
+                      <Select label="Goal" name="goal" options={goalOptions} value={goal} onChange={(v) => setGoal(v as Goal)} />
+                      <Select label="Tone" name="tone" options={toneOptions} value={tone} onChange={(v) => setTone(v as Tone)} />
+                    </FormLayout.Group>
 
-        <div style={card}>
-          <div style={{ fontWeight: 1050, marginBottom: 10 }}>Discount policy</div>
+                    <FormLayout.Group>
+                      <TextField
+                        label="Max call length (seconds)"
+                        name="maxCallSeconds"
+                        type="number"
+                        value={maxCallSeconds}
+                        onChange={setMaxCallSeconds}
+                        autoComplete="off"
+                      />
+                      <TextField
+                        label="Max follow-up questions"
+                        name="maxFollowupQuestions"
+                        type="number"
+                        value={maxFollowupQuestions}
+                        onChange={setMaxFollowupQuestions}
+                        autoComplete="off"
+                      />
+                    </FormLayout.Group>
+                  </FormLayout>
+                </BlockStack>
+              </Card>
 
-          <label style={{ display: "inline-flex", alignItems: "center", gap: 10, fontWeight: 950, marginBottom: 10 }}>
-            <input name="discountEnabled" type="checkbox" defaultChecked={settings.discountEnabled} />
-            Enable discounts
-          </label>
+              <Card>
+                <BlockStack gap="300">
+                  <InlineStack align="space-between">
+                    <Text as="h2" variant="headingMd">
+                      Discount policy
+                    </Text>
+                    <Checkbox label="Enable discounts" checked={discountEnabled} onChange={setDiscountEnabled} />
+                  </InlineStack>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div>
-              <div style={label}>Max discount %</div>
-              <input style={input} name="maxDiscountPercent" type="number" defaultValue={settings.maxDiscountPercent} />
-            </div>
+                  <input type="hidden" name="discountEnabled" value={discountEnabled ? "on" : ""} />
 
-            <div>
-              <div style={label}>When to offer</div>
-              <select style={select} name="offerRule" defaultValue={settings.offerRule}>
-                <option value="ask_only">Only if customer asks</option>
-                <option value="price_objection">If price objection</option>
-                <option value="after_first_objection">After first objection</option>
-                <option value="always">Offer proactively</option>
-              </select>
-            </div>
+                  <Divider />
 
-            <div>
-              <div style={label}>Min cart value to allow discount (optional)</div>
-              <input
-                style={input}
-                name="minCartValueForDiscount"
-                type="number"
-                step="0.01"
-                defaultValue={settings.minCartValueForDiscount ?? ""}
-                placeholder="e.g. 50"
-              />
-            </div>
+                  <FormLayout>
+                    <FormLayout.Group>
+                      <TextField
+                        label="Max discount %"
+                        name="maxDiscountPercent"
+                        type="number"
+                        value={maxDiscountPercent}
+                        onChange={setMaxDiscountPercent}
+                        disabled={!discountEnabled}
+                        autoComplete="off"
+                      />
+                      <Select
+                        label="When to offer"
+                        name="offerRule"
+                        options={offerOptions}
+                        value={offerRule}
+                        onChange={(v) => setOfferRule(v as OfferRule)}
+                        disabled={!discountEnabled}
+                      />
+                    </FormLayout.Group>
 
-            <div>
-              <div style={label}>Coupon validity (hours)</div>
-              <input style={input} name="couponValidityHours" type="number" defaultValue={settings.couponValidityHours} />
-            </div>
+                    <FormLayout.Group>
+                      <TextField
+                        label="Min cart value to allow discount (optional)"
+                        name="minCartValueForDiscount"
+                        type="number"
+                        value={minCartValueForDiscount}
+                        onChange={setMinCartValueForDiscount}
+                        disabled={!discountEnabled}
+                        autoComplete="off"
+                      />
+                      <TextField
+                        label="Coupon validity (hours)"
+                        name="couponValidityHours"
+                        type="number"
+                        value={couponValidityHours}
+                        onChange={setCouponValidityHours}
+                        disabled={!discountEnabled}
+                        autoComplete="off"
+                      />
+                    </FormLayout.Group>
 
-            <div>
-              <div style={label}>Coupon prefix (optional)</div>
-              <input style={input} name="couponPrefix" type="text" defaultValue={settings.couponPrefix ?? ""} placeholder="e.g. C" />
-            </div>
-          </div>
+                    <FormLayout.Group>
+                      <TextField
+                        label="Coupon prefix (optional)"
+                        name="couponPrefix"
+                        value={couponPrefix}
+                        onChange={setCouponPrefix}
+                        disabled={!discountEnabled}
+                        autoComplete="off"
+                      />
+                      <Checkbox
+                        label="Allow free shipping alternative"
+                        checked={freeShippingEnabled}
+                        onChange={setFreeShippingEnabled}
+                        disabled={!discountEnabled}
+                      />
+                      <input type="hidden" name="freeShippingEnabled" value={freeShippingEnabled ? "on" : ""} />
+                    </FormLayout.Group>
+                  </FormLayout>
+                </BlockStack>
+              </Card>
 
-          <div style={{ marginTop: 10 }}>
-            <label style={{ display: "inline-flex", alignItems: "center", gap: 10, fontWeight: 950 }}>
-              <input name="freeShippingEnabled" type="checkbox" defaultChecked={settings.freeShippingEnabled} />
-              Allow free shipping as alternative offer
-            </label>
-          </div>
-        </div>
+              <Card>
+                <BlockStack gap="300">
+                  <Text as="h2" variant="headingMd">
+                    Follow-ups
+                  </Text>
 
-        <div style={card}>
-          <div style={{ fontWeight: 1050, marginBottom: 10 }}>Follow-ups</div>
+                  <InlineStack gap="600">
+                    <Checkbox label="Allow follow-up email suggestion" checked={followupEmailEnabled} onChange={setFollowupEmailEnabled} />
+                    <Checkbox label="Allow follow-up SMS suggestion" checked={followupSmsEnabled} onChange={setFollowupSmsEnabled} />
+                  </InlineStack>
 
-          <div style={{ display: "grid", gap: 10 }}>
-            <label style={{ display: "inline-flex", alignItems: "center", gap: 10, fontWeight: 950 }}>
-              <input name="followupEmailEnabled" type="checkbox" defaultChecked={settings.followupEmailEnabled} />
-              Allow follow-up email suggestion
-            </label>
+                  <input type="hidden" name="followupEmailEnabled" value={followupEmailEnabled ? "on" : ""} />
+                  <input type="hidden" name="followupSmsEnabled" value={followupSmsEnabled ? "on" : ""} />
+                </BlockStack>
+              </Card>
 
-            <label style={{ display: "inline-flex", alignItems: "center", gap: 10, fontWeight: 950 }}>
-              <input name="followupSmsEnabled" type="checkbox" defaultChecked={settings.followupSmsEnabled} />
-              Allow follow-up SMS suggestion
-            </label>
-          </div>
-        </div>
+              <Card>
+                <BlockStack gap="300">
+                  <Text as="h2" variant="headingMd">
+                    Custom merchant prompt
+                  </Text>
 
-        <div style={card}>
-          <div style={label}>Custom merchant prompt (injected into every call)</div>
-          <textarea
-            name="userPrompt"
-            defaultValue={settings.userPrompt ?? ""}
-            rows={10}
-            style={{
-              width: "100%",
-              borderRadius: 12,
-              border: "1px solid rgba(0,0,0,0.12)",
-              padding: "10px 12px",
-              fontWeight: 900,
-              outline: "none",
-              resize: "vertical",
-              lineHeight: 1.35,
-            }}
-            placeholder="Example: Always introduce store name, language rules, objection handling, what to never say..."
-          />
-        </div>
+                  <TextField
+                    label="Injected into every call"
+                    name="userPrompt"
+                    value={userPrompt}
+                    onChange={setUserPrompt}
+                    multiline={10}
+                    autoComplete="off"
+                    helpText="Rules, disclaimers, language, objection handling, store-specific constraints."
+                  />
+                </BlockStack>
+              </Card>
 
-        <div style={{ display: "flex", gap: 10 }}>
-          <button
-            type="submit"
-            style={{
-              padding: "10px 12px",
-              borderRadius: 12,
-              border: "1px solid rgba(59,130,246,0.30)",
-              background: "rgba(59,130,246,0.10)",
-              cursor: "pointer",
-              fontWeight: 1000,
-            }}
-          >
-            Save
-          </button>
-        </div>
-      </Form>
-    </div>
+              {/* fallback submit button for browsers without Page primaryAction submit */}
+              <div style={{ display: "none" }}>
+                <Button submit>Save</Button>
+              </div>
+            </BlockStack>
+          </fetcher.Form>
+        </Layout.Section>
+      </Layout>
+    </Page>
   );
 }
 
