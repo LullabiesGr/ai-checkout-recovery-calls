@@ -44,7 +44,5 @@ export default function AppLayout() {
   );
 }
 
-export const headers = (args: any) => boundary.headers(args);
-export function ErrorBoundary() {
-  return boundary.error();
-}
+export const headers = boundary.headers;
+export const ErrorBoundary = boundary.error;

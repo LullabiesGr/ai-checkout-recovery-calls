@@ -18,10 +18,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   return { errors };
 };
 
-export default function Auth() {
+export default function AuthLoginRoute() {
   const loaderData = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const [shop, setShop] = useState("");
+
   const { errors } = actionData || loaderData;
 
   return (
@@ -49,4 +50,3 @@ export default function Auth() {
     </AppProvider>
   );
 }
-
