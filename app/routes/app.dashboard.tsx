@@ -1,4 +1,4 @@
-// app/routes/app.dashboard.tsx
+/// app/routes/app.dashboard.tsx
 import * as React from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useLoaderData, useRouteError } from "react-router";
