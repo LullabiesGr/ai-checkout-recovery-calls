@@ -1,6 +1,7 @@
+// app/routes/app.dashboard.tsx
 import * as React from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { json, useLoaderData, useRouteError } from "react-router";
+import { useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 
@@ -95,7 +96,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const search = safeSearch(request.url);
 
-  return json({
+  return {
     shop,
     search,
     view: {
@@ -113,8 +114,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       kpis: [
         { label: "Recovered revenue", value: fmtMoney(recoveredValue, currency), sub: "All-time", tone: "green", barPct: 60 },
         { label: "At-risk revenue", value: fmtMoney(abandonedValue, currency), sub: "Abandoned", tone: "amber", barPct: 55 },
-        { label: "Win rate", value: totalCheckouts ? `${Math.round((recovered / totalCheckouts) * 100)}%` : "—", sub: "Recovered / total", tone: "blue", barPct: totalCheckouts ? Math.round((recovered / totalCheckouts) * 100) : 40 },
-        { label: "Abandoned checkouts", value: String(abandoned), sub: "Count", tone: "red", barPct: totalCheckouts ? Math.round((abandoned / totalCheckouts) * 100) : 40 },
+        {
+          label: "Win rate",
+          value: totalCheckouts ? `${Math.round((recovered / totalCheckouts) * 100)}%` : "—",
+          sub: "Recovered / total",
+          tone: "blue",
+          barPct: totalCheckouts ? Math.round((recovered / totalCheckouts) * 100) : 40,
+        },
+        {
+          label: "Abandoned checkouts",
+          value: String(abandoned),
+          sub: "Count",
+          tone: "red",
+          barPct: totalCheckouts ? Math.round((abandoned / totalCheckouts) * 100) : 40,
+        },
         { label: "Calls completed", value: String(completedCalls), sub: "Count", tone: "green", barPct: 50 },
         { label: "Calls queued", value: String(queuedCalls), sub: "Queued/Calling", tone: "blue", barPct: 45 },
       ],
@@ -153,7 +166,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       ],
       canCreateTestCall: true,
     },
-  });
+  };
 };
 
 export default function DashboardRoute() {

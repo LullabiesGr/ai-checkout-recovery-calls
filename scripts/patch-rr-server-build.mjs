@@ -6,42 +6,34 @@ if (!fs.existsSync(file)) process.exit(0);
 
 let src = fs.readFileSync(file, "utf8");
 
-/**
- * Βρες το import από react-router
- */
+// Finds: import { ... } from "react-router";
 const re = /import\s*\{\s*([\s\S]*?)\s*\}\s*from\s*["']react-router["'];/m;
 const m = src.match(re);
-if (!m) process.exit(0);
+if (!m) {
+  console.log("[postbuild] no react-router named import found — skip patch");
+  process.exit(0);
+}
 
 const raw = m[1];
-
 const parts = raw
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
-/**
- * Κρατάμε ΤΑ ΠΑΝΤΑ εκτός από defer
- * ⚠️ ΔΕΝ πειράζουμε το json
- */
-const filtered = parts.filter(
-  (p) =>
-    p !== "defer" &&
-    !p.startsWith("defer as ")
-);
+const banned = new Set(["json", "defer"]);
 
-/**
- * Αν δεν υπάρχει defer δεν κάνουμε rewrite
- */
-if (filtered.length === parts.length) {
-  console.log("[postbuild] no defer import found — skip patch");
+const filtered = parts.filter((p) => {
+  // Handles: json, json as something, defer, defer as something
+  const base = p.split(/\s+as\s+/i)[0]?.trim();
+  return base && !banned.has(base);
+});
+
+const replacement = `import { ${filtered.join(", ")} } from "react-router";`;
+if (replacement === m[0]) {
+  console.log("[postbuild] import already clean — skip patch");
   process.exit(0);
 }
 
-const replacement = `import { ${filtered.join(", ")} } from "react-router";`;
-
 src = src.replace(re, replacement);
-
 fs.writeFileSync(file, src, "utf8");
-
-console.log("[postbuild] patched build/server/index.js (removed defer only)");
+console.log("[postbuild] patched build/server/index.js (removed json/defer import)");
