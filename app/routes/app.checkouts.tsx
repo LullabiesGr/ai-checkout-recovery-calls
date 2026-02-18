@@ -16,6 +16,24 @@ import {
   type SupabaseCallSummary,
 } from "../lib/callInsights.shared";
 
+import {
+  Page,
+  Layout,
+  Card,
+  TextField,
+  Badge,
+  Button,
+  InlineStack,
+  BlockStack,
+  Box,
+  Text,
+  IndexTable,
+  Tooltip,
+  Divider,
+  Collapsible,
+  Spinner,
+} from "@shopify/polaris";
+
 /* ---------------- URL helpers (keep embedded params) ---------------- */
 function safeSearch(): string {
   if (typeof window === "undefined") return "";
@@ -30,14 +48,16 @@ function withSearch(path: string): string {
 }
 
 /* ---------------- Tones ---------------- */
-function toneForCheckoutStatus(status: string): "success" | "critical" | "warning" | "info" {
+type PolarisTone = "success" | "critical" | "warning" | "info" | "new";
+
+function toneForCheckoutStatus(status: string): PolarisTone {
   const s = safeStr(status).toUpperCase();
   if (s === "CONVERTED" || s === "RECOVERED") return "success";
   if (s === "ABANDONED") return "critical";
   if (s === "OPEN") return "warning";
   return "info";
 }
-function toneForJobStatus(status: string): "success" | "critical" | "warning" | "info" {
+function toneForJobStatus(status: string): PolarisTone {
   const s = safeStr(status).toUpperCase();
   if (s === "COMPLETED") return "success";
   if (s === "CALLING") return "warning";
@@ -45,7 +65,7 @@ function toneForJobStatus(status: string): "success" | "critical" | "warning" | 
   if (s === "FAILED") return "critical";
   return "info";
 }
-function toneForOutcome(outcome: string | null): "success" | "critical" | "warning" | "info" {
+function toneForOutcome(outcome: string | null): PolarisTone {
   const s = safeStr(outcome).toLowerCase();
   if (!s) return "info";
   if (s.includes("recovered") || s.includes("converted")) return "success";
@@ -55,12 +75,21 @@ function toneForOutcome(outcome: string | null): "success" | "critical" | "warni
   return "info";
 }
 
-function Badge({ tone, children, title }: { tone?: any; children: any; title?: string }) {
-  return (
-    <s-badge tone={tone as any} title={title}>
+function PBadge({
+  tone,
+  children,
+  tooltip,
+}: {
+  tone: PolarisTone;
+  children: React.ReactNode;
+  tooltip?: string;
+}) {
+  const b = (
+    <Badge tone={tone as any} size="small">
       {children}
-    </s-badge>
+    </Badge>
   );
+  return tooltip ? <Tooltip content={tooltip}>{b}</Tooltip> : b;
 }
 
 /* ---------------- Types ---------------- */
@@ -159,7 +188,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return uniq(values).map((x) => x.replace(/[,"'()]/g, ""));
   }
 
-  // IMPORTANT: pick the *latest* summary per key (Supabase can have multiple rows per checkout/call/job).
   function pickNewer(a: any, b: any) {
     const ta = Date.parse(String(a?.last_received_at ?? a?.received_at ?? ""));
     const tb = Date.parse(String(b?.last_received_at ?? b?.received_at ?? ""));
@@ -185,7 +213,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const checkoutIds = cleanIdList(opts.checkoutIds ?? []);
     if (callIds.length === 0 && callJobIds.length === 0 && checkoutIds.length === 0) return out;
 
-    // include received timestamps so we can deterministically pick the newest
     const select = [
       "shop",
       "call_id",
@@ -234,7 +261,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const params = new URLSearchParams();
     params.set("select", select);
     params.set("or", `(${orParts.join(",")})`);
-    // bias results toward newest
     params.set("order", "last_received_at.desc,received_at.desc");
 
     const withShopParams = new URLSearchParams(params);
@@ -255,7 +281,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       return Array.isArray(data) ? data : [];
     }
 
-    // try shop-filtered first, then fallback (in case shop column missing on some rows)
     let data = await doFetch(withShopParams);
     if (data && data.length === 0) data = await doFetch(params);
 
@@ -353,33 +378,53 @@ function PreBlock({ value }: { value: any }) {
         })();
 
   return (
-    <div
-      style={{
-        padding: 10,
-        borderRadius: 12,
-        border: "1px solid rgba(0,0,0,0.10)",
-        background: "rgba(0,0,0,0.02)",
-      }}
+    <Box
+      padding="300"
+      background="bg-surface-secondary"
+      borderColor="border"
+      borderWidth="025"
+      borderRadius="200"
     >
-      <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 12, fontWeight: 750 }}>
+      <div
+        style={{
+          fontFamily:
+            'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+          fontSize: 12,
+          fontWeight: 650,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          margin: 0,
+        }}
+      >
         {text || "—"}
-      </pre>
-    </div>
+      </div>
+    </Box>
   );
 }
 
-function Field({ label, children }: { label: string; children: any }) {
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div style={{ display: "grid", gap: 6 }}>
-      <div style={{ fontWeight: 950, fontSize: 12, color: "rgba(17,24,39,0.55)" }}>{label}</div>
-      <div style={{ fontWeight: 950, color: "rgba(17,24,39,0.90)" }}>{children}</div>
-    </div>
+    <BlockStack gap="100">
+      <Text variant="bodySm" tone="subdued">
+        {label}
+      </Text>
+      <Text variant="bodyMd" fontWeight="semibold">
+        {children}
+      </Text>
+    </BlockStack>
   );
+}
+
+function sumMoney(rows: Row[], pred: (r: Row) => boolean) {
+  let n = 0;
+  for (const r of rows) if (pred(r)) n += Number(r.value || 0);
+  return n;
 }
 
 /* ---------------- Page ---------------- */
 export default function Checkouts() {
   const { shop, rows } = useLoaderData<typeof loader>();
+
   const [query, setQuery] = React.useState("");
   const q = query.trim().toLowerCase();
 
@@ -407,7 +452,6 @@ export default function Checkouts() {
   }, [selectedId, filtered]);
 
   React.useEffect(() => {
-    // if current selection disappears due to filtering, select first row
     if (selectedId && !filtered.some((r) => r.checkoutId === selectedId)) {
       setSelectedId(filtered?.[0]?.checkoutId ?? null);
     }
@@ -416,7 +460,6 @@ export default function Checkouts() {
   const selected = React.useMemo(() => filtered.find((r) => r.checkoutId === selectedId) ?? null, [filtered, selectedId]);
 
   const detailsFetcher = useFetcher<any>();
-
   React.useEffect(() => {
     if (!selected?.checkoutId) return;
     detailsFetcher.load(withSearch(`/app/checkouts/${encodeURIComponent(selected.checkoutId)}`));
@@ -425,337 +468,417 @@ export default function Checkouts() {
   const details = detailsFetcher.data?.shop ? detailsFetcher.data : null;
   const sb = details?.sb ?? null;
 
-  const headerCell: React.CSSProperties = {
-    position: "sticky",
-    top: 0,
-    background: "white",
-    zIndex: 1,
-    borderBottom: "1px solid rgba(0,0,0,0.08)",
-    padding: "10px 10px",
-    fontSize: 12,
-    fontWeight: 900,
-    color: "rgba(17,24,39,0.55)",
-    whiteSpace: "nowrap",
-  };
+  const stats = React.useMemo(() => {
+    const total = filtered.length;
+    const abandonedCount = filtered.filter((r) => safeStr(r.status).toUpperCase() === "ABANDONED").length;
+    const openCount = filtered.filter((r) => safeStr(r.status).toUpperCase() === "OPEN").length;
+    const recoveredCount = filtered.filter((r) => {
+      const s = safeStr(r.status).toUpperCase();
+      return s === "RECOVERED" || s === "CONVERTED";
+    }).length;
 
-  const cell: React.CSSProperties = {
-    padding: "10px 10px",
-    borderBottom: "1px solid rgba(0,0,0,0.06)",
-    verticalAlign: "top",
-    fontSize: 13,
-    fontWeight: 850,
-    color: "rgba(17,24,39,0.78)",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-  };
+    const atRisk = sumMoney(filtered, (r) => safeStr(r.status).toUpperCase() === "ABANDONED");
+    const recovered = sumMoney(filtered, (r) => {
+      const s = safeStr(r.status).toUpperCase();
+      return s === "RECOVERED" || s === "CONVERTED";
+    });
+
+    return { total, abandonedCount, openCount, recoveredCount, atRisk, recovered };
+  }, [filtered]);
+
+  const headings = [
+    { title: "Customer / Cart" },
+    { title: "Value" },
+    { title: "Checkout" },
+    { title: "Call" },
+    { title: "Outcome" },
+    { title: "Buy" },
+    { title: "Updated" },
+    { title: "Rec" },
+  ];
+
+  const loadingDetails = detailsFetcher.state !== "idle" && !details;
 
   return (
-    <s-page heading="Checkouts">
-      <s-section>
-        <s-card padding="base">
-          {/* make the content wide to kill cramped layout */}
-          <div style={{ width: "100%", maxWidth: 1680, margin: "0 auto" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-              <s-paragraph>
-                Store: <s-badge>{shop}</s-badge>
-              </s-paragraph>
+    <Page title="Checkouts" subtitle={shop}>
+      <Layout>
+        <Layout.Section>
+          <Card>
+            <BlockStack gap="300">
+              <InlineStack align="space-between" blockAlign="center" wrap gap="300">
+                <InlineStack gap="200" wrap>
+                  <PBadge tone="info" tooltip="Rows in current view">
+                    {stats.total} rows
+                  </PBadge>
+                  <PBadge tone="critical" tooltip="Abandoned count in current view">
+                    Abandoned {stats.abandonedCount}
+                  </PBadge>
+                  <PBadge tone="warning" tooltip="Open checkouts in current view">
+                    Open {stats.openCount}
+                  </PBadge>
+                  <PBadge tone="success" tooltip="Recovered/Converted in current view">
+                    Recovered {stats.recoveredCount}
+                  </PBadge>
+                  <PBadge tone="warning" tooltip="Sum of abandoned checkout value (current view)">
+                    At-risk {stats.atRisk.toFixed(2)}
+                  </PBadge>
+                  <PBadge tone="success" tooltip="Sum of recovered/converted value (current view)">
+                    Recovered {stats.recovered.toFixed(2)}
+                  </PBadge>
+                </InlineStack>
 
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  border: "1px solid rgba(0,0,0,0.10)",
-                  background: "rgba(0,0,0,0.02)",
-                  borderRadius: 12,
-                  padding: "8px 10px",
-                  minWidth: 360,
-                  flex: "0 1 520px",
-                }}
-              >
-                <span style={{ fontWeight: 1000, color: "rgba(17,24,39,0.45)" }}>⌕</span>
-                <input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search checkouts..."
-                  style={{
-                    border: "none",
-                    outline: "none",
-                    background: "transparent",
-                    width: "100%",
-                    fontWeight: 900,
-                    color: "rgba(17,24,39,0.85)",
-                  }}
-                />
-                <Badge tone="info" title="Rows">
-                  {filtered.length}
-                </Badge>
-              </div>
-            </div>
+                <Box minWidth="320px" width="100%" maxWidth="520px">
+                  <TextField
+                    label="Search"
+                    labelHidden
+                    value={query}
+                    onChange={setQuery}
+                    placeholder="Search by customer, phone, email, status, cart, AI…"
+                    autoComplete="off"
+                    clearButton
+                    onClearButtonClick={() => setQuery("")}
+                  />
+                </Box>
+              </InlineStack>
 
-            <div
-              style={{
-                marginTop: 12,
-                display: "grid",
-                gridTemplateColumns: "minmax(0, 1.55fr) minmax(560px, 1fr)",
-                gap: 12,
-                alignItems: "start",
-                minWidth: 0,
-              }}
-            >
-              {/* TABLE (no internal scrollbars, no forced minWidth) */}
-              <div
-                style={{
-                  border: "1px solid rgba(0,0,0,0.08)",
-                  borderRadius: 16,
-                  overflow: "hidden",
-                  background: "white",
-                  minWidth: 0,
-                }}
+              <Divider />
+
+              <IndexTable
+                resourceName={{ singular: "checkout", plural: "checkouts" }}
+                itemCount={filtered.length}
+                headings={headings as any}
+                selectable={false}
               >
-                <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
-                  <thead>
-                    <tr>
-                      <th style={{ ...headerCell, width: 150 }}>Customer</th>
-                      <th style={{ ...headerCell, width: 140 }}>Phone</th>
-                      <th style={{ ...headerCell, width: 110 }}>Value</th>
-                      <th style={{ ...headerCell, width: 340 }}>Cart</th>
-                      <th style={{ ...headerCell, width: 120 }}>Checkout</th>
-                      <th style={{ ...headerCell, width: 110 }}>Call</th>
-                      <th style={{ ...headerCell, width: 140 }}>Outcome</th>
-                      <th style={{ ...headerCell, width: 90 }}>Buy</th>
-                      <th style={{ ...headerCell, width: 110 }}>Recording</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filtered.map((c) => {
-                      const isSel = c.checkoutId === selectedId;
-                      return (
-                        <tr
-                          key={c.checkoutId}
-                          onClick={() => setSelectedId(c.checkoutId)}
-                          style={{
-                            cursor: "pointer",
-                            background: isSel ? "rgba(0,0,0,0.03)" : "white",
+                {filtered.map((c, index) => {
+                  const isSel = c.checkoutId === selectedId;
+                  const checkoutTone = toneForCheckoutStatus(c.status);
+                  const callTone = c.callStatus ? toneForJobStatus(c.callStatus) : "info";
+                  const outcomeTone = toneForOutcome(c.callOutcome);
+
+                  const cartLine = safeStr(c.cartPreview);
+                  const customer = safeStr(c.customerName) || "—";
+                  const phone = safeStr(c.phone);
+
+                  const updatedText = formatWhen(c.updatedAt);
+                  const abandonedText = c.abandonedAt ? formatWhen(c.abandonedAt) : "";
+
+                  return (
+                    <IndexTable.Row
+                      id={c.checkoutId}
+                      key={c.checkoutId}
+                      position={index}
+                      selected={isSel}
+                      onClick={() => setSelectedId(c.checkoutId)}
+                    >
+                      <IndexTable.Cell>
+                        <BlockStack gap="100">
+                          <InlineStack gap="200" blockAlign="center" wrap>
+                            <Text variant="bodyMd" fontWeight="semibold">
+                              {customer}
+                            </Text>
+                            {phone ? (
+                              <Text variant="bodySm" tone="subdued">
+                                {phone}
+                              </Text>
+                            ) : null}
+                            <Text variant="bodySm" tone="subdued">
+                              #{c.checkoutId}
+                            </Text>
+                          </InlineStack>
+
+                          {cartLine ? (
+                            <Tooltip content={cartLine}>
+                              <Text variant="bodySm" tone="subdued" truncate>
+                                {cartLine}
+                              </Text>
+                            </Tooltip>
+                          ) : (
+                            <Text variant="bodySm" tone="subdued">
+                              —
+                            </Text>
+                          )}
+
+                          <InlineStack gap="200" wrap>
+                            <PBadge tone={checkoutTone}>{safeStr(c.status).toUpperCase()}</PBadge>
+                            {c.abandonedAt ? (
+                              <PBadge tone="info" tooltip={`Abandoned at ${c.abandonedAt}`}>
+                                Abandoned {abandonedText}
+                              </PBadge>
+                            ) : null}
+                          </InlineStack>
+                        </BlockStack>
+                      </IndexTable.Cell>
+
+                      <IndexTable.Cell>
+                        <Text variant="bodyMd" fontWeight="semibold">
+                          {Number(c.value || 0).toFixed(2)} {safeStr(c.currency)}
+                        </Text>
+                      </IndexTable.Cell>
+
+                      <IndexTable.Cell>
+                        <PBadge tone={checkoutTone}>{safeStr(c.status).toUpperCase()}</PBadge>
+                      </IndexTable.Cell>
+
+                      <IndexTable.Cell>
+                        {c.callStatus ? <PBadge tone={callTone}>{safeStr(c.callStatus).toUpperCase()}</PBadge> : <PBadge tone="info">—</PBadge>}
+                      </IndexTable.Cell>
+
+                      <IndexTable.Cell>
+                        <InlineStack gap="200" wrap>
+                          <PBadge tone={outcomeTone}>{c.callOutcome ? safeStr(c.callOutcome).toUpperCase() : "—"}</PBadge>
+                          <PBadge tone="info">{`AI: ${c.aiStatus ? safeStr(c.aiStatus).toUpperCase() : "—"}`}</PBadge>
+                        </InlineStack>
+                      </IndexTable.Cell>
+
+                      <IndexTable.Cell>
+                        {c.buyProbabilityPct == null ? <PBadge tone="info">—</PBadge> : <PBadge tone="info">{c.buyProbabilityPct}%</PBadge>}
+                      </IndexTable.Cell>
+
+                      <IndexTable.Cell>
+                        <Text variant="bodySm" tone="subdued">
+                          {updatedText}
+                        </Text>
+                      </IndexTable.Cell>
+
+                      <IndexTable.Cell>
+                        <Button
+                          variant="tertiary"
+                          disabled={!c.recordingUrl}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (c.recordingUrl) window.open(c.recordingUrl, "_blank", "noreferrer");
                           }}
-                          title={`Checkout ${c.checkoutId}`}
                         >
-                          <td style={cell}>{c.customerName ?? "-"}</td>
-                          <td style={cell}>{c.phone ?? "-"}</td>
-                          <td style={cell}>
-                            {c.value} {c.currency}
-                          </td>
-                          <td style={{ ...cell, whiteSpace: "normal" }}>
-                            <div style={{ fontWeight: 900, color: "rgba(17,24,39,0.90)" }}>{c.cartPreview ?? "-"}</div>
-                            <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                              <Badge tone={toneForCheckoutStatus(c.status)}>{safeStr(c.status).toUpperCase()}</Badge>
-                              {c.abandonedAt ? <Badge tone="info">{`Abandoned: ${formatWhen(c.abandonedAt)}`}</Badge> : null}
-                              <Badge tone="info">{`Updated: ${formatWhen(c.updatedAt)}`}</Badge>
-                              <Badge tone="info">{`ID: ${c.checkoutId}`}</Badge>
-                            </div>
-                          </td>
-                          <td style={cell}>
-                            <Badge tone={toneForCheckoutStatus(c.status)}>{safeStr(c.status).toUpperCase()}</Badge>
-                          </td>
-                          <td style={cell}>
-                            {c.callStatus ? (
-                              <Badge tone={toneForJobStatus(c.callStatus)}>{safeStr(c.callStatus).toUpperCase()}</Badge>
-                            ) : (
-                              <Badge tone="info">—</Badge>
-                            )}
-                          </td>
-                          <td style={cell}>
-                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                              <Badge tone={toneForOutcome(c.callOutcome)}>
-                                {c.callOutcome ? safeStr(c.callOutcome).toUpperCase() : "—"}
-                              </Badge>
-                              {c.aiStatus ? <Badge tone="info">{`AI: ${safeStr(c.aiStatus).toUpperCase()}`}</Badge> : <Badge tone="info">AI: —</Badge>}
-                            </div>
-                          </td>
-                          <td style={cell}>
-                            {c.buyProbabilityPct == null ? <Badge tone="info">—</Badge> : <Badge tone="info">{c.buyProbabilityPct}%</Badge>}
-                          </td>
-                          <td style={cell}>
-                            <button
-                              type="button"
-                              disabled={!c.recordingUrl}
-                              onClick={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                if (c.recordingUrl) window.open(c.recordingUrl, "_blank", "noreferrer");
-                              }}
-                              style={{
-                                padding: "8px 10px",
-                                borderRadius: 12,
-                                border: "1px solid rgba(0,0,0,0.12)",
-                                background: c.recordingUrl ? "white" : "rgba(0,0,0,0.03)",
-                                cursor: c.recordingUrl ? "pointer" : "not-allowed",
-                                fontWeight: 950,
-                                opacity: c.recordingUrl ? 1 : 0.55,
-                                width: "100%",
-                              }}
-                            >
-                              Open
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+                          Open
+                        </Button>
+                      </IndexTable.Cell>
+                    </IndexTable.Row>
+                  );
+                })}
+              </IndexTable>
+            </BlockStack>
+          </Card>
+        </Layout.Section>
 
-              {/* DETAILS (no tabs, everything stacked) */}
-              <div style={{ position: "sticky", top: 12, minWidth: 0 }}>
-                <div style={{ border: "1px solid rgba(0,0,0,0.08)", borderRadius: 16, background: "white", padding: 12 }}>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <div style={{ fontWeight: 1100, fontSize: 14 }}>Details</div>
-                    <div style={{ fontWeight: 850, fontSize: 12, color: "rgba(17,24,39,0.55)" }}>
-                      {selected ? `Checkout ${selected.checkoutId}` : "Select a checkout"}
-                    </div>
-                  </div>
+        <Layout.Section secondary>
+          <div style={{ position: "sticky", top: 16 }}>
+            <Card>
+              <BlockStack gap="300">
+                <InlineStack align="space-between" blockAlign="center">
+                  <BlockStack gap="100">
+                    <Text variant="headingMd" as="h2">
+                      Details
+                    </Text>
+                    <Text variant="bodySm" tone="subdued">
+                      {selected ? `Checkout #${selected.checkoutId}` : "Select a checkout"}
+                    </Text>
+                  </BlockStack>
+                  {loadingDetails ? <Spinner size="small" /> : null}
+                </InlineStack>
 
-                  <div style={{ marginTop: 12 }}>
-                    {!selected ? (
-                      <div style={{ fontWeight: 850, color: "rgba(17,24,39,0.55)" }}>—</div>
-                    ) : detailsFetcher.state !== "idle" && !details ? (
-                      <div style={{ fontWeight: 850, color: "rgba(17,24,39,0.55)" }}>Loading…</div>
-                    ) : (
-                      <div style={{ display: "grid", gap: 12 }}>
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          <Badge tone={toneForCheckoutStatus(details?.checkout?.status ?? selected.status)}>
-                            {safeStr(details?.checkout?.status ?? selected.status).toUpperCase()}
-                          </Badge>
-                          {details?.latestJob?.status ? (
-                            <Badge tone={toneForJobStatus(details.latestJob.status)}>{safeStr(details.latestJob.status).toUpperCase()}</Badge>
-                          ) : null}
-                          {sb?.call_outcome ? <Badge tone={toneForOutcome(sb.call_outcome)}>{safeStr(sb.call_outcome).toUpperCase()}</Badge> : null}
-                          {sb?.ai_status ? <Badge tone="info">{`AI: ${safeStr(sb.ai_status).toUpperCase()}`}</Badge> : null}
-                          {typeof sb?.buy_probability === "number" ? <Badge tone="info">{`Buy: ${Math.round(sb.buy_probability)}%`}</Badge> : null}
-                        </div>
+                <Divider />
 
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                          <Field label="Customer">{details?.checkout?.customerName ?? selected.customerName ?? "-"}</Field>
-                          <Field label="Phone">{details?.checkout?.phone ?? selected.phone ?? "-"}</Field>
-                          <Field label="Email">{details?.checkout?.email ?? selected.email ?? "-"}</Field>
+                {!selected ? (
+                  <Text tone="subdued">—</Text>
+                ) : loadingDetails ? (
+                  <Text tone="subdued">Loading…</Text>
+                ) : (
+                  <BlockStack gap="300">
+                    <InlineStack gap="200" wrap>
+                      <PBadge tone={toneForCheckoutStatus(details?.checkout?.status ?? selected.status)}>
+                        {safeStr(details?.checkout?.status ?? selected.status).toUpperCase()}
+                      </PBadge>
+                      {details?.latestJob?.status ? (
+                        <PBadge tone={toneForJobStatus(details.latestJob.status)}>
+                          {safeStr(details.latestJob.status).toUpperCase()}
+                        </PBadge>
+                      ) : null}
+                      {sb?.call_outcome ? (
+                        <PBadge tone={toneForOutcome(sb.call_outcome)}>{safeStr(sb.call_outcome).toUpperCase()}</PBadge>
+                      ) : null}
+                      {sb?.ai_status ? <PBadge tone="info">{`AI: ${safeStr(sb.ai_status).toUpperCase()}`}</PBadge> : null}
+                      {typeof sb?.buy_probability === "number" ? (
+                        <PBadge tone="info">{`Buy: ${Math.round(sb.buy_probability)}%`}</PBadge>
+                      ) : null}
+                    </InlineStack>
+
+                    <Box padding="300" background="bg-surface-secondary" borderRadius="200">
+                      <BlockStack gap="300">
+                        <InlineStack gap="600" wrap>
+                          <Field label="Customer">{details?.checkout?.customerName ?? selected.customerName ?? "—"}</Field>
+                          <Field label="Phone">{details?.checkout?.phone ?? selected.phone ?? "—"}</Field>
+                          <Field label="Email">{details?.checkout?.email ?? selected.email ?? "—"}</Field>
+                        </InlineStack>
+
+                        <InlineStack gap="600" wrap>
                           <Field label="Cart total">
                             {safeStr(details?.checkout?.value ?? selected.value)} {safeStr(details?.checkout?.currency ?? selected.currency)}
                           </Field>
-                        </div>
+                          <Field label="Updated">{formatWhen(details?.checkout?.updatedAt ?? selected.updatedAt)}</Field>
+                          <Field label="Abandoned">{details?.checkout?.abandonedAt ? formatWhen(details.checkout.abandonedAt) : "—"}</Field>
+                        </InlineStack>
 
-                        <Field label="Cart">{selected.cartPreview ?? "-"}</Field>
+                        <Field label="Cart">{selected.cartPreview ?? "—"}</Field>
+                      </BlockStack>
+                    </Box>
 
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          <button
-                            type="button"
-                            disabled={!(details?.recordingUrl ?? selected.recordingUrl)}
-                            onClick={() => {
-                              const url = details?.recordingUrl ?? selected.recordingUrl;
-                              if (url) window.open(url, "_blank", "noreferrer");
-                            }}
-                            style={{
-                              padding: "8px 10px",
-                              borderRadius: 12,
-                              border: "1px solid rgba(0,0,0,0.12)",
-                              background: "white",
-                              cursor: "pointer",
-                              fontWeight: 950,
-                              opacity: details?.recordingUrl ?? selected.recordingUrl ? 1 : 0.55,
-                            }}
-                          >
-                            Open recording
-                          </button>
+                    <InlineStack gap="200" wrap>
+                      <Button
+                        variant="primary"
+                        disabled={!(details?.recordingUrl ?? selected.recordingUrl)}
+                        onClick={() => {
+                          const url = details?.recordingUrl ?? selected.recordingUrl;
+                          if (url) window.open(url, "_blank", "noreferrer");
+                        }}
+                      >
+                        Open recording
+                      </Button>
 
-                          <button
-                            type="button"
-                            disabled={!safeStr(sb?.log_url).trim()}
-                            onClick={() => {
-                              const url = safeStr(sb?.log_url).trim();
-                              if (url) window.open(url, "_blank", "noreferrer");
-                            }}
-                            style={{
-                              padding: "8px 10px",
-                              borderRadius: 12,
-                              border: "1px solid rgba(0,0,0,0.12)",
-                              background: "white",
-                              cursor: "pointer",
-                              fontWeight: 950,
-                              opacity: safeStr(sb?.log_url).trim() ? 1 : 0.55,
-                            }}
-                          >
-                            Open logs
-                          </button>
-                        </div>
+                      <Button
+                        variant="secondary"
+                        disabled={!safeStr(sb?.log_url).trim()}
+                        onClick={() => {
+                          const url = safeStr(sb?.log_url).trim();
+                          if (url) window.open(url, "_blank", "noreferrer");
+                        }}
+                      >
+                        Open logs
+                      </Button>
+                    </InlineStack>
 
-                        <s-divider />
+                    <Divider />
 
-                        <div style={{ display: "grid", gap: 10 }}>
-                          <div style={{ fontWeight: 1100 }}>Summary</div>
-                          <div style={{ fontWeight: 850, color: "rgba(17,24,39,0.80)" }}>{safeStr(sb?.summary_clean || sb?.summary) || "—"}</div>
+                    <BlockStack gap="300">
+                      <BlockStack gap="100">
+                        <Text variant="headingSm" as="h3">
+                          Summary
+                        </Text>
+                        <Text>{safeStr(sb?.summary_clean || sb?.summary) || "—"}</Text>
+                      </BlockStack>
 
-                          <div style={{ fontWeight: 1100 }}>Next best action</div>
-                          <div style={{ fontWeight: 850, color: "rgba(17,24,39,0.80)" }}>
-                            {safeStr(sb?.next_best_action || sb?.best_next_action) || "—"}
-                          </div>
+                      <BlockStack gap="100">
+                        <Text variant="headingSm" as="h3">
+                          Next best action
+                        </Text>
+                        <Text>{safeStr(sb?.next_best_action || sb?.best_next_action) || "—"}</Text>
+                      </BlockStack>
 
-                          <div style={{ fontWeight: 1100 }}>Follow-up message</div>
-                          <PreBlock value={sb?.follow_up_message} />
+                      <BlockStack gap="100">
+                        <Text variant="headingSm" as="h3">
+                          Follow-up message
+                        </Text>
+                        <PreBlock value={sb?.follow_up_message} />
+                      </BlockStack>
 
-                          <div style={{ fontWeight: 1100 }}>Key quotes</div>
-                          <PreBlock value={sb?.key_quotes_text || sb?.key_quotes} />
+                      <BlockStack gap="100">
+                        <Text variant="headingSm" as="h3">
+                          Key quotes
+                        </Text>
+                        <PreBlock value={sb?.key_quotes_text || sb?.key_quotes} />
+                      </BlockStack>
 
-                          <div style={{ fontWeight: 1100 }}>Objections</div>
-                          <PreBlock value={sb?.objections_text || sb?.objections} />
+                      <BlockStack gap="100">
+                        <Text variant="headingSm" as="h3">
+                          Objections
+                        </Text>
+                        <PreBlock value={sb?.objections_text || sb?.objections} />
+                      </BlockStack>
 
-                          <div style={{ fontWeight: 1100 }}>Issues to fix</div>
-                          <PreBlock value={sb?.issues_to_fix_text || sb?.issues_to_fix} />
+                      <BlockStack gap="100">
+                        <Text variant="headingSm" as="h3">
+                          Issues to fix
+                        </Text>
+                        <PreBlock value={sb?.issues_to_fix_text || sb?.issues_to_fix} />
+                      </BlockStack>
 
-                          <div style={{ fontWeight: 1100 }}>Tags</div>
-                          <PreBlock value={sb?.tagcsv || (Array.isArray(sb?.tags) ? sb.tags.join(", ") : "")} />
+                      <BlockStack gap="100">
+                        <Text variant="headingSm" as="h3">
+                          Tags
+                        </Text>
+                        <PreBlock value={sb?.tagcsv || (Array.isArray(sb?.tags) ? sb.tags.join(", ") : "")} />
+                      </BlockStack>
 
-                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                            {sb?.latest_status ? <Badge tone="info">{`Latest: ${safeStr(sb.latest_status)}`}</Badge> : null}
-                            {sb?.ended_reason ? <Badge tone="info">{`Ended: ${safeStr(sb.ended_reason)}`}</Badge> : null}
-                            {sb?.answered != null ? <Badge tone="info">{`Answered: ${String(sb.answered)}`}</Badge> : null}
-                            {sb?.voicemail != null ? <Badge tone="info">{`Voicemail: ${String(sb.voicemail)}`}</Badge> : null}
-                            {sb?.sentiment ? <Badge tone="info">{`Sentiment: ${safeStr(sb.sentiment)}`}</Badge> : null}
-                            {sb?.customer_intent ? <Badge tone="info">{`Intent: ${safeStr(sb.customer_intent)}`}</Badge> : null}
-                            {sb?.tone ? <Badge tone="info">{`Tone: ${safeStr(sb.tone)}`}</Badge> : null}
-                          </div>
+                      <InlineStack gap="200" wrap>
+                        {sb?.latest_status ? <PBadge tone="info">{`Latest: ${safeStr(sb.latest_status)}`}</PBadge> : null}
+                        {sb?.ended_reason ? <PBadge tone="info">{`Ended: ${safeStr(sb.ended_reason)}`}</PBadge> : null}
+                        {sb?.answered != null ? <PBadge tone="info">{`Answered: ${String(sb.answered)}`}</PBadge> : null}
+                        {sb?.voicemail != null ? <PBadge tone="info">{`Voicemail: ${String(sb.voicemail)}`}</PBadge> : null}
+                        {sb?.sentiment ? <PBadge tone="info">{`Sentiment: ${safeStr(sb.sentiment)}`}</PBadge> : null}
+                        {sb?.customer_intent ? <PBadge tone="info">{`Intent: ${safeStr(sb.customer_intent)}`}</PBadge> : null}
+                        {sb?.tone ? <PBadge tone="info">{`Tone: ${safeStr(sb.tone)}`}</PBadge> : null}
+                      </InlineStack>
 
-                          <div style={{ fontWeight: 1100 }}>Transcript</div>
-                          <PreBlock value={sb?.transcript} />
+                      <BlockStack gap="100">
+                        <Text variant="headingSm" as="h3">
+                          Transcript
+                        </Text>
+                        <PreBlock value={sb?.transcript} />
+                      </BlockStack>
 
-                          <details>
-                            <summary style={{ cursor: "pointer", fontWeight: 1100 }}>Raw payload</summary>
-                            <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
-                              <div style={{ fontWeight: 1000 }}>End-of-call report</div>
-                              <PreBlock value={sb?.end_of_call_report} />
-
-                              <div style={{ fontWeight: 1000 }}>AI result</div>
-                              <PreBlock value={sb?.ai_result} />
-
-                              <div style={{ fontWeight: 1000 }}>Structured outputs</div>
-                              <PreBlock value={sb?.structured_outputs} />
-
-                              <div style={{ fontWeight: 1000 }}>Payload</div>
-                              <PreBlock value={sb?.payload} />
-
-                              <div style={{ fontWeight: 1000 }}>Checkout raw</div>
-                              <PreBlock value={details?.checkout?.raw} />
-                            </div>
-                          </details>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
+                      <RawSection sb={sb} checkoutRaw={details?.checkout?.raw} />
+                    </BlockStack>
+                  </BlockStack>
+                )}
+              </BlockStack>
+            </Card>
           </div>
-        </s-card>
-      </s-section>
-    </s-page>
+        </Layout.Section>
+      </Layout>
+    </Page>
+  );
+}
+
+function RawSection({ sb, checkoutRaw }: { sb: any; checkoutRaw: any }) {
+  const [open, setOpen] = React.useState(false);
+
+  return (
+    <BlockStack gap="200">
+      <Button variant="tertiary" onClick={() => setOpen((v) => !v)}>
+        {open ? "Hide raw payload" : "Show raw payload"}
+      </Button>
+
+      <Collapsible open={open} id="raw-payload">
+        <Box paddingBlockStart="200">
+          <BlockStack gap="300">
+            <BlockStack gap="100">
+              <Text variant="headingSm" as="h3">
+                End-of-call report
+              </Text>
+              <PreBlock value={sb?.end_of_call_report} />
+            </BlockStack>
+
+            <BlockStack gap="100">
+              <Text variant="headingSm" as="h3">
+                AI result
+              </Text>
+              <PreBlock value={sb?.ai_result} />
+            </BlockStack>
+
+            <BlockStack gap="100">
+              <Text variant="headingSm" as="h3">
+                Structured outputs
+              </Text>
+              <PreBlock value={sb?.structured_outputs} />
+            </BlockStack>
+
+            <BlockStack gap="100">
+              <Text variant="headingSm" as="h3">
+                Payload
+              </Text>
+              <PreBlock value={sb?.payload} />
+            </BlockStack>
+
+            <BlockStack gap="100">
+              <Text variant="headingSm" as="h3">
+                Checkout raw
+              </Text>
+              <PreBlock value={checkoutRaw} />
+            </BlockStack>
+          </BlockStack>
+        </Box>
+      </Collapsible>
+    </BlockStack>
   );
 }
 
