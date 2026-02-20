@@ -165,13 +165,12 @@ function shouldHideSettingRowLabel(label: string) {
   const s = (label || "").toLowerCase().trim();
 
   // hide provider-internal identifiers from UI
-  // (assistant id / phone number id / provider ids)
   if (s.includes("assistant id")) return true;
   if (s.includes("phone number id")) return true;
   if (s.includes("phone_number_id")) return true;
   if (s.includes("assistant_id")) return true;
 
-  // also hide any explicit provider-name rows if they exist
+  // hide explicit provider-name labels if any
   if (s.includes("vapi")) return true;
 
   return false;
@@ -227,9 +226,9 @@ export function DashboardView(props: DashboardViewProps) {
                 </s-button-group>
               </s-stack>
 
-              {props.settings.criticalMissing ? (
-                <s-banner tone="critical" heading="Automation is enabled but calls are not ready">
-                  <s-text>Complete call configuration in Settings to start calls.</s-text>
+              {props.settings.enabled ? (
+                <s-banner tone="success" heading="AI agents are ready to call">
+                  <s-text>Open Settings to configure scripts, timing, and rules.</s-text>
                 </s-banner>
               ) : null}
             </s-stack>
@@ -458,12 +457,6 @@ export function DashboardView(props: DashboardViewProps) {
         <s-section heading="System status / Settings snapshot">
           <s-box border="base" borderRadius="base" padding="base" background="base">
             <s-stack direction="block" gap="base">
-              {props.settings.enabled && !props.settings.vapiReady ? (
-                <s-banner tone="critical" heading="Calls cannot start yet">
-                  <s-text>Automation is enabled but call configuration is missing.</s-text>
-                </s-banner>
-              ) : null}
-
               <s-table>
                 <s-table-header-row>
                   <s-table-header>Setting</s-table-header>

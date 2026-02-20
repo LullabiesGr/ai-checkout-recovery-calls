@@ -9,7 +9,6 @@ import {
   ensureSettings,
   markAbandonedByDelay,
   syncAbandonedCheckoutsFromShopify,
-  enqueueCallJobs,
 } from "../callRecovery.server";
 import { createVapiCallForJob } from "../callProvider.server";
 
@@ -130,7 +129,7 @@ function pickSentSystemPrompt(sb: any): string | null {
 
 type LoaderData = {
   shop: string;
-  vapiConfigured: boolean;
+  providerConfigured: boolean;
   stats: { queued: number; calling: number; completed7d: number };
   rows: CallRow[];
 };
@@ -144,7 +143,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   await syncAbandonedCheckoutsFromShopify({ admin, shop, limit: 50 });
   await markAbandonedByDelay(shop, settings.delayMinutes);
 
-  
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
   const [queued, calling, completed7d, jobs] = await Promise.all([
@@ -159,7 +157,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
   ]);
 
-  const vapiConfigured =
+  const providerConfigured =
     Boolean(process.env.VAPI_API_KEY?.trim()) &&
     Boolean(process.env.VAPI_PHONE_NUMBER_ID?.trim()) &&
     Boolean(process.env.VAPI_SERVER_URL?.trim());
@@ -204,7 +202,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     };
   });
 
-  return { shop, vapiConfigured, stats: { queued, calling, completed7d }, rows } satisfies LoaderData;
+  return { shop, providerConfigured, stats: { queued, calling, completed7d }, rows } satisfies LoaderData;
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -216,7 +214,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const redirectBack = () => new Response(null, { status: 303, headers: { Location: "/app/calls" } });
 
-  const vapiOk =
+  const providerOk =
     Boolean(process.env.VAPI_API_KEY?.trim()) &&
     Boolean(process.env.VAPI_PHONE_NUMBER_ID?.trim()) &&
     Boolean(process.env.VAPI_SERVER_URL?.trim());
@@ -234,11 +232,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     for (const job of jobs) {
       const locked = await db.callJob.updateMany({
         where: { id: job.id, shop, status: "QUEUED" },
-        data: { status: "CALLING", attempts: { increment: 1 }, provider: vapiOk ? "vapi" : "sim", outcome: null },
+        data: { status: "CALLING", attempts: { increment: 1 }, provider: providerOk ? "vapi" : "sim", outcome: null },
       });
       if (locked.count === 0) continue;
 
-      if (!vapiOk) {
+      if (!providerOk) {
         await db.callJob.update({
           where: { id: job.id },
           data: { status: "COMPLETED", outcome: `SIMULATED_CALL_OK phone=${(job as any).phone}` },
@@ -248,7 +246,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
       try {
         await createVapiCallForJob({ shop, callJobId: job.id });
-        await db.callJob.update({ where: { id: job.id }, data: { status: "CALLING", outcome: "VAPI_CALL_STARTED" } });
+        await db.callJob.update({ where: { id: job.id }, data: { status: "CALLING", outcome: "CALL_STARTED" } });
       } catch (e: any) {
         const maxAttempts = settings.maxAttempts ?? 2;
         const fresh = await db.callJob.findUnique({ where: { id: job.id }, select: { attempts: true } });
@@ -277,10 +275,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const callJobId = String(fd.get("callJobId") ?? "").trim();
     if (!callJobId) return redirectBack();
 
-    if (!vapiOk) {
+    if (!providerOk) {
       await db.callJob.updateMany({
         where: { id: callJobId, shop },
-        data: { outcome: "Missing Vapi ENV (VAPI_API_KEY/VAPI_PHONE_NUMBER_ID/VAPI_SERVER_URL)" },
+        data: { outcome: "Missing call provider configuration" },
       });
       return redirectBack();
     }
@@ -295,7 +293,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       await createVapiCallForJob({ shop, callJobId });
       await db.callJob.updateMany({
         where: { id: callJobId, shop },
-        data: { status: "CALLING", outcome: "VAPI_CALL_STARTED" },
+        data: { status: "CALLING", outcome: "CALL_STARTED" },
       });
     } catch (e: any) {
       const settings = await ensureSettings(shop);
@@ -326,7 +324,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function Calls() {
-  const { shop, vapiConfigured, stats, rows } = useLoaderData<typeof loader>();
+  const { shop, providerConfigured, stats, rows } = useLoaderData<typeof loader>();
   const revalidator = useRevalidator();
 
   React.useEffect(() => {
@@ -372,7 +370,7 @@ export default function Calls() {
           <div style={{ fontWeight: 1100, fontSize: 18, color: "rgba(17,24,39,0.92)" }}>Calls</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <Pill title="Shop">{shop}</Pill>
-            <Pill title="Provider">{vapiConfigured ? "Vapi ready" : "Sim mode"}</Pill>
+            <Pill title="Provider">{providerConfigured ? "Provider ready" : "Simulation"}</Pill>
             {stats.calling > 0 ? <Pill tone="blue">{stats.calling} calling</Pill> : null}
             {stats.queued > 0 ? <Pill tone="amber">{stats.queued} queued</Pill> : null}
             <Pill title="Completed in 7d">{stats.completed7d} completed/7d</Pill>
@@ -554,7 +552,7 @@ export default function Calls() {
             ) : (
               <>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <Pill title="Vapi call id">{selected.providerCallId ? `Call ${selected.providerCallId}` : "Call —"}</Pill>
+                  <Pill title="Call ID">{selected.providerCallId ? `Call ${selected.providerCallId}` : "Call —"}</Pill>
                   <Pill tone={outcomeTone(selected.openaiOutcome)} title="OpenAI outcome">
                     {selected.openaiOutcome ? String(selected.openaiOutcome).toUpperCase() : "OPENAI —"}
                   </Pill>
@@ -617,7 +615,7 @@ export default function Calls() {
                 </div>
 
                 <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontSize: 12, fontWeight: 1000, color: "rgba(17,24,39,0.55)" }}>Prompt sent to Vapi</div>
+                  <div style={{ fontSize: 12, fontWeight: 1000, color: "rgba(17,24,39,0.55)" }}>Prompt sent to agent</div>
                   <div
                     style={{
                       border: "1px solid rgba(0,0,0,0.10)",
