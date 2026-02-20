@@ -84,22 +84,45 @@ model CallJob {
 }
 
 model Settings {
-  id                String   @id @default(cuid())
-  shop              String   @unique
-  enabled           Boolean  @default(true)
-  delayMinutes      Int      @default(30)
-  maxAttempts       Int      @default(2)
-  retryMinutes      Int      @default(180)
-  minOrderValue     Float    @default(0)
-  currency          String   @default("USD")
-  callWindowStart   String   @default("09:00")
-  callWindowEnd     String   @default("19:00")
-  merchantPrompt    String?  @default("")
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  id            String   @id @default(cuid())
+  shop          String   @unique
+
+  enabled       Boolean  @default(false)
+  delayMinutes  Int      @default(30)
+  maxAttempts   Int      @default(3)
+  retryMinutes  Int      @default(30)
+  minOrderValue Float    @default(0)
+  currency      String   @default("USD")
+  callWindowStart String @default("09:00")
+  callWindowEnd   String @default("19:00")
+
   vapiAssistantId   String?
   vapiPhoneNumberId String?
-  userPrompt        String   @default("")
+
+  userPrompt     String @default("")
+  merchantPrompt String @default("")
+
+  // NEW (match DB columns you already use in raw SQL)
+  tone                  String  @default("neutral")
+  goal                  String  @default("complete_checkout")
+  max_call_seconds      Int     @default(120)
+  max_followup_questions Int    @default(2)
+
+  discount_enabled          Boolean @default(false)
+  max_discount_percent      Int     @default(10)
+  offer_rule                String  @default("ask_only")
+  min_cart_value_for_discount Float  @default(0)
+  coupon_prefix             String  @default("OFFER")
+  coupon_validity_hours     Int     @default(24)
+  free_shipping_enabled     Boolean @default(false)
+
+  followup_email_enabled Boolean @default(true)
+  followup_sms_enabled   Boolean @default(true)
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([shop])
 }
 
 model Session {
