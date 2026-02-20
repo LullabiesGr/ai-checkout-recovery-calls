@@ -38,6 +38,7 @@ declare global {
       "s-spinner": any;
       "s-modal": any;
       "s-link": any;
+      "s-chip": any;
     }
   }
 }
@@ -53,6 +54,88 @@ function withSearch(path: string): string {
   if (!s) return path;
   if (path.includes("?")) return path;
   return `${path}${s}`;
+}
+
+/* ---------------- Outcome normalization (strict) ---------------- */
+export type NormalizedOutcome =
+  | "recovered"
+  | "converted"
+  | "not_recovered"
+  | "no_answer"
+  | "voicemail"
+  | "needs_followup"
+  | "not_interested"
+  | "other"
+  | "none";
+
+export function normalizeOutcome(outcome: string | null): NormalizedOutcome {
+  const raw = safeStr(outcome).toLowerCase().trim();
+  if (!raw) return "none";
+
+  const norm = raw
+    .replace(/\s+/g, "_")
+    .replace(/-+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  if (!norm) return "none";
+
+  // Strict mapping (no substring checks)
+  switch (norm) {
+    case "recovered":
+      return "recovered";
+    case "converted":
+      return "converted";
+
+    case "not_recovered":
+      return "not_recovered";
+    case "notrecovered":
+      return "not_recovered";
+    case "no_recovery":
+      return "not_recovered";
+
+    case "no_answer":
+      return "no_answer";
+    case "noanswer":
+      return "no_answer";
+    case "not_answered":
+      return "no_answer";
+
+    case "voicemail":
+      return "voicemail";
+    case "left_voicemail":
+      return "voicemail";
+    case "voicemail_left":
+      return "voicemail";
+
+    case "needs_followup":
+      return "needs_followup";
+    case "needs_follow_up":
+      return "needs_followup";
+    case "follow_up_needed":
+      return "needs_followup";
+    case "followup_needed":
+      return "needs_followup";
+    case "followup":
+      return "needs_followup";
+    case "follow_up":
+      return "needs_followup";
+
+    case "not_interested":
+      return "not_interested";
+    case "notinterested":
+      return "not_interested";
+    case "no_interest":
+      return "not_interested";
+
+    default:
+      return "other";
+  }
+}
+
+function isRecoveredOutcome(outcome: string | null): boolean {
+  const n = normalizeOutcome(outcome);
+  return n === "recovered" || n === "converted";
 }
 
 /* ---------------- Tones ---------------- */
@@ -74,13 +157,39 @@ function toneForJobStatus(status: string): BadgeTone {
   return "info";
 }
 function toneForOutcome(outcome: string | null): BadgeTone {
-  const s = safeStr(outcome).toLowerCase();
-  if (!s) return "neutral";
-  if (s.includes("recovered") || s.includes("converted")) return "success";
-  if (s.includes("no_answer") || s.includes("voicemail")) return "warning";
-  if (s.includes("needs_follow") || s.includes("needs follow") || s.includes("follow")) return "warning";
-  if (s.includes("not_recovered") || s.includes("not interested")) return "critical";
+  const n = normalizeOutcome(outcome);
+  if (n === "none") return "neutral";
+  if (n === "recovered" || n === "converted") return "success";
+  if (n === "not_recovered" || n === "not_interested") return "critical";
+  if (n === "no_answer" || n === "voicemail" || n === "needs_followup") return "warning";
   return "info";
+}
+
+function outcomeLabel(outcome: string | null): string {
+  const n = normalizeOutcome(outcome);
+  switch (n) {
+    case "none":
+      return "OUTCOME —";
+    case "recovered":
+      return "RECOVERED";
+    case "converted":
+      return "CONVERTED";
+    case "not_recovered":
+      return "NOT RECOVERED";
+    case "not_interested":
+      return "NOT INTERESTED";
+    case "no_answer":
+      return "NO ANSWER";
+    case "voicemail":
+      return "VOICEMAIL";
+    case "needs_followup":
+      return "NEEDS FOLLOW-UP";
+    case "other":
+    default: {
+      const raw = safeStr(outcome).trim();
+      return raw ? raw.toUpperCase() : "OUTCOME —";
+    }
+  }
 }
 
 /* ---------------- Types ---------------- */
@@ -115,6 +224,14 @@ type Row = {
   thumbUrl: string | null;
   itemsCount: number;
 
+  // recovery fields (DB)
+  recoveredAt: string | null;
+  recoveredOrderId: string | null;
+  recoveredAmount: number | null;
+
+  // eligibility (computed server-side using settings.minOrderValue, fallback 0)
+  eligibleAtRisk: boolean;
+
   callStatus: string | null;
   callOutcome: string | null;
   aiStatus: string | null;
@@ -134,6 +251,10 @@ type Row = {
   endedReason: string | null;
   answered: boolean | null;
   voicemail: boolean | null;
+
+  // optional discount fields (present only if columns exist)
+  discountSuggest?: boolean | null;
+  discountPercent?: number | null;
 
   latestJobId: string | null;
   latestProviderCallId: string | null;
@@ -210,13 +331,30 @@ function pct(part: number, whole: number) {
   if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0) return 0;
   return Math.max(0, Math.min(100, Math.round((part / whole) * 100)));
 }
+function tiny(v: any) {
+  const s = safeStr(v).trim();
+  return s ? s : "—";
+}
+
+function clip(text: string) {
+  try {
+    void navigator.clipboard.writeText(text);
+  } catch {}
+}
 
 /* ---------------- Loader ---------------- */
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  await ensureSettings(shop);
+  // keep ensureSettings
+  const settings: any = await ensureSettings(shop);
+  const minOrderValue =
+    typeof settings?.minOrderValue === "number"
+      ? settings.minOrderValue
+      : typeof settings?.min_order_value === "number"
+        ? settings.min_order_value
+        : 0;
 
   const [checkouts, jobs] = await Promise.all([
     db.checkout.findMany({
@@ -235,6 +373,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         value: true,
         currency: true,
         itemsJson: true,
+
+        // ✅ required for recovered metrics/list
+        recoveredAt: true,
+        recoveredOrderId: true,
+        recoveredAmount: true,
       },
     }),
     db.callJob.findMany({
@@ -302,7 +445,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const checkoutIds = cleanIdList(opts.checkoutIds ?? []);
     if (callIds.length === 0 && callJobIds.length === 0 && checkoutIds.length === 0) return out;
 
-    const select = [
+    const baseSelectFields = [
       "shop",
       "call_id",
       "call_job_id",
@@ -340,20 +483,24 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       "ai_result",
       "structured_outputs",
       "payload",
-    ].join(",");
+    ];
+
+    // Try extended select for discount chip; fall back if columns don't exist.
+    const extendedSelectFields = [...baseSelectFields, "discount_suggest", "discount_percent"];
 
     const orParts: string[] = [];
     if (callIds.length) orParts.push(`call_id.in.(${callIds.join(",")})`);
     if (callJobIds.length) orParts.push(`call_job_id.in.(${callJobIds.join(",")})`);
     if (checkoutIds.length) orParts.push(`checkout_id.in.(${checkoutIds.join(",")})`);
 
-    const params = new URLSearchParams();
-    params.set("select", select);
-    params.set("or", `(${orParts.join(",")})`);
-    params.set("order", "last_received_at.desc,received_at.desc");
-
-    const withShopParams = new URLSearchParams(params);
-    withShopParams.set("shop", `eq.${opts.shop}`);
+    function makeParams(select: string, includeShopFilter: boolean) {
+      const p = new URLSearchParams();
+      p.set("select", select);
+      p.set("or", `(${orParts.join(",")})`);
+      p.set("order", "last_received_at.desc,received_at.desc");
+      if (includeShopFilter) p.set("shop", `eq.${opts.shop}`);
+      return p;
+    }
 
     async function doFetch(p: URLSearchParams) {
       const endpoint = `${url}/rest/v1/vapi_call_summaries?${p.toString()}`;
@@ -365,13 +512,41 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           "content-type": "application/json",
         },
       });
-      if (!r.ok) return null as any;
+      if (!r.ok) {
+        let text = "";
+        try {
+          text = await r.text();
+        } catch {}
+        return { ok: false as const, status: r.status, text };
+      }
       const data = (await r.json()) as SupabaseCallSummary[];
-      return Array.isArray(data) ? data : [];
+      return { ok: true as const, data: Array.isArray(data) ? data : [] };
     }
 
-    let data = await doFetch(withShopParams);
-    if (data && data.length === 0) data = await doFetch(params);
+    async function fetchWithSelect(selectFields: string[]) {
+      const select = selectFields.join(",");
+      const withShop = makeParams(select, true);
+      const withoutShop = makeParams(select, false);
+
+      let res = await doFetch(withShop);
+      if (res.ok && res.data.length === 0) res = await doFetch(withoutShop);
+      return res;
+    }
+
+    // attempt extended select first
+    let res = await fetchWithSelect(extendedSelectFields);
+    if (!res.ok) {
+      const msg = (res.text || "").toLowerCase();
+      const looksLikeMissingColumn =
+        res.status === 400 &&
+        (msg.includes("discount_suggest") || msg.includes("discount_percent") || msg.includes("column") || msg.includes("does not exist"));
+
+      if (looksLikeMissingColumn) {
+        res = await fetchWithSelect(baseSelectFields);
+      }
+    }
+
+    const data = res.ok ? res.data : [];
 
     for (const row of data || []) {
       if (!row) continue;
@@ -427,6 +602,33 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const cartPreview = buildCartPreview(c.itemsJson ?? null);
     const { thumbUrl, count } = getThumbAndCount(c.itemsJson ?? null);
 
+    const raRaw = (c as any).recoveredAmount;
+    const recoveredAmount = raRaw == null ? null : Number(raRaw);
+    const recoveredAmountSafe = Number.isFinite(recoveredAmount as any) ? (recoveredAmount as number) : null;
+
+    const recoveredAtIso = (c as any).recoveredAt ? new Date((c as any).recoveredAt).toISOString() : null;
+    const recoveredOrderId = safeStr((c as any).recoveredOrderId).trim() ? String((c as any).recoveredOrderId) : null;
+
+    const statusUpper = safeStr(c.status).toUpperCase();
+    const hasContact = !!safeStr(c.phone).trim() || !!safeStr(c.email).trim();
+    const eligibleAtRisk = statusUpper === "ABANDONED" && Number(c.value ?? 0) >= Number(minOrderValue || 0) && hasContact;
+
+    // optional discount fields (only if columns exist / selected)
+    const hasDiscountSuggest =
+      sb && Object.prototype.hasOwnProperty.call(sb as any, "discount_suggest");
+    const hasDiscountPercent =
+      sb && Object.prototype.hasOwnProperty.call(sb as any, "discount_percent");
+
+    const discountSuggest = hasDiscountSuggest
+      ? ((sb as any).discount_suggest == null ? null : Boolean((sb as any).discount_suggest))
+      : undefined;
+
+    const dpRaw = hasDiscountPercent ? (sb as any).discount_percent : undefined;
+    const discountPercent =
+      hasDiscountPercent
+        ? (dpRaw == null ? null : Number(dpRaw))
+        : undefined;
+
     return {
       checkoutId,
       status: String(c.status),
@@ -443,6 +645,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       cartPreview,
       thumbUrl,
       itemsCount: count,
+
+      recoveredAt: recoveredAtIso,
+      recoveredOrderId,
+      recoveredAmount: recoveredAmountSafe,
+
+      eligibleAtRisk,
 
       callStatus: j ? String(j.status) : null,
       callOutcome: (sb as any)?.call_outcome ? String((sb as any).call_outcome) : null,
@@ -467,6 +675,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       answered: typeof (sb as any)?.answered === "boolean" ? Boolean((sb as any)?.answered) : null,
       voicemail: typeof (sb as any)?.voicemail === "boolean" ? Boolean((sb as any)?.voicemail) : null,
 
+      discountSuggest,
+      discountPercent: discountPercent == null ? discountPercent : Number.isFinite(discountPercent) ? discountPercent : null,
+
       latestJobId: j?.id ? String(j.id) : null,
       latestProviderCallId: j?.providerCallId ? String(j.providerCallId) : null,
     };
@@ -475,29 +686,32 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return { shop, rows } satisfies LoaderData;
 };
 
-/* ---------------- UI helpers ---------------- */
-function sumMoney(rows: Row[], pred: (r: Row) => boolean) {
-  let n = 0;
-  for (const r of rows) if (pred(r)) n += Number(r.value || 0);
-  return n;
+/* ---------------- Core derived rules ---------------- */
+function hasContact(r: Row) {
+  return !!safeStr(r.phone).trim() || !!safeStr(r.email).trim();
 }
 
 function isRecovered(r: Row) {
   const s = safeStr(r.status).toUpperCase();
   if (s === "RECOVERED" || s === "CONVERTED") return true;
-  const o = safeStr(r.callOutcome).toLowerCase();
-  return o.includes("recovered") || o.includes("converted");
+  if (r.recoveredAt != null) return true;
+  if (r.recoveredOrderId != null) return true;
+  return isRecoveredOutcome(r.callOutcome);
 }
-function isAtRisk(r: Row) {
-  return safeStr(r.status).toUpperCase() === "ABANDONED";
+
+function recoveredRowRevenue(r: Row) {
+  const ra = r.recoveredAmount == null ? 0 : Number(r.recoveredAmount);
+  const useRecovered = Number.isFinite(ra) && ra > 0;
+  return useRecovered ? ra : Number(r.value || 0);
 }
 
 function urgencyScore(r: Row) {
-  // higher score = show higher
+  // higher score = higher urgency
   let score = 0;
 
   const status = safeStr(r.status).toUpperCase();
-  if (status === "ABANDONED") score += 80;
+  if (r.eligibleAtRisk) score += 95;
+  else if (status === "ABANDONED") score += 70;
   else if (status === "OPEN") score += 35;
 
   const callStatus = safeStr(r.callStatus).toUpperCase();
@@ -506,10 +720,10 @@ function urgencyScore(r: Row) {
   if (callStatus === "QUEUED") score += 10;
   if (callStatus === "CALLING") score += 6;
 
-  const outcome = safeStr(r.callOutcome).toLowerCase();
-  if (outcome.includes("needs_follow") || outcome.includes("follow")) score += 25;
-  if (outcome.includes("voicemail") || outcome.includes("no_answer")) score += 18;
-  if (outcome.includes("not_recovered") || outcome.includes("not interested")) score += 22;
+  const n = normalizeOutcome(r.callOutcome);
+  if (n === "needs_followup") score += 24;
+  if (n === "voicemail" || n === "no_answer") score += 18;
+  if (n === "not_recovered" || n === "not_interested") score += 10;
 
   const buy = typeof r.buyProbabilityPct === "number" ? r.buyProbabilityPct : 0;
   score += Math.round(buy * 0.35);
@@ -517,68 +731,174 @@ function urgencyScore(r: Row) {
   const val = Number(r.value || 0);
   score += Math.min(30, Math.round(val / 100));
 
+  // stale work gets pushed down slightly; recent gets a bump
+  const t = Date.parse(r.updatedAt);
+  if (Number.isFinite(t)) {
+    const ageHours = Math.max(0, (Date.now() - t) / (1000 * 60 * 60));
+    if (ageHours < 6) score += 6;
+    else if (ageHours < 24) score += 2;
+    else if (ageHours > 168) score -= 6;
+  }
+
   return score;
 }
 
+/* ---------------- UI helpers ---------------- */
 function Badge({ tone, children, label }: { tone: BadgeTone; children: React.ReactNode; label?: string }) {
   // @ts-ignore
   return <s-badge tone={tone} accessibilityLabel={label || ""}>{children}</s-badge>;
 }
 
-function clip(text: string) {
-  try {
-    void navigator.clipboard.writeText(text);
-  } catch {}
+type FilterKey = "all" | "abandoned" | "followups" | "high_intent" | "no_answer" | "discounts";
+
+function isFollowUpCandidate(r: Row) {
+  const n = normalizeOutcome(r.callOutcome);
+  return n === "needs_followup" || !!safeStr(r.nextBestAction).trim() || !!safeStr(r.followUpMessage).trim();
 }
 
-function tiny(v: any) {
-  const s = safeStr(v).trim();
-  return s ? s : "—";
+function isNoAnswerCandidate(r: Row) {
+  const n = normalizeOutcome(r.callOutcome);
+  return n === "no_answer" || r.answered === false;
+}
+
+function isDiscountCandidate(r: Row) {
+  const ds = r.discountSuggest;
+  const dp = r.discountPercent;
+  const dpNum = dp == null ? 0 : Number(dp);
+  const dpOk = Number.isFinite(dpNum) && dpNum > 0;
+  return ds === true || dpOk;
 }
 
 export default function Checkouts() {
   const { shop, rows } = useLoaderData<typeof loader>();
 
+  const currency = (rows.find((r) => safeStr(r.currency))?.currency ?? "USD").toUpperCase();
+
   const recoveredRows = React.useMemo(() => rows.filter(isRecovered), [rows]);
-  const atRiskRows = React.useMemo(() => rows.filter(isAtRisk), [rows]);
+  const eligibleAtRiskRows = React.useMemo(() => rows.filter((r) => r.eligibleAtRisk), [rows]);
 
-  const recoveredValue = React.useMemo(
-    () => sumMoney(rows, (r) => isRecovered(r)),
-    [rows],
-  );
-  const atRiskValue = React.useMemo(
-    () => sumMoney(rows, (r) => isAtRisk(r)),
-    [rows],
-  );
+  const recoveredRevenue = React.useMemo(() => {
+    let n = 0;
+    for (const r of recoveredRows) n += recoveredRowRevenue(r);
+    return n;
+  }, [recoveredRows]);
 
-  const winRate = React.useMemo(() => pct(recoveredRows.length, Math.max(1, rows.length)), [recoveredRows.length, rows.length]);
+  const atRiskRevenue = React.useMemo(() => {
+    let n = 0;
+    for (const r of eligibleAtRiskRows) n += Number(r.value || 0);
+    return n;
+  }, [eligibleAtRiskRows]);
+
+  const recoveredCount = recoveredRows.length;
+  const eligibleAtRiskCount = eligibleAtRiskRows.length;
+
+  const winRate = React.useMemo(() => {
+    const denom = recoveredCount + eligibleAtRiskCount;
+    if (denom <= 0) return 0;
+    return pct(recoveredCount, denom);
+  }, [recoveredCount, eligibleAtRiskCount]);
 
   const latest = rows[0] ?? null;
 
-  // prioritize active work list (exclude recovered)
-  const workRows = React.useMemo(() => {
+  const mostUrgentAtRisk = React.useMemo(() => {
+    if (eligibleAtRiskRows.length === 0) return null;
+    return eligibleAtRiskRows
+      .slice()
+      .sort((a, b) => {
+        const u = urgencyScore(b) - urgencyScore(a);
+        if (u !== 0) return u;
+        return Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+      })[0] ?? null;
+  }, [eligibleAtRiskRows]);
+
+  const recoveredRecent = React.useMemo(() => {
+    return recoveredRows
+      .slice()
+      .sort((a, b) => {
+        const ta = Date.parse(a.recoveredAt || a.updatedAt);
+        const tb = Date.parse(b.recoveredAt || b.updatedAt);
+        return tb - ta;
+      })
+      .slice(0, 6);
+  }, [recoveredRows]);
+
+  // base work list (non-recovered), urgency-sorted
+  const baseWorkSorted = React.useMemo(() => {
     return rows
       .filter((r) => !isRecovered(r))
       .slice()
-      .sort((a, b) => urgencyScore(b) - urgencyScore(a))
-      .slice(0, 80);
+      .sort((a, b) => urgencyScore(b) - urgencyScore(a));
   }, [rows]);
 
+  const hasDiscountFields = React.useMemo(() => {
+    return baseWorkSorted.some((r) => r.discountSuggest !== undefined || r.discountPercent !== undefined);
+  }, [baseWorkSorted]);
+
+  const counts = React.useMemo(() => {
+    const c = {
+      all: baseWorkSorted.length,
+      abandoned: 0,
+      followups: 0,
+      high_intent: 0,
+      no_answer: 0,
+      discounts: 0,
+    };
+
+    for (const r of baseWorkSorted) {
+      if (r.eligibleAtRisk) c.abandoned += 1;
+      if (isFollowUpCandidate(r)) c.followups += 1;
+      if (typeof r.buyProbabilityPct === "number" && r.buyProbabilityPct >= 70) c.high_intent += 1;
+      if (isNoAnswerCandidate(r)) c.no_answer += 1;
+      if (isDiscountCandidate(r)) c.discounts += 1;
+    }
+
+    return c;
+  }, [baseWorkSorted]);
+
+  const [activeFilter, setActiveFilter] = React.useState<FilterKey>("all");
+
+  const filteredWorkRows = React.useMemo(() => {
+    switch (activeFilter) {
+      case "abandoned":
+        return baseWorkSorted.filter((r) => r.eligibleAtRisk);
+      case "followups":
+        return baseWorkSorted.filter(isFollowUpCandidate);
+      case "high_intent":
+        return baseWorkSorted.filter((r) => typeof r.buyProbabilityPct === "number" && r.buyProbabilityPct >= 70);
+      case "no_answer":
+        return baseWorkSorted.filter(isNoAnswerCandidate);
+      case "discounts":
+        return baseWorkSorted.filter(isDiscountCandidate);
+      case "all":
+      default:
+        return baseWorkSorted;
+    }
+  }, [baseWorkSorted, activeFilter]);
+
+  const toReviewCount = filteredWorkRows.length;
+  const tableRows = React.useMemo(() => filteredWorkRows.slice(0, 80), [filteredWorkRows]);
+
   const [selectedId, setSelectedId] = React.useState<string | null>(() => {
-    // default: most urgent non-recovered; fallback latest
-    return workRows[0]?.checkoutId ?? latest?.checkoutId ?? null;
+    return tableRows[0]?.checkoutId ?? baseWorkSorted[0]?.checkoutId ?? latest?.checkoutId ?? null;
   });
 
+  // keep selection valid, prefer current filtered set
   React.useEffect(() => {
-    if (!selectedId) setSelectedId(workRows[0]?.checkoutId ?? latest?.checkoutId ?? null);
-  }, [selectedId, workRows, latest]);
-
-  // keep selection valid
-  React.useEffect(() => {
-    if (!selectedId) return;
+    const preferred = tableRows[0]?.checkoutId ?? baseWorkSorted[0]?.checkoutId ?? latest?.checkoutId ?? null;
+    if (!selectedId) {
+      setSelectedId(preferred);
+      return;
+    }
     const exists = rows.some((r) => r.checkoutId === selectedId);
-    if (!exists) setSelectedId(workRows[0]?.checkoutId ?? latest?.checkoutId ?? null);
-  }, [selectedId, rows, workRows, latest]);
+    if (!exists) {
+      setSelectedId(preferred);
+      return;
+    }
+    // if selected is not in filtered set and there is a filtered set, snap to top
+    if (filteredWorkRows.length > 0 && !filteredWorkRows.some((r) => r.checkoutId === selectedId)) {
+      setSelectedId(preferred);
+    }
+  }, [selectedId, rows, tableRows, baseWorkSorted, latest, filteredWorkRows]);
 
   const selected = React.useMemo(() => rows.find((r) => r.checkoutId === selectedId) ?? null, [rows, selectedId]);
 
@@ -601,7 +921,6 @@ export default function Checkouts() {
   const [modalKind, setModalKind] = React.useState<null | "transcript" | "raw" | "evidence">(null);
 
   const compactCell: React.CSSProperties = { paddingTop: 6, paddingBottom: 6, verticalAlign: "top" };
-
   const mono: React.CSSProperties = {
     margin: 0,
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
@@ -611,14 +930,16 @@ export default function Checkouts() {
     wordBreak: "break-word",
   };
 
-  const currency = (rows.find((r) => safeStr(r.currency))?.currency ?? "USD").toUpperCase();
+  const effectiveRecordingUrl = safeStr(details?.recordingUrl ?? selected?.recordingUrl).trim() || "";
+  const effectiveLogUrl = safeStr(sb?.log_url).trim() || safeStr(selected?.logUrl).trim() || "";
 
-  const recoveredRecent = React.useMemo(() => {
-    return recoveredRows
-      .slice()
-      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
-      .slice(0, 6);
-  }, [recoveredRows]);
+  function chipProps(key: FilterKey) {
+    const selected = activeFilter === key;
+    return {
+      selected,
+      onClick: () => setActiveFilter(key),
+    };
+  }
 
   return (
     <>
@@ -628,73 +949,101 @@ export default function Checkouts() {
         {/* @ts-ignore */}
         <s-section>
           {/* @ts-ignore */}
-          <s-grid
-            gap="base"
-            gridTemplateColumns="@container (inline-size < 960px) 1fr, 1.2fr 0.8fr"
-          >
-            {/* VALUE BOX */}
+          <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 1.2fr 0.8fr">
+            {/* PERFORMANCE */}
             {/* @ts-ignore */}
-            <s-box border="base" borderRadius="base" padding="base" background="subdued">
+            <s-box border="base" borderRadius="base" padding="base">
               {/* @ts-ignore */}
               <s-stack gap="tight">
                 {/* @ts-ignore */}
-                <s-text variant="headingMd">Recovered revenue + AI call outcomes.</s-text>
-                {/* @ts-ignore */}
-                <s-text tone="subdued">
-                  Win rate {winRate}% • {rows.length} checkouts tracked • Latest update {latest ? formatWhen(latest.updatedAt) : "—"}
-                </s-text>
+                <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center", flexWrap: "wrap" }}>
+                  {/* @ts-ignore */}
+                  <s-text variant="headingMd">Performance</s-text>
+                  {/* @ts-ignore */}
+                  <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap", alignItems: "center" }}>
+                    {/* @ts-ignore */}
+                    <s-badge tone="success">{recoveredCount} wins</s-badge>
+                    {/* @ts-ignore */}
+                    <s-badge tone="warning">{eligibleAtRiskCount} at-risk</s-badge>
+                    {/* @ts-ignore */}
+                    <s-badge tone="info">{winRate}% win rate</s-badge>
+                  </s-stack>
+                </s-stack>
 
                 {/* @ts-ignore */}
                 <s-grid gap="base" gridTemplateColumns="@container (inline-size < 860px) 1fr, 1fr 1fr 1fr">
+                  {/* Recovered revenue */}
                   {/* @ts-ignore */}
-                  <s-box border="base" borderRadius="base" padding="base">
+                  <s-box border="base" borderRadius="base" padding="base" background="subdued">
                     {/* @ts-ignore */}
                     <s-stack gap="tight">
                       {/* @ts-ignore */}
-                      <s-text tone="subdued" variant="bodySm">Recovered</s-text>
+                      <s-text tone="subdued" variant="bodySm">Recovered revenue</s-text>
                       {/* @ts-ignore */}
-                      <s-text variant="headingLg">{fmtMoney(recoveredValue, currency)}</s-text>
-                      {/* @ts-ignore */}
-                      <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
-                        {/* @ts-ignore */}
-                        <s-badge tone="success">{recoveredRows.length} wins</s-badge>
-                        {/* @ts-ignore */}
-                        <s-badge tone="info">{winRate}% win</s-badge>
-                      </s-stack>
-                    </s-stack>
-                  </s-box>
-
-                  {/* @ts-ignore */}
-                  <s-box border="base" borderRadius="base" padding="base">
-                    {/* @ts-ignore */}
-                    <s-stack gap="tight">
-                      {/* @ts-ignore */}
-                      <s-text tone="subdued" variant="bodySm">At-risk</s-text>
-                      {/* @ts-ignore */}
-                      <s-text variant="headingLg">{fmtMoney(atRiskValue, currency)}</s-text>
-                      {/* @ts-ignore */}
-                      <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
-                        {/* @ts-ignore */}
-                        <s-badge tone="critical">{atRiskRows.length} abandoned</s-badge>
-                        {/* @ts-ignore */}
-                        <s-badge tone="warning">Needs action</s-badge>
-                      </s-stack>
-                    </s-stack>
-                  </s-box>
-
-                  {/* @ts-ignore */}
-                  <s-box border="base" borderRadius="base" padding="base">
-                    {/* @ts-ignore */}
-                    <s-stack gap="tight">
-                      {/* @ts-ignore */}
-                      <s-text tone="subdued" variant="bodySm">Most recent</s-text>
-                      {/* @ts-ignore */}
-                      <s-text variant="headingMd">
-                        {latest ? fmtMoney(Number(latest.value || 0), latest.currency) : "—"}
-                      </s-text>
+                      <s-text variant="headingLg">{fmtMoney(recoveredRevenue, currency)}</s-text>
                       {/* @ts-ignore */}
                       <s-text tone="subdued" variant="bodySm">
-                        {latest ? `${safeStr(latest.customerName) || "—"} • ${formatWhen(latest.updatedAt)}` : "—"}
+                        Uses recovered amount when available
+                      </s-text>
+                    </s-stack>
+                  </s-box>
+
+                  {/* At-risk revenue */}
+                  {/* @ts-ignore */}
+                  <s-box border="base" borderRadius="base" padding="base" background="subdued">
+                    {/* @ts-ignore */}
+                    <s-stack gap="tight">
+                      {/* @ts-ignore */}
+                      <s-text tone="subdued" variant="bodySm">At-risk revenue</s-text>
+                      {/* @ts-ignore */}
+                      <s-text variant="headingLg">{fmtMoney(atRiskRevenue, currency)}</s-text>
+                      {/* @ts-ignore */}
+                      <s-text tone="subdued" variant="bodySm">
+                        Eligible abandoned (min value + contact)
+                      </s-text>
+                    </s-stack>
+                  </s-box>
+
+                  {/* Win rate */}
+                  {/* @ts-ignore */}
+                  <s-box border="base" borderRadius="base" padding="base" background="subdued">
+                    {/* @ts-ignore */}
+                    <s-stack gap="tight">
+                      {/* @ts-ignore */}
+                      <s-text tone="subdued" variant="bodySm">Win rate</s-text>
+                      {/* @ts-ignore */}
+                      <s-text variant="headingLg">{winRate}%</s-text>
+                      {/* @ts-ignore */}
+                      <s-text tone="subdued" variant="bodySm">
+                        wins / (wins + eligible at-risk)
+                      </s-text>
+                    </s-stack>
+                  </s-box>
+
+                  {/* Compact recency */}
+                  {/* @ts-ignore */}
+                  <s-box border="base" borderRadius="base" padding="base" background="subdued">
+                    {/* @ts-ignore */}
+                    <s-stack gap="tight">
+                      {/* @ts-ignore */}
+                      <s-text tone="subdued" variant="bodySm">
+                        {mostUrgentAtRisk ? "Most urgent at-risk" : "Most recent update"}
+                      </s-text>
+                      {/* @ts-ignore */}
+                      <s-text variant="headingMd">
+                        {mostUrgentAtRisk
+                          ? fmtMoney(Number(mostUrgentAtRisk.value || 0), mostUrgentAtRisk.currency)
+                          : latest
+                            ? fmtMoney(Number(latest.value || 0), latest.currency)
+                            : "—"}
+                      </s-text>
+                      {/* @ts-ignore */}
+                      <s-text tone="subdued" variant="bodySm" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {mostUrgentAtRisk
+                          ? `${safeStr(mostUrgentAtRisk.customerName) || `Checkout #${mostUrgentAtRisk.checkoutId}`} • ${formatWhen(mostUrgentAtRisk.updatedAt)}`
+                          : latest
+                            ? `${safeStr(latest.customerName) || `Checkout #${latest.checkoutId}`} • ${formatWhen(latest.updatedAt)}`
+                            : "—"}
                       </s-text>
                     </s-stack>
                   </s-box>
@@ -704,12 +1053,7 @@ export default function Checkouts() {
 
             {/* RECOVERED WINS – SPECIAL BOX */}
             {/* @ts-ignore */}
-            <s-box
-              border="base"
-              borderRadius="base"
-              padding="base"
-              style={{ background: "rgba(0,128,96,0.08)" }}
-            >
+            <s-box border="base" borderRadius="base" padding="base" style={{ background: "rgba(0,128,96,0.08)" }}>
               {/* @ts-ignore */}
               <s-stack gap="tight">
                 {/* @ts-ignore */}
@@ -717,13 +1061,8 @@ export default function Checkouts() {
                   {/* @ts-ignore */}
                   <s-text variant="headingMd">Recovered wins</s-text>
                   {/* @ts-ignore */}
-                  <s-badge tone="success">{recoveredRows.length}</s-badge>
+                  <s-badge tone="success">{recoveredCount}</s-badge>
                 </s-stack>
-
-                {/* @ts-ignore */}
-                <s-text tone="subdued" variant="bodySm">
-                  Click a win to open full outcome details on the right.
-                </s-text>
 
                 {/* @ts-ignore */}
                 <s-box border="base" borderRadius="base" style={{ overflow: "hidden", background: "rgba(255,255,255,0.7)" }}>
@@ -734,9 +1073,9 @@ export default function Checkouts() {
                       {/* @ts-ignore */}
                       <s-table-header>Customer</s-table-header>
                       {/* @ts-ignore */}
-                      <s-table-header format="numeric" style={{ width: 120 }}>Amount</s-table-header>
+                      <s-table-header format="numeric" style={{ width: 130 }}>Amount</s-table-header>
                       {/* @ts-ignore */}
-                      <s-table-header style={{ width: 120 }}>When</s-table-header>
+                      <s-table-header style={{ width: 140 }}>When</s-table-header>
                     </s-table-header-row>
 
                     {/* @ts-ignore */}
@@ -753,6 +1092,8 @@ export default function Checkouts() {
                       ) : (
                         recoveredRecent.map((r) => {
                           const id = r.checkoutId;
+                          const whenIso = r.recoveredAt || r.updatedAt;
+                          const amt = recoveredRowRevenue(r);
                           return (
                             // @ts-ignore
                             <s-table-row key={id} clickDelegate={`win-${id}`}>
@@ -774,13 +1115,13 @@ export default function Checkouts() {
                                 </s-link>
                                 {/* @ts-ignore */}
                                 <s-text tone="subdued" variant="bodySm">
-                                  {safeStr(r.callOutcome) ? safeStr(r.callOutcome).toUpperCase() : "RECOVERED"}
+                                  {outcomeLabel(r.callOutcome)}
                                 </s-text>
                               </s-table-cell>
                               {/* @ts-ignore */}
-                              <s-table-cell style={compactCell}>{fmtMoney(Number(r.value || 0), r.currency)}</s-table-cell>
+                              <s-table-cell style={compactCell}>{fmtMoney(amt, r.currency)}</s-table-cell>
                               {/* @ts-ignore */}
-                              <s-table-cell style={compactCell}>{formatWhen(r.updatedAt)}</s-table-cell>
+                              <s-table-cell style={compactCell}>{formatWhen(whenIso)}</s-table-cell>
                             </s-table-row>
                           );
                         })
@@ -797,11 +1138,8 @@ export default function Checkouts() {
         {/* @ts-ignore */}
         <s-section>
           {/* @ts-ignore */}
-          <s-grid
-            gap="base"
-            gridTemplateColumns="@container (inline-size < 1100px) 1fr, 1.15fr 0.85fr"
-          >
-            {/* LEFT: ACTION QUEUE (AT-RISK + OPEN + FAILED) */}
+          <s-grid gap="base" gridTemplateColumns="@container (inline-size < 1100px) 1fr, 1.15fr 0.85fr">
+            {/* LEFT: ACTION QUEUE */}
             {/* @ts-ignore */}
             <s-section>
               {/* @ts-ignore */}
@@ -811,16 +1149,37 @@ export default function Checkouts() {
                   {/* @ts-ignore */}
                   <s-text variant="headingMd">Action queue</s-text>
                   {/* @ts-ignore */}
-                  <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
+                  <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap", alignItems: "center" }}>
                     {/* @ts-ignore */}
-                    <s-badge tone="critical">{atRiskRows.length} abandoned</s-badge>
+                    <s-badge tone="info">{toReviewCount} to review</s-badge>
                     {/* @ts-ignore */}
-                    <s-badge tone="info">{workRows.length} to review</s-badge>
-                    {/* @ts-ignore */}
-                    <s-badge tone="new">Sorted by urgency</s-badge>
+                    <s-badge tone="neutral">Urgency sorted</s-badge>
                   </s-stack>
                 </s-stack>
 
+                {/* FILTER CHIPS */}
+                {/* @ts-ignore */}
+                <s-box border="base" borderRadius="base" padding="base" background="subdued">
+                  {/* @ts-ignore */}
+                  <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap", alignItems: "center" }}>
+                    {/* @ts-ignore */}
+                    <s-chip {...chipProps("all")}>All ({counts.all})</s-chip>
+                    {/* @ts-ignore */}
+                    <s-chip {...chipProps("abandoned")}>Abandoned ({counts.abandoned})</s-chip>
+                    {/* @ts-ignore */}
+                    <s-chip {...chipProps("followups")}>Follow-ups ({counts.followups})</s-chip>
+                    {/* @ts-ignore */}
+                    <s-chip {...chipProps("high_intent")}>High intent ({counts.high_intent})</s-chip>
+                    {/* @ts-ignore */}
+                    <s-chip {...chipProps("no_answer")}>No answer ({counts.no_answer})</s-chip>
+                    {hasDiscountFields ? (
+                      // @ts-ignore
+                      <s-chip {...chipProps("discounts")}>Discounts ({counts.discounts})</s-chip>
+                    ) : null}
+                  </s-stack>
+                </s-box>
+
+                {/* TABLE */}
                 {/* @ts-ignore */}
                 <s-box border="base" borderRadius="base" style={{ overflow: "hidden" }}>
                   {/* @ts-ignore */}
@@ -834,14 +1193,14 @@ export default function Checkouts() {
                       {/* @ts-ignore */}
                       <s-table-header format="numeric" style={{ width: 120 }}>Value</s-table-header>
                       {/* @ts-ignore */}
-                      <s-table-header style={{ width: 190 }}>Signals</s-table-header>
+                      <s-table-header style={{ width: 200 }}>Signals</s-table-header>
                       {/* @ts-ignore */}
                       <s-table-header style={{ width: 260 }}>Next step</s-table-header>
                     </s-table-header-row>
 
                     {/* @ts-ignore */}
                     <s-table-body>
-                      {workRows.length === 0 ? (
+                      {tableRows.length === 0 ? (
                         // @ts-ignore
                         <s-table-row>
                           {/* @ts-ignore */}
@@ -851,7 +1210,7 @@ export default function Checkouts() {
                           </s-table-cell>
                         </s-table-row>
                       ) : (
-                        workRows.map((r) => {
+                        tableRows.map((r) => {
                           const isSel = r.checkoutId === selectedId;
                           const id = r.checkoutId;
 
@@ -860,11 +1219,14 @@ export default function Checkouts() {
                           const outcomeTone = toneForOutcome(r.callOutcome);
 
                           const customer = safeStr(r.customerName) || "—";
-                          const phone = safeStr(r.phone);
                           const cartLine = safeStr(r.cartPreview);
 
-                          const nba = safeStr(r.nextBestAction);
-                          const nbaText = nba ? nba : "—";
+                          const nba = safeStr(r.nextBestAction).trim();
+                          const follow = safeStr(r.followUpMessage).trim();
+                          const nextStep = nba || (follow ? "Send follow-up message" : "—");
+
+                          const buyBadge =
+                            typeof r.buyProbabilityPct === "number" ? `BUY ${r.buyProbabilityPct}%` : "BUY —";
 
                           return (
                             // @ts-ignore
@@ -875,14 +1237,12 @@ export default function Checkouts() {
                             >
                               {/* @ts-ignore */}
                               <s-table-cell style={compactCell}>
-                                <div style={{ width: 44, height: 44 }}>
-                                  {/* @ts-ignore */}
-                                  <s-thumbnail
-                                    src={r.thumbUrl || undefined}
-                                    alt={r.thumbUrl ? "Item" : "No image"}
-                                    size="small-200"
-                                  />
-                                </div>
+                                {/* @ts-ignore */}
+                                <s-thumbnail
+                                  src={r.thumbUrl || undefined}
+                                  alt={r.thumbUrl ? "Item" : "No image"}
+                                  size="small-200"
+                                />
                               </s-table-cell>
 
                               {/* @ts-ignore */}
@@ -903,12 +1263,12 @@ export default function Checkouts() {
                                       {/* @ts-ignore */}
                                       <s-text fontWeight="semibold">{customer}</s-text>
                                     </s-link>
-                                    {phone ? (
-                                      // @ts-ignore
-                                      <s-text tone="subdued" variant="bodySm">{phone}</s-text>
-                                    ) : null}
                                     {/* @ts-ignore */}
                                     <s-text tone="subdued" variant="bodySm">#{id}</s-text>
+                                    {r.eligibleAtRisk ? (
+                                      // @ts-ignore
+                                      <s-badge tone="warning">AT-RISK</s-badge>
+                                    ) : null}
                                   </s-stack>
 
                                   {/* @ts-ignore */}
@@ -945,9 +1305,9 @@ export default function Checkouts() {
                                   {/* @ts-ignore */}
                                   <s-badge tone={callTone}>{r.callStatus ? safeStr(r.callStatus).toUpperCase() : "NO CALL"}</s-badge>
                                   {/* @ts-ignore */}
-                                  <s-badge tone={outcomeTone}>{r.callOutcome ? safeStr(r.callOutcome).toUpperCase() : "—"}</s-badge>
+                                  <s-badge tone={outcomeTone}>{outcomeLabel(r.callOutcome)}</s-badge>
                                   {/* @ts-ignore */}
-                                  <s-badge tone="info">{r.buyProbabilityPct == null ? "Buy —" : `Buy ${r.buyProbabilityPct}%`}</s-badge>
+                                  <s-badge tone={typeof r.buyProbabilityPct === "number" ? "info" : "neutral"}>{buyBadge}</s-badge>
                                 </s-stack>
                               </s-table-cell>
 
@@ -957,20 +1317,17 @@ export default function Checkouts() {
                                 <s-stack gap="tight">
                                   {/* @ts-ignore */}
                                   <s-text
-                                    tone={nbaText === "—" ? "subdued" : "base"}
+                                    tone={nextStep === "—" ? "subdued" : "base"}
                                     style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-                                    title={nbaText}
+                                    title={nextStep}
                                   >
-                                    {nbaText}
+                                    {nextStep}
                                   </s-text>
 
                                   {/* @ts-ignore */}
                                   <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
                                     {/* @ts-ignore */}
-                                    <s-button
-                                      variant="secondary"
-                                      onClick={() => setSelectedId(id)}
-                                    >
+                                    <s-button variant="secondary" onClick={() => setSelectedId(id)}>
                                       Open
                                     </s-button>
                                     {/* @ts-ignore */}
@@ -1007,7 +1364,8 @@ export default function Checkouts() {
             </s-section>
 
             {/* RIGHT: DETAILS (STICKY) */}
-            <div style={{ position: "sticky", top: 16, alignSelf: "start" }}>
+            {/* @ts-ignore */}
+            <s-box style={{ position: "sticky", top: 16, alignSelf: "start" }}>
               {/* @ts-ignore */}
               <s-section>
                 {/* @ts-ignore */}
@@ -1044,7 +1402,7 @@ export default function Checkouts() {
                     ) : (
                       // @ts-ignore
                       <s-stack gap="base">
-                        {/* Status chips */}
+                        {/* 1) Status badges row */}
                         {/* @ts-ignore */}
                         <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
                           {/* @ts-ignore */}
@@ -1054,19 +1412,18 @@ export default function Checkouts() {
 
                           {details?.latestJob?.status ? (
                             // @ts-ignore
-                            <s-badge tone={toneForJobStatus(details.latestJob.status)}>{safeStr(details.latestJob.status).toUpperCase()}</s-badge>
+                            <s-badge tone={toneForJobStatus(details.latestJob.status)}>
+                              {safeStr(details.latestJob.status).toUpperCase()}
+                            </s-badge>
                           ) : (
                             // @ts-ignore
                             <s-badge tone="neutral">NO JOB</s-badge>
                           )}
 
-                          {sb?.call_outcome ? (
-                            // @ts-ignore
-                            <s-badge tone={toneForOutcome(sb.call_outcome)}>{safeStr(sb.call_outcome).toUpperCase()}</s-badge>
-                          ) : (
-                            // @ts-ignore
-                            <s-badge tone="neutral">OUTCOME —</s-badge>
-                          )}
+                          {/* @ts-ignore */}
+                          <s-badge tone={toneForOutcome(sb?.call_outcome ?? selected.callOutcome)}>
+                            {outcomeLabel(sb?.call_outcome ?? selected.callOutcome)}
+                          </s-badge>
 
                           {sb?.ai_status ? (
                             // @ts-ignore
@@ -1078,23 +1435,39 @@ export default function Checkouts() {
 
                           {typeof sb?.buy_probability === "number" ? (
                             // @ts-ignore
-                            <s-badge tone="info">{`Buy ${Math.round(sb.buy_probability)}%`}</s-badge>
+                            <s-badge tone="info">{`BUY ${Math.round(sb.buy_probability)}%`}</s-badge>
+                          ) : typeof selected.buyProbabilityPct === "number" ? (
+                            // @ts-ignore
+                            <s-badge tone="info">{`BUY ${selected.buyProbabilityPct}%`}</s-badge>
                           ) : (
                             // @ts-ignore
-                            <s-badge tone="neutral">Buy —</s-badge>
+                            <s-badge tone="neutral">BUY —</s-badge>
                           )}
 
                           {sb?.answered != null ? (
                             // @ts-ignore
-                            <s-badge tone="new">{`Answered ${String(sb.answered)}`}</s-badge>
-                          ) : null}
+                            <s-badge tone={sb.answered ? "success" : "warning"}>{sb.answered ? "ANSWERED" : "NO ANSWER"}</s-badge>
+                          ) : selected.answered != null ? (
+                            // @ts-ignore
+                            <s-badge tone={selected.answered ? "success" : "warning"}>{selected.answered ? "ANSWERED" : "NO ANSWER"}</s-badge>
+                          ) : (
+                            // @ts-ignore
+                            <s-badge tone="neutral">ANSWER —</s-badge>
+                          )}
+
                           {sb?.voicemail != null ? (
                             // @ts-ignore
-                            <s-badge tone="new">{`Voicemail ${String(sb.voicemail)}`}</s-badge>
-                          ) : null}
+                            <s-badge tone={sb.voicemail ? "warning" : "neutral"}>{sb.voicemail ? "VOICEMAIL" : "NO VOICEMAIL"}</s-badge>
+                          ) : selected.voicemail != null ? (
+                            // @ts-ignore
+                            <s-badge tone={selected.voicemail ? "warning" : "neutral"}>{selected.voicemail ? "VOICEMAIL" : "NO VOICEMAIL"}</s-badge>
+                          ) : (
+                            // @ts-ignore
+                            <s-badge tone="neutral">VOICEMAIL —</s-badge>
+                          )}
                         </s-stack>
 
-                        {/* Customer + money */}
+                        {/* 2) Customer + Cart total box */}
                         {/* @ts-ignore */}
                         <s-box padding="base" border="base" borderRadius="base" background="subdued">
                           {/* @ts-ignore */}
@@ -1117,28 +1490,30 @@ export default function Checkouts() {
                               <s-text tone="subdued" variant="bodySm">Cart total</s-text>
                               {/* @ts-ignore */}
                               <s-text fontWeight="semibold">
-                                {fmtMoney(Number(details?.checkout?.value ?? selected.value ?? 0), String(details?.checkout?.currency ?? selected.currency))}
+                                {fmtMoney(
+                                  Number(details?.checkout?.value ?? selected.value ?? 0),
+                                  String(details?.checkout?.currency ?? selected.currency),
+                                )}
                               </s-text>
                               {/* @ts-ignore */}
                               <s-text tone="subdued" variant="bodySm">Updated {formatWhen(details?.checkout?.updatedAt ?? selected.updatedAt)}</s-text>
                               {/* @ts-ignore */}
                               <s-text tone="subdued" variant="bodySm">
-                                Abandoned {details?.checkout?.abandonedAt ? formatWhen(details.checkout.abandonedAt) : "—"}
+                                Abandoned {details?.checkout?.abandonedAt ? formatWhen(details.checkout.abandonedAt) : selected.abandonedAt ? formatWhen(selected.abandonedAt) : "—"}
                               </s-text>
                             </s-stack>
                           </s-grid>
                         </s-box>
 
-                        {/* Primary actions */}
+                        {/* 3) Primary actions row */}
                         {/* @ts-ignore */}
                         <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
                           {/* @ts-ignore */}
                           <s-button
                             variant="primary"
-                            disabled={!(details?.recordingUrl ?? selected.recordingUrl)}
+                            disabled={!effectiveRecordingUrl}
                             onClick={() => {
-                              const url = details?.recordingUrl ?? selected.recordingUrl;
-                              if (url) window.open(url, "_blank", "noreferrer");
+                              if (effectiveRecordingUrl) window.open(effectiveRecordingUrl, "_blank", "noreferrer");
                             }}
                           >
                             Recording
@@ -1147,10 +1522,9 @@ export default function Checkouts() {
                           {/* @ts-ignore */}
                           <s-button
                             variant="secondary"
-                            disabled={!safeStr(sb?.log_url).trim()}
+                            disabled={!effectiveLogUrl}
                             onClick={() => {
-                              const url = safeStr(sb?.log_url).trim();
-                              if (url) window.open(url, "_blank", "noreferrer");
+                              if (effectiveLogUrl) window.open(effectiveLogUrl, "_blank", "noreferrer");
                             }}
                           >
                             Logs
@@ -1172,7 +1546,7 @@ export default function Checkouts() {
                           </s-button>
                         </s-stack>
 
-                        {/* Next best action – focus block */}
+                        {/* 4) Next best action focus box */}
                         {/* @ts-ignore */}
                         <s-box border="base" borderRadius="base" padding="base" style={{ background: "rgba(0,91,211,0.06)" }}>
                           {/* @ts-ignore */}
@@ -1185,11 +1559,15 @@ export default function Checkouts() {
                               <s-badge tone="info">AI</s-badge>
                             </s-stack>
                             {/* @ts-ignore */}
-                            <s-text>{safeStr(sb?.next_best_action || sb?.best_next_action) || selected.nextBestAction || "—"}</s-text>
+                            <s-text>
+                              {safeStr(sb?.next_best_action || sb?.best_next_action).trim() ||
+                                safeStr(selected.nextBestAction).trim() ||
+                                "—"}
+                            </s-text>
                           </s-stack>
                         </s-box>
 
-                        {/* Follow-up message – copyable */}
+                        {/* 5) Follow-up message box with Copy */}
                         {/* @ts-ignore */}
                         <s-box border="base" borderRadius="base" padding="base">
                           {/* @ts-ignore */}
@@ -1214,7 +1592,7 @@ export default function Checkouts() {
                           </s-stack>
                         </s-box>
 
-                        {/* Signals (use ALL outcome signals that exist) */}
+                        {/* 6) Conversation signals grid */}
                         {/* @ts-ignore */}
                         <s-box border="base" borderRadius="base" padding="base">
                           {/* @ts-ignore */}
@@ -1230,6 +1608,7 @@ export default function Checkouts() {
                                 {/* @ts-ignore */}
                                 <s-text>{tiny(sb?.customer_intent || selected.customerIntent)}</s-text>
                               </s-stack>
+
                               {/* @ts-ignore */}
                               <s-stack gap="tight">
                                 {/* @ts-ignore */}
@@ -1237,6 +1616,7 @@ export default function Checkouts() {
                                 {/* @ts-ignore */}
                                 <s-text>{tiny(sb?.sentiment || selected.sentiment)}</s-text>
                               </s-stack>
+
                               {/* @ts-ignore */}
                               <s-stack gap="tight">
                                 {/* @ts-ignore */}
@@ -1244,6 +1624,7 @@ export default function Checkouts() {
                                 {/* @ts-ignore */}
                                 <s-text>{tiny(sb?.tone || selected.tone)}</s-text>
                               </s-stack>
+
                               {/* @ts-ignore */}
                               <s-stack gap="tight">
                                 {/* @ts-ignore */}
@@ -1251,6 +1632,7 @@ export default function Checkouts() {
                                 {/* @ts-ignore */}
                                 <s-text>{tiny(sb?.ended_reason || selected.endedReason)}</s-text>
                               </s-stack>
+
                               {/* @ts-ignore */}
                               <s-stack gap="tight">
                                 {/* @ts-ignore */}
@@ -1258,6 +1640,7 @@ export default function Checkouts() {
                                 {/* @ts-ignore */}
                                 <s-text>{tiny(sb?.latest_status || selected.latestStatus)}</s-text>
                               </s-stack>
+
                               {/* @ts-ignore */}
                               <s-stack gap="tight">
                                 {/* @ts-ignore */}
@@ -1269,7 +1652,7 @@ export default function Checkouts() {
                           </s-stack>
                         </s-box>
 
-                        {/* Items */}
+                        {/* 7) Items table */}
                         {/* @ts-ignore */}
                         <s-box border="base" borderRadius="base" style={{ overflow: "hidden" }}>
                           {/* @ts-ignore */}
@@ -1307,10 +1690,8 @@ export default function Checkouts() {
                                     <s-table-row key={`${title}-${idx}`}>
                                       {/* @ts-ignore */}
                                       <s-table-cell style={compactCell}>
-                                        <div style={{ width: 44, height: 44 }}>
-                                          {/* @ts-ignore */}
-                                          <s-thumbnail src={img || undefined} alt={img ? title : "No image"} size="small-200" />
-                                        </div>
+                                        {/* @ts-ignore */}
+                                        <s-thumbnail src={img || undefined} alt={img ? title : "No image"} size="small-200" />
                                       </s-table-cell>
                                       {/* @ts-ignore */}
                                       <s-table-cell style={compactCell}>
@@ -1337,7 +1718,7 @@ export default function Checkouts() {
                   </s-stack>
                 </s-box>
               </s-section>
-            </div>
+            </s-box>
           </s-grid>
         </s-section>
       </s-page>
@@ -1356,27 +1737,34 @@ export default function Checkouts() {
         {modalKind === "transcript" ? (
           <pre style={mono}>{safeStr(sb?.transcript) || "—"}</pre>
         ) : modalKind === "evidence" ? (
-          // show ALL the useful outcome fields, but in a readable grid/table
-          // key quotes, objections, issues, tags, summary, next action
-          // (kept in modal so the page doesn’t grow vertically)
           // @ts-ignore
           <s-stack gap="base">
+            {/* Summary + next action + follow-up */}
             {/* @ts-ignore */}
-            <s-box border="base" borderRadius="base" padding="base">
+            <s-grid gap="base" gridTemplateColumns="@container (inline-size < 900px) 1fr, 1fr 1fr">
               {/* @ts-ignore */}
-              <s-text variant="headingSm">Summary</s-text>
-              {/* @ts-ignore */}
-              <s-text tone="subdued">{safeStr(sb?.summary_clean || sb?.summary) || "—"}</s-text>
-            </s-box>
+              <s-box border="base" borderRadius="base" padding="base">
+                {/* @ts-ignore */}
+                <s-text variant="headingSm">Summary</s-text>
+                <pre style={mono}>{safeStr(sb?.summary_clean || sb?.summary) || "—"}</pre>
+              </s-box>
 
-            {/* @ts-ignore */}
-            <s-box border="base" borderRadius="base" padding="base">
               {/* @ts-ignore */}
-              <s-text variant="headingSm">Next best action</s-text>
-              {/* @ts-ignore */}
-              <s-text tone="subdued">{safeStr(sb?.next_best_action || sb?.best_next_action) || "—"}</s-text>
-            </s-box>
+              <s-box border="base" borderRadius="base" padding="base">
+                {/* @ts-ignore */}
+                <s-text variant="headingSm">Next best action</s-text>
+                <pre style={mono}>{safeStr(sb?.next_best_action || sb?.best_next_action) || "—"}</pre>
+              </s-box>
 
+              {/* @ts-ignore */}
+              <s-box border="base" borderRadius="base" padding="base">
+                {/* @ts-ignore */}
+                <s-text variant="headingSm">Follow-up message</s-text>
+                <pre style={mono}>{safeStr(sb?.follow_up_message) || "—"}</pre>
+              </s-box>
+            </s-grid>
+
+            {/* Key evidence fields */}
             {/* @ts-ignore */}
             <s-grid gap="base" gridTemplateColumns="@container (inline-size < 900px) 1fr, 1fr 1fr">
               {/* @ts-ignore */}
@@ -1404,7 +1792,23 @@ export default function Checkouts() {
               <s-box border="base" borderRadius="base" padding="base">
                 {/* @ts-ignore */}
                 <s-text variant="headingSm">Tags</s-text>
-                <pre style={mono}>{safeStr(sb?.tagcsv || (Array.isArray(sb?.tags) ? sb.tags.join(", ") : "")) || "—"}</pre>
+                <pre style={mono}>
+                  {safeStr(sb?.tagcsv || (Array.isArray(sb?.tags) ? sb.tags.join(", ") : "")) || "—"}
+                </pre>
+              </s-box>
+
+              {/* @ts-ignore */}
+              <s-box border="base" borderRadius="base" padding="base">
+                {/* @ts-ignore */}
+                <s-text variant="headingSm">Ended reason</s-text>
+                <pre style={mono}>{safeStr(sb?.ended_reason) || "—"}</pre>
+              </s-box>
+
+              {/* @ts-ignore */}
+              <s-box border="base" borderRadius="base" padding="base">
+                {/* @ts-ignore */}
+                <s-text variant="headingSm">Latest status</s-text>
+                <pre style={mono}>{safeStr(sb?.latest_status) || "—"}</pre>
               </s-box>
             </s-grid>
           </s-stack>

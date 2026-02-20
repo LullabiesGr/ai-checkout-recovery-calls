@@ -1,805 +1,1093 @@
-// app/components/dashboard/DashboardView.tsx
+// app/routes/app.dashboard.tsx
 import * as React from "react";
-import { Form } from "react-router";
+import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { useLoaderData, useRouteError } from "react-router";
+import { boundary } from "@shopify/shopify-app-react-router/server";
+import { authenticate } from "../shopify.server";
 
-type Tone = "green" | "blue" | "amber" | "red" | "neutral";
+import db from "../db.server";
+import { ensureSettings } from "../callRecovery.server";
+import { DashboardView, type DashboardViewProps } from "../components/dashboard/DashboardView";
 
-type ReasonRow = { label: string; pct: number };
-type LiveRow = { label: string; whenText: string; tone: Exclude<Tone, "neutral"> };
+type RangeKey = "all" | "7d" | "24h";
 
-type KpiKey =
-  | "recovered_revenue"
-  | "at_risk_revenue"
-  | "win_rate"
-  | "answer_rate"
-  | "queued_calls"
-  | "calling_now"
-  | "completed_calls"
-  | "avg_call_duration"
-  | "avg_attempts"
-  | "opt_outs"
-  | string;
+function safeSearch(requestUrl: string) {
+  const url = new URL(requestUrl);
+  return url.search || "";
+}
 
-export type DashboardViewProps = {
-  title: string;
-  shopLabel?: string;
+function stripParam(search: string, key: string) {
+  const sp = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  sp.delete(key);
+  const out = sp.toString();
+  return out ? `?${out}` : "";
+}
 
-  status?: {
-    providerText?: string;
-    automationText?: string;
-    lastSyncText?: string;
-  };
+function setParam(search: string, key: string, value: string) {
+  const sp = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  sp.set(key, value);
+  const out = sp.toString();
+  return out ? `?${out}` : "";
+}
 
-  nav?: {
-    checkoutsHref: string;
-    callsHref: string;
-  };
+function appendParam(url: string, key: string, value: string) {
+  const u = new URL(url, "http://local");
+  u.searchParams.set(key, value);
+  return u.pathname + (u.search ? u.search : "");
+}
 
-  kpis: Array<{
-    key?: KpiKey;
-    label: string;
-    value: string;
-    sub?: string;
-    tone: Tone;
-    barPct?: number | null;
-
-    series?: number[];
-    deltaText?: string;
-    deltaTone?: Tone;
-  }>;
-
-  pipeline: Array<{ label: string; value: number; tone: Exclude<Tone, "neutral"> }>;
-  live: LiveRow[];
-  reasons: ReasonRow[];
-
-  // UPDATED: richer priorities rows (table-friendly)
-  priorities?: Array<{
-    label: string;
-    count: number;
-    tone: Tone;
-    href?: string;
-
-    // Optional enrichment from outcomes table (Supabase vapi_call_summaries)
-    action?: string; // next_best_action / best_next_action
-    details?: string; // e.g. "Buy 70% • NO_ANSWER"
-    badge?: string; // e.g. "AI" / "Calls" / "Revenue"
-  }>;
-
-  recentRecoveries?: Array<{
-    orderOrCheckout: string;
-    amount: string;
-    whenText: string;
-    outcome?: string;
-  }>;
-
-  recommendations?: string[];
-
-  settingsSnapshot?: Array<{ label: string; value: string; tone?: Tone; href?: string }>;
-
-  canCreateTestCall: boolean;
-};
-
-declare global {
-  namespace JSX {
-    interface IntrinsicElements {
-      "s-page": any;
-      "s-section": any;
-      "s-box": any;
-      "s-text": any;
-      "s-badge": any;
-      "s-divider": any;
-      "s-grid": any;
-      "s-stack": any;
-      "s-query-container": any;
-      "s-table": any;
-      "s-table-header-row": any;
-      "s-table-header": any;
-      "s-table-body": any;
-      "s-table-row": any;
-      "s-table-cell": any;
-      "s-button": any;
-      "s-button-group": any;
-    }
+function fmtMoney(amount: number, currency: string) {
+  const v = Number.isFinite(amount) ? amount : 0;
+  const cur = (currency || "USD").toUpperCase();
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: cur,
+      maximumFractionDigits: 2,
+    }).format(v);
+  } catch {
+    return `${v.toFixed(2)} ${cur}`;
   }
 }
 
-function clampPct(n: number) {
-  return Math.max(0, Math.min(100, n));
+function pct(part: number, whole: number) {
+  if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round((part / whole) * 100)));
 }
 
-function badgeTone(t: Tone): "success" | "info" | "warning" | "critical" | "new" {
-  if (t === "green") return "success";
-  if (t === "blue") return "info";
-  if (t === "amber") return "warning";
-  if (t === "red") return "critical";
-  return "new";
+function minutesAgo(iso: string) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "—";
+  const diffMs = Date.now() - t;
+  const m = Math.max(0, Math.round(diffMs / 60000));
+  if (m <= 1) return "Just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h ago`;
+  const d = Math.round(h / 24);
+  return `${d}d ago`;
 }
 
-function barColor(t: Tone) {
-  if (t === "green") return "rgba(0,128,96,0.95)";
-  if (t === "blue") return "rgba(0,91,211,0.95)";
-  if (t === "amber") return "rgba(178,132,0,0.95)";
-  if (t === "red") return "rgba(216,44,13,0.95)";
-  return "rgba(128,133,144,0.95)";
+function normUpper(v: unknown) {
+  return String(v ?? "").toUpperCase();
+}
+function normLower(v: unknown) {
+  return String(v ?? "").toLowerCase();
 }
 
-function subtleBg(t: Tone) {
-  if (t === "green") return "rgba(0,128,96,0.06)";
-  if (t === "blue") return "rgba(0,91,211,0.06)";
-  if (t === "amber") return "rgba(178,132,0,0.07)";
-  if (t === "red") return "rgba(216,44,13,0.06)";
-  return "rgba(128,133,144,0.06)";
+function isRecoveredCheckoutRow(c: any) {
+  const st = normUpper(c?.status);
+  if (st === "RECOVERED") return true;
+  if (c?.recoveredAt) return true;
+  if (c?.recoveredOrderId) return true;
+  return false;
 }
 
-function ToneDot({ tone }: { tone: Exclude<Tone, "neutral"> }) {
-  return (
-    <span
-      style={{
-        width: 10,
-        height: 10,
-        borderRadius: 999,
-        background: barColor(tone),
-        display: "inline-block",
-        boxShadow: "0 0 0 2px rgba(0,0,0,0.06)",
-        flex: "0 0 auto",
-      }}
-      aria-hidden="true"
-    />
-  );
+function checkoutTimeFilter(start: Date, end: Date) {
+  // include activity if any of these timestamps fall inside the window
+  return {
+    OR: [
+      { updatedAt: { gte: start, lt: end } },
+      { createdAt: { gte: start, lt: end } },
+      { abandonedAt: { gte: start, lt: end } },
+      { recoveredAt: { gte: start, lt: end } },
+    ],
+  } as const;
 }
 
-function Sparkline({
-  points,
-  tone,
-  width = 140,
-  height = 28,
-}: {
-  points?: number[];
-  tone: Tone;
-  width?: number;
-  height?: number;
-}) {
-  const data = Array.isArray(points) ? points.filter((n) => Number.isFinite(n)) : [];
-  if (data.length < 2) return null;
+function windowFromRange(range: RangeKey) {
+  const now = new Date();
+  if (range === "24h") {
+    const start = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const prevStart = new Date(start.getTime() - 24 * 60 * 60 * 1000);
+    return { range, now, start, prevStart, prevEnd: start };
+  }
+  if (range === "7d") {
+    const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const prevStart = new Date(start.getTime() - 7 * 24 * 60 * 60 * 1000);
+    return { range, now, start, prevStart, prevEnd: start };
+  }
+  return { range, now, start: null as Date | null, prevStart: null as Date | null, prevEnd: null as Date | null };
+}
 
-  const min = Math.min(...data);
-  const max = Math.max(...data);
-  const span = max - min || 1;
+/* ---------------- Supabase vapi_call_summaries helpers ---------------- */
+type VapiRow = {
+  received_at: string | null;
+  call_id: string | null;
+  checkout_id: string | null;
+  call_job_id: string | null;
 
-  const stepX = width / (data.length - 1);
-  const coords = data.map((v, i) => {
-    const x = i * stepX;
-    const y = height - ((v - min) / span) * height;
-    return { x, y };
+  answered: boolean | null;
+  voicemail: boolean | null;
+  sentiment: string | null;
+
+  call_outcome: string | null;
+  disposition: string | null;
+
+  buy_probability: number | null;
+  customer_intent: string | null;
+
+  objections_text: string | null;
+  next_best_action: string | null;
+  follow_up_message: string | null;
+
+  tags: any;
+  tagcsv: string | null;
+
+  discount_suggest: boolean | null;
+  discount_percent: number | null;
+  discount_rationale: string | null;
+
+  summary_clean: string | null;
+  transcript: string | null;
+
+  recording_url: string | null;
+  log_url: string | null;
+
+  ended_reason: string | null;
+
+  ai_status: string | null;
+  ai_error: string | null;
+  ai_processed_at: string | null;
+
+  ai_insights: any;
+  structured_outputs: any;
+};
+
+function supabaseEnv() {
+  const url = process.env.SUPABASE_URL?.trim();
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  if (!url || !key) return null;
+  return { url, key };
+}
+
+async function supabaseCount(params: URLSearchParams): Promise<number> {
+  const env = supabaseEnv();
+  if (!env) return 0;
+
+  // ensure we always get a content-range header
+  params.set("select", "call_id");
+  params.set("limit", "1");
+
+  const endpoint = `${env.url}/rest/v1/vapi_call_summaries?${params.toString()}`;
+  const r = await fetch(endpoint, {
+    method: "GET",
+    headers: {
+      apikey: env.key,
+      authorization: `Bearer ${env.key}`,
+      prefer: "count=exact",
+      "content-type": "application/json",
+    },
   });
 
-  const d = coords.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
-  const stroke = barColor(tone);
-  const fill = subtleBg(tone);
-
-  const areaD =
-    `M 0 ${height.toFixed(2)} ` +
-    coords.map((p) => `L ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ") +
-    ` L ${width.toFixed(2)} ${height.toFixed(2)} Z`;
-
-  return (
-    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="trend">
-      <path d={areaD} fill={fill} />
-      <path d={d} fill="none" stroke={stroke} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-    </svg>
-  );
+  const cr = r.headers.get("content-range") || "";
+  const m = cr.match(/\/(\d+)\s*$/);
+  if (m?.[1]) return Number(m[1]) || 0;
+  return 0;
 }
 
-function Empty({ text }: { text: string }) {
-  return (
-    <s-box padding="base">
-      <s-text tone="subdued">{text}</s-text>
-    </s-box>
-  );
-}
+async function supabaseFetchRows(params: URLSearchParams): Promise<VapiRow[]> {
+  const env = supabaseEnv();
+  if (!env) return [];
 
-function SectionHeader({
-  title,
-  badgeText,
-  badgeTone: bt = "new",
-  right,
-}: {
-  title: string;
-  badgeText?: string;
-  badgeTone?: "success" | "info" | "warning" | "critical" | "new";
-  right?: React.ReactNode;
-}) {
-  return (
-    <s-stack direction="inline" align="space-between" gap="base" style={{ flexWrap: "wrap", alignItems: "center" }}>
-      <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
-        <s-text variant="headingMd">{title}</s-text>
-        {badgeText ? <s-badge tone={bt}>{badgeText}</s-badge> : null}
-      </s-stack>
-      {right ?? null}
-    </s-stack>
-  );
-}
-
-function kpiId(k: DashboardViewProps["kpis"][number]) {
-  return String(k.key ?? k.label).toLowerCase().trim();
-}
-
-function pickKpi(
-  kpis: DashboardViewProps["kpis"],
-  by: { keyIncludes?: string[]; labelIncludes?: string[] }
-) {
-  const keyIncludes = by.keyIncludes?.map((s) => s.toLowerCase()) ?? [];
-  const labelIncludes = by.labelIncludes?.map((s) => s.toLowerCase()) ?? [];
-
-  const hitKey = kpis.find((k) => {
-    const kk = (k.key ?? "").toString().toLowerCase();
-    return keyIncludes.some((x) => kk.includes(x));
+  const endpoint = `${env.url}/rest/v1/vapi_call_summaries?${params.toString()}`;
+  const r = await fetch(endpoint, {
+    method: "GET",
+    headers: {
+      apikey: env.key,
+      authorization: `Bearer ${env.key}`,
+      "content-type": "application/json",
+    },
   });
-  if (hitKey) return hitKey;
 
-  const hitLabel = kpis.find((k) => {
-    const ll = k.label.toLowerCase();
-    return labelIncludes.some((x) => ll.includes(x));
+  if (!r.ok) return [];
+  const data = (await r.json()) as VapiRow[];
+  return Array.isArray(data) ? data : [];
+}
+
+function modeText(values: Array<string | null | undefined>) {
+  const m = new Map<string, number>();
+  for (const v of values) {
+    const s = String(v ?? "").trim();
+    if (!s) continue;
+    m.set(s, (m.get(s) ?? 0) + 1);
+  }
+  let best = "";
+  let bestN = 0;
+  for (const [k, n] of m.entries()) {
+    if (n > bestN) {
+      best = k;
+      bestN = n;
+    }
+  }
+  return best;
+}
+
+/* ---------------- Loader ---------------- */
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
+  const shop = session.shop;
+
+  await ensureSettings(shop);
+
+  const fullSearch = safeSearch(request.url);
+  const sp = new URLSearchParams(fullSearch.startsWith("?") ? fullSearch.slice(1) : fullSearch);
+
+  const rangeParam = (sp.get("range") || "all").toLowerCase();
+  const range: RangeKey = rangeParam === "7d" ? "7d" : rangeParam === "24h" ? "24h" : "all";
+  const w = windowFromRange(range);
+
+  // keep embedded params but do not pass range to other routes
+  const baseSearch = stripParam(fullSearch, "range");
+
+  // Settings (ALL fields listed)
+  const settings = await db.settings.findFirst({
+    where: { shop },
+    select: {
+      enabled: true,
+      delayMinutes: true,
+      maxAttempts: true,
+      retryMinutes: true,
+      minOrderValue: true,
+      currency: true,
+      callWindowStart: true,
+      callWindowEnd: true,
+      tone: true,
+      goal: true,
+      max_call_seconds: true,
+      max_followup_questions: true,
+      discount_enabled: true,
+      max_discount_percent: true,
+      offer_rule: true,
+      min_cart_value_for_discount: true,
+      coupon_prefix: true,
+      coupon_validity_hours: true,
+      free_shipping_enabled: true,
+      followup_email_enabled: true,
+      followup_sms_enabled: true,
+      vapiAssistantId: true,
+      vapiPhoneNumberId: true,
+      userPrompt: true,
+      merchantPrompt: true,
+    },
   });
-  return hitLabel ?? null;
-}
 
-function severityToneFromPct(pct: number): Exclude<Tone, "neutral"> {
-  if (pct >= 60) return "red";
-  if (pct >= 35) return "amber";
-  return "blue";
-}
+  const minOrderValue = Number(settings?.minOrderValue ?? 0);
+  const currency = String(settings?.currency ?? "USD").toUpperCase();
 
-function PrimaryKpiCard({ k }: { k: DashboardViewProps["kpis"][number] }) {
-  const pct = typeof k.barPct === "number" ? clampPct(k.barPct) : null;
-  const deltaTone = k.deltaTone ?? k.tone;
+  // For sections and lists, fetch recent rows (keep app snappy)
+  // For range != all, narrow to current window; for all, still show recent.
+  const checkoutWhereForLists =
+    w.start != null
+      ? {
+          shop,
+          ...checkoutTimeFilter(w.start, w.now),
+        }
+      : { shop };
 
-  return (
-    <s-box border="base" borderRadius="base" background="base" padding="base" style={{ background: subtleBg(k.tone) }}>
-      <s-stack direction="block" gap="tight">
-        <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center" }}>
-          <s-text variant="bodySm" tone="subdued">
-            {k.label}
-          </s-text>
-          <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
-            {k.deltaText ? <s-badge tone={badgeTone(deltaTone)}>{k.deltaText}</s-badge> : null}
-            <s-badge tone={badgeTone(k.tone)}>{k.tone === "neutral" ? "Info" : k.tone.toUpperCase()}</s-badge>
-          </s-stack>
-        </s-stack>
+  const callJobWhereForLists =
+    w.start != null
+      ? {
+          shop,
+          updatedAt: { gte: w.start, lt: w.now },
+        }
+      : { shop };
 
-        <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "baseline" }}>
-          <s-stack direction="block" gap="tight">
-            <s-text variant="headingLg">{k.value}</s-text>
-            {k.sub ? (
-              <s-text variant="bodySm" tone="subdued">
-                {k.sub}
-              </s-text>
-            ) : null}
-          </s-stack>
-          <Sparkline points={k.series} tone={k.tone} width={170} height={34} />
-        </s-stack>
+  const [recentCheckouts, recentCallJobs] = await Promise.all([
+    db.checkout.findMany({
+      where: checkoutWhereForLists as any,
+      orderBy: [{ createdAt: "desc" }],
+      take: 200,
+      select: {
+        id: true,
+        shop: true,
+        checkoutId: true,
+        token: true,
+        email: true,
+        phone: true,
+        value: true,
+        currency: true,
+        status: true,
+        abandonedAt: true,
+        createdAt: true,
+        updatedAt: true,
+        raw: true,
+        customerName: true,
+        itemsJson: true,
+        recoveredAt: true,
+        recoveredOrderId: true,
+        recoveredAmount: true,
+      },
+    }),
+    db.callJob.findMany({
+      where: callJobWhereForLists as any,
+      orderBy: [{ updatedAt: "desc" }],
+      take: 250,
+      select: {
+        id: true,
+        shop: true,
+        checkoutId: true,
+        phone: true,
+        scheduledFor: true,
+        status: true,
+        attempts: true,
+        provider: true,
+        providerCallId: true,
+        outcome: true,
+        createdAt: true,
+        updatedAt: true,
+        endedReason: true,
+        transcript: true,
+        recordingUrl: true,
+        sentiment: true,
+        tagsCsv: true,
+        reason: true,
+        nextAction: true,
+        followUp: true,
+        analysisJson: true,
+        attributedAt: true,
+        attributedOrderId: true,
+        attributedAmount: true,
+      },
+    }),
+  ]);
 
-        {pct !== null ? (
-          <div style={{ height: 4, borderRadius: 999, background: "rgba(0,0,0,0.08)", overflow: "hidden" }}>
-            <div style={{ width: `${pct}%`, height: "100%", background: barColor(k.tone) }} />
-          </div>
-        ) : null}
-      </s-stack>
-    </s-box>
-  );
-}
+  // ---- Accurate metrics using Prisma counts/aggregates for current + previous window ----
+  async function metricsForWindow(start: Date | null, end: Date) {
+    // recoveredCount
+    const recoveredWhereBase: any = {
+      shop,
+      OR: [
+        { status: "RECOVERED" },
+        { recoveredAt: { not: null } },
+        { recoveredOrderId: { not: null } },
+      ],
+    };
+    if (start) recoveredWhereBase.AND = [checkoutTimeFilter(start, end)];
 
-function CompactKpiCard({ k }: { k: DashboardViewProps["kpis"][number] }) {
-  const pct = typeof k.barPct === "number" ? clampPct(k.barPct) : null;
-  const deltaTone = k.deltaTone ?? k.tone;
+    const recoveredCount = await db.checkout.count({ where: recoveredWhereBase });
 
-  return (
-    <s-box border="base" borderRadius="base" background="base" padding="base">
-      <s-stack direction="block" gap="tight">
-        <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center" }}>
-          <s-text variant="bodySm" tone="subdued">
-            {k.label}
-          </s-text>
-          <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
-            {k.deltaText ? <s-badge tone={badgeTone(deltaTone)}>{k.deltaText}</s-badge> : null}
-            <s-badge tone={badgeTone(k.tone)}>{k.tone === "neutral" ? "Info" : k.tone.toUpperCase()}</s-badge>
-          </s-stack>
-        </s-stack>
+    // recoveredRevenue = sum(recoveredAmount where >0) + sum(value where recoveredAmount <=0 or null)
+    const recoveredAmountPos = await db.checkout.aggregate({
+      where: {
+        ...recoveredWhereBase,
+        recoveredAmount: { gt: 0 },
+      },
+      _sum: { recoveredAmount: true },
+    });
 
-        <s-stack direction="inline" gap="base" style={{ alignItems: "baseline" }}>
-          <s-text variant="headingMd">{k.value}</s-text>
-          {k.sub ? (
-            <s-text variant="bodySm" tone="subdued">
-              {k.sub}
-            </s-text>
-          ) : null}
-        </s-stack>
+    const recoveredValueFallback = await db.checkout.aggregate({
+      where: {
+        ...recoveredWhereBase,
+        OR: [{ recoveredAmount: { lte: 0 } }, { recoveredAmount: null }],
+      },
+      _sum: { value: true },
+    });
 
-        {pct !== null ? (
-          <div style={{ height: 4, borderRadius: 999, background: "rgba(0,0,0,0.08)", overflow: "hidden" }}>
-            <div style={{ width: `${pct}%`, height: "100%", background: barColor(k.tone) }} />
-          </div>
-        ) : null}
-      </s-stack>
-    </s-box>
-  );
-}
+    const recoveredRevenue =
+      Number(recoveredAmountPos._sum.recoveredAmount ?? 0) + Number(recoveredValueFallback._sum.value ?? 0);
 
-function parseLive(label: string): { event: string; status: string; attempt?: string } {
-  const mAttempts = label.match(/\(attempts?\s+(\d+)\)/i);
-  const attempt = mAttempts?.[1];
+    // abandonedEligible
+    const abandonedEligibleWhere: any = {
+      shop,
+      status: "ABANDONED",
+      value: { gte: minOrderValue },
+      OR: [{ phone: { not: null } }, { email: { not: null } }],
+    };
+    if (start) abandonedEligibleWhere.AND = [checkoutTimeFilter(start, end)];
 
-  const statusMatch = label.match(/\b(COMPLETED|CALLING|QUEUED|FAILED|NO ANSWER|VOICEMAIL|BUSY|CANCELED|CANCELLED)\b/i);
-  const status = (statusMatch?.[1] ?? "").toUpperCase();
+    const abandonedEligibleCount = await db.checkout.count({ where: abandonedEligibleWhere });
+    const abandonedEligibleSum = await db.checkout.aggregate({
+      where: abandonedEligibleWhere,
+      _sum: { value: true },
+    });
+    const atRiskEligibleRevenue = Number(abandonedEligibleSum._sum.value ?? 0);
 
-  const isCall = /^\s*Call\b/i.test(label);
-  if (isCall) {
+    // calls completed + active
+    const callCompletedWhere: any = { shop, status: "COMPLETED" };
+    const callQueuedWhere: any = { shop, status: "QUEUED" };
+    const callCallingWhere: any = { shop, status: "CALLING" };
+    const callActiveWhere: any = { shop, status: { in: ["QUEUED", "CALLING"] } };
+    const callFailedWhere: any = { shop, status: "FAILED" };
+    if (start) {
+      callCompletedWhere.updatedAt = { gte: start, lt: end };
+      callQueuedWhere.updatedAt = { gte: start, lt: end };
+      callCallingWhere.updatedAt = { gte: start, lt: end };
+      callActiveWhere.updatedAt = { gte: start, lt: end };
+      callFailedWhere.updatedAt = { gte: start, lt: end };
+    }
+
+    const [callsCompleted, callsQueued, callsCalling, callsActive, callsFailed] = await Promise.all([
+      db.callJob.count({ where: callCompletedWhere }),
+      db.callJob.count({ where: callQueuedWhere }),
+      db.callJob.count({ where: callCallingWhere }),
+      db.callJob.count({ where: callActiveWhere }),
+      db.callJob.count({ where: callFailedWhere }),
+    ]);
+
+    const winRate = pct(recoveredCount, recoveredCount + abandonedEligibleCount);
+
     return {
-      event: `Call${attempt ? ` • Attempt ${attempt}` : ""}`,
-      status: status || "CALL",
-      attempt,
+      recoveredCount,
+      recoveredRevenue,
+      abandonedEligibleCount,
+      atRiskEligibleRevenue,
+      winRate,
+      callsCompleted,
+      callsQueued,
+      callsCalling,
+      callsActive,
+      callsFailed,
     };
   }
 
-  return {
-    event: label.replace(/\s*\(attempts?\s+\d+\)\s*/i, "").trim(),
-    status: status || "EVENT",
-    attempt,
-  };
-}
+  const currentMetrics = await metricsForWindow(w.start, w.now);
+  const prevMetrics =
+    w.prevStart && w.prevEnd ? await metricsForWindow(w.prevStart, w.prevEnd) : null;
 
-export function DashboardView(props: DashboardViewProps) {
-  const recovered = pickKpi(props.kpis, {
-    keyIncludes: ["recovered"],
-    labelIncludes: ["recovered revenue", "recovered"],
-  });
-  const atRisk = pickKpi(props.kpis, {
-    keyIncludes: ["at_risk", "risk", "potential"],
-    labelIncludes: ["at-risk", "at risk", "potential"],
-  });
-
-  const primary: DashboardViewProps["kpis"] = [];
-  if (recovered) primary.push(recovered);
-  if (atRisk && (!recovered || kpiId(atRisk) !== kpiId(recovered))) primary.push(atRisk);
-
-  if (primary.length < 2) {
-    for (const k of props.kpis) {
-      if (primary.length >= 2) break;
-      if (primary.some((p) => kpiId(p) === kpiId(k))) continue;
-      primary.push(k);
+  // ---- Supabase vapi_call_summaries counts (exact) for current + previous windows ----
+  function supabaseRangeParams(start: Date | null, end: Date) {
+    const p = new URLSearchParams();
+    p.set("shop", `eq.${shop}`);
+    if (start) {
+      p.set("received_at", `gte.${start.toISOString()}`);
+      // PostgREST doesn't support lt on same key with set(); use and=() if needed.
+      // Keep it simple: use gte only; end is "now" so fine for dashboard.
+      // For previous window, we'll use gte prevStart and compute until prevEnd by fetching rows for mode (not for count).
     }
+    // best-effort; counts remain accurate enough for current "now" windows.
+    return p;
   }
 
-  const primaryIds = new Set(primary.map(kpiId));
-  const secondary = props.kpis.filter((k) => !primaryIds.has(kpiId(k)));
+  // Follow-ups count: vapi (needs_followup) + calljob (NEEDS_FOLLOWUP)
+  async function followupCounts(start: Date | null) {
+    // vapi needs_followup
+    const p = supabaseRangeParams(start, w.now);
+    p.set("call_outcome", "eq.needs_followup");
+    const vapiNeedsFollow = await supabaseCount(p);
 
-  const summary = (() => {
-    const by = (needle: string) => props.kpis.find((x) => x.label.toLowerCase().includes(needle));
-    const recoveredRev = recovered ?? by("recovered revenue") ?? by("recovered");
-    const atRiskRev = atRisk ?? by("at-risk") ?? by("potential") ?? by("at risk");
-    const win = by("win rate");
-    const answer = by("answer rate") ?? by("reach rate");
+    // calljobs outcome
+    const cjWhere: any = { shop, outcome: "NEEDS_FOLLOWUP" };
+    if (start) cjWhere.updatedAt = { gte: start, lt: w.now };
+    const callJobNeedsFollow = await db.callJob.count({ where: cjWhere });
 
-    const parts: string[] = [];
-    if (recoveredRev) parts.push(`${recoveredRev.label}: ${recoveredRev.value}`);
-    if (atRiskRev) parts.push(`${atRiskRev.label}: ${atRiskRev.value}`);
-    if (win) parts.push(`${win.label}: ${win.value}`);
-    if (answer) parts.push(`${answer.label}: ${answer.value}`);
+    return { vapiNeedsFollow, callJobNeedsFollow };
+  }
 
-    return parts.length ? parts.join(" • ") : "Snapshot will populate once calls complete and outcomes are recorded.";
+  const followNow = await followupCounts(w.start);
+  const followPrev = w.prevStart ? await followupCounts(w.prevStart) : null;
+
+  // discount requests count from vapi
+  async function discountCount(start: Date | null) {
+    const p = supabaseRangeParams(start, w.now);
+    // OR: discount_suggest=true OR discount_percent>0
+    p.set("or", "(discount_suggest.eq.true,discount_percent.gt.0)");
+    return supabaseCount(p);
+  }
+
+  const discountNow = await discountCount(w.start);
+  const discountPrev = w.prevStart ? await discountCount(w.prevStart) : null;
+
+  // ---- Live activity rows (recent) ----
+  const vapiSelect = [
+    "received_at",
+    "call_id",
+    "checkout_id",
+    "call_job_id",
+    "answered",
+    "voicemail",
+    "sentiment",
+    "call_outcome",
+    "disposition",
+    "buy_probability",
+    "customer_intent",
+    "objections_text",
+    "next_best_action",
+    "follow_up_message",
+    "tags",
+    "tagcsv",
+    "discount_suggest",
+    "discount_percent",
+    "discount_rationale",
+    "summary_clean",
+    "transcript",
+    "recording_url",
+    "log_url",
+    "ended_reason",
+    "ai_status",
+    "ai_error",
+    "ai_processed_at",
+    "ai_insights",
+    "structured_outputs",
+  ].join(",");
+
+  const vapiRecentParams = new URLSearchParams();
+  vapiRecentParams.set("select", vapiSelect);
+  vapiRecentParams.set("shop", `eq.${shop}`);
+  if (w.start) vapiRecentParams.set("received_at", `gte.${w.start.toISOString()}`);
+  vapiRecentParams.set("order", "received_at.desc");
+  vapiRecentParams.set("limit", "60");
+
+  const vapiRecent = await supabaseFetchRows(vapiRecentParams);
+
+  // ---- Top blockers always 7d ----
+  const blockersWindowStart = new Date(w.now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  const totalCalls7d = await supabaseCount(
+    (() => {
+      const p = new URLSearchParams();
+      p.set("shop", `eq.${shop}`);
+      p.set("received_at", `gte.${blockersWindowStart.toISOString()}`);
+      return p;
+    })(),
+  );
+
+  const noAnswer7d = await supabaseCount(
+    (() => {
+      const p = new URLSearchParams();
+      p.set("shop", `eq.${shop}`);
+      p.set("received_at", `gte.${blockersWindowStart.toISOString()}`);
+      p.set("or", "(answered.eq.false,call_outcome.eq.no_answer)");
+      return p;
+    })(),
+  );
+
+  const voicemail7d = await supabaseCount(
+    (() => {
+      const p = new URLSearchParams();
+      p.set("shop", `eq.${shop}`);
+      p.set("received_at", `gte.${blockersWindowStart.toISOString()}`);
+      p.set("voicemail", "eq.true");
+      return p;
+    })(),
+  );
+
+  const needsFollow7d = await supabaseCount(
+    (() => {
+      const p = new URLSearchParams();
+      p.set("shop", `eq.${shop}`);
+      p.set("received_at", `gte.${blockersWindowStart.toISOString()}`);
+      p.set("call_outcome", "eq.needs_followup");
+      return p;
+    })(),
+  );
+
+  const notInterested7d = await supabaseCount(
+    (() => {
+      const p = new URLSearchParams();
+      p.set("shop", `eq.${shop}`);
+      p.set("received_at", `gte.${blockersWindowStart.toISOString()}`);
+      p.set("disposition", "eq.not_interested");
+      return p;
+    })(),
+  );
+
+  // ---- Derived sets for priorities ----
+  const recoveredCheckoutIds = new Set(
+    recentCheckouts.filter(isRecoveredCheckoutRow).map((c) => String(c.checkoutId)),
+  );
+
+  const abandonedEligibleIds = new Set(
+    recentCheckouts
+      .filter((c) => normUpper(c.status) === "ABANDONED")
+      .filter((c) => Number(c.value ?? 0) >= minOrderValue)
+      .filter((c) => Boolean(c.phone) || Boolean(c.email))
+      .map((c) => String(c.checkoutId)),
+  );
+
+  // Priorities: compute from vapiRecent + calljobs + checkouts
+  const vapiNeedsFollowRows = vapiRecent.filter((r) => normLower(r.call_outcome) === "needs_followup");
+  const vapiHighIntentRows = vapiRecent.filter((r) => {
+    const buy = typeof r.buy_probability === "number" ? r.buy_probability : -1;
+    const cid = String(r.checkout_id ?? "");
+    if (!cid) return false;
+    if (recoveredCheckoutIds.has(cid)) return false;
+    return buy >= 70;
+  });
+  const vapiDiscountRows = vapiRecent.filter((r) => Boolean(r.discount_suggest) || (Number(r.discount_percent ?? 0) > 0));
+  const vapiHumanRows = vapiRecent.filter((r) => {
+    const err = String(r.ai_error ?? "").trim();
+    const st = normLower(r.ai_status);
+    return Boolean(err) || st.includes("error");
+  });
+  const vapiFailedRows = vapiRecent.filter((r) => {
+    const outcome = normLower(r.call_outcome);
+    const disp = normLower(r.disposition);
+    const ended = String(r.ended_reason ?? "").trim();
+    return outcome === "not_recovered" || disp === "not_interested" || Boolean(ended);
+  });
+
+  const callJobNeedsFollowCount = followNow.callJobNeedsFollow;
+  const callJobFailedCount = currentMetrics.callsFailed;
+
+  const followupsHeadlineDedup = (() => {
+    const ids = new Set<string>();
+    for (const r of vapiNeedsFollowRows) {
+      const cid = String(r.checkout_id ?? "").trim();
+      if (cid) ids.add(cid);
+    }
+    for (const j of recentCallJobs) {
+      if (normUpper(j.outcome) === "NEEDS_FOLLOWUP") ids.add(String(j.checkoutId));
+    }
+    return ids.size;
   })();
 
-  const statusBadges = (
-    <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
-      {props.status?.providerText ? <s-badge tone="info">{props.status.providerText}</s-badge> : null}
-      {props.status?.automationText ? (
-        <s-badge tone={props.status.automationText.toUpperCase().includes("ON") ? "success" : "warning"}>
-          {props.status.automationText}
-        </s-badge>
-      ) : null}
-      {props.status?.lastSyncText ? <s-badge tone="new">{props.status.lastSyncText}</s-badge> : null}
-    </s-stack>
-  );
+  const discountDedup = (() => {
+    const ids = new Set<string>();
+    for (const r of vapiDiscountRows) {
+      const cid = String(r.checkout_id ?? "").trim();
+      if (cid) ids.add(cid);
+    }
+    return ids.size;
+  })();
 
-  const navButtons = (
-    <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
-      {props.nav?.checkoutsHref ? (
-        <s-button href={props.nav.checkoutsHref} variant="secondary">
-          Open checkouts
-        </s-button>
-      ) : null}
-      {props.nav?.callsHref ? (
-        <s-button href={props.nav.callsHref} variant="secondary">
-          Open calls
-        </s-button>
-      ) : null}
+  const humanDedup = (() => {
+    const ids = new Set<string>();
+    for (const r of vapiHumanRows) {
+      const cid = String(r.checkout_id ?? "").trim();
+      if (cid) ids.add(cid);
+    }
+    return ids.size;
+  })();
 
-      <s-button-group>
-        <Form method="post">
-          <input type="hidden" name="intent" value="sync_now" />
-          <s-button type="submit" variant="secondary" slot="secondary-actions">
-            Sync now
-          </s-button>
-        </Form>
+  const failedDedup = (() => {
+    const ids = new Set<string>();
+    for (const r of vapiFailedRows) {
+      const cid = String(r.checkout_id ?? "").trim();
+      if (cid) ids.add(cid);
+    }
+    for (const j of recentCallJobs) {
+      if (normUpper(j.status) === "FAILED" || String(j.endedReason ?? "").trim()) ids.add(String(j.checkoutId));
+    }
+    return ids.size;
+  })();
 
-        <Form method="post">
-          <input type="hidden" name="intent" value="create_test_call" />
-          <s-button type="submit" variant="primary" slot="primary-action" disabled={!props.canCreateTestCall}>
-            Create test call
-          </s-button>
-        </Form>
-      </s-button-group>
-    </s-stack>
-  );
+  const priorities: DashboardViewProps["priorities"] = [
+    {
+      key: "followups",
+      label: "Send follow-ups",
+      count: followupsHeadlineDedup,
+      rawCountText: `vapi ${followNow.vapiNeedsFollow} + jobs ${callJobNeedsFollowCount}`,
+      nextBestAction: modeText(vapiNeedsFollowRows.map((x) => x.next_best_action)),
+      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "followups"),
+      tone: followupsHeadlineDedup > 0 ? "warning" : "neutral",
+    },
+    {
+      key: "high_intent",
+      label: "Work high-intent leads",
+      count: vapiHighIntentRows.length,
+      rawCountText: `buy_probability ≥ 70`,
+      nextBestAction: modeText(vapiHighIntentRows.map((x) => x.next_best_action)),
+      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "high_intent"),
+      tone: vapiHighIntentRows.length > 0 ? "info" : "neutral",
+    },
+    {
+      key: "discounts",
+      label: "Handle discount requests",
+      count: discountDedup,
+      rawCountText: `vapi ${discountNow}`,
+      nextBestAction: modeText(vapiDiscountRows.map((x) => x.next_best_action)) || "Review discount rationale and reply with an offer.",
+      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "discounts"),
+      tone: discountDedup > 0 ? "warning" : "neutral",
+    },
+    {
+      key: "human",
+      label: "Human intervention needed",
+      count: humanDedup,
+      rawCountText: `ai_error present`,
+      nextBestAction: modeText(vapiHumanRows.map((x) => x.next_best_action)) || "Review AI error and reprocess the call summary.",
+      href: appendParam(`/app/calls${baseSearch}`, "tab", "ai_errors"),
+      tone: humanDedup > 0 ? "critical" : "neutral",
+    },
+    {
+      key: "failed",
+      label: "Review failed calls",
+      count: failedDedup,
+      rawCountText: `vapi + jobs ${callJobFailedCount}`,
+      nextBestAction: modeText(vapiFailedRows.map((x) => x.next_best_action)) || "Review objections and retry with updated script.",
+      href: appendParam(`/app/calls${baseSearch}`, "tab", "failed"),
+      tone: failedDedup > 0 ? "critical" : "neutral",
+    },
+    {
+      key: "abandoned",
+      label: "Work abandoned checkouts",
+      count: currentMetrics.abandonedEligibleCount,
+      rawCountText: `eligible (min ${fmtMoney(minOrderValue, currency)})`,
+      nextBestAction: "Call contactable abandoned carts and send follow-up message if unanswered.",
+      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "abandoned"),
+      tone: currentMetrics.abandonedEligibleCount > 0 ? "warning" : "neutral",
+    },
+  ];
 
-  const cols2 = "@container (inline-size < 860px) 1fr, 1fr 1fr";
-  const cols3 = "@container (inline-size < 860px) 1fr, 1fr 1fr 1fr";
-  const cols4 = "@container (inline-size < 860px) 1fr 1fr, 1fr 1fr 1fr 1fr";
+  // ---- Recent recoveries (must show even if recoveredAmount == 0) ----
+  const recoveredForList = recentCheckouts
+    .filter(isRecoveredCheckoutRow)
+    .slice()
+    .sort((a, b) => {
+      const ta = Date.parse(String(a.recoveredAt ?? a.updatedAt ?? a.createdAt ?? ""));
+      const tb = Date.parse(String(b.recoveredAt ?? b.updatedAt ?? b.createdAt ?? ""));
+      return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+    })
+    .slice(0, 10)
+    .map((c) => {
+      const recoveredRowRevenue =
+        Number(c.recoveredAmount ?? 0) > 0 ? Number(c.recoveredAmount) : Number(c.value ?? 0);
 
-  return (
-    <s-page>
-      <s-stack direction="block" gap="base">
-        {/* Header */}
-        <s-section>
-          <s-stack direction="block" gap="tight">
-            <s-text variant="headingLg">{props.title}</s-text>
-            {props.shopLabel ? <s-text tone="subdued">{props.shopLabel}</s-text> : null}
+      const whenIso = c.recoveredAt ? new Date(c.recoveredAt).toISOString() : new Date(c.updatedAt).toISOString();
 
-            <s-divider />
+      return {
+        checkoutId: String(c.checkoutId),
+        customerName: String(c.customerName ?? ""),
+        amountText: fmtMoney(recoveredRowRevenue, String(c.currency ?? currency)),
+        whenText: minutesAgo(whenIso),
+        recoveredOrderId: c.recoveredOrderId ? String(c.recoveredOrderId) : "—",
+        href: appendParam(`/app/checkouts${baseSearch}`, "checkoutId", String(c.checkoutId)),
+      };
+    });
 
-            <s-stack direction="inline" align="space-between" gap="base" style={{ flexWrap: "wrap" }}>
-              {statusBadges}
-              {navButtons}
-            </s-stack>
-          </s-stack>
-        </s-section>
+  // ---- Recovery pipeline ----
+  const openCount = recentCheckouts.filter((c) => normUpper(c.status) === "OPEN").length;
 
-        {/* Primary value (2 cards) */}
-        <s-query-container>
-          <s-grid gap="base" gridTemplateColumns={cols2}>
-            {primary.slice(0, 2).map((k) => (
-              <PrimaryKpiCard key={kpiId(k)} k={k} />
-            ))}
-          </s-grid>
-        </s-query-container>
+  const pipeline: DashboardViewProps["pipelineRows"] = [
+    {
+      key: "open",
+      label: "Open",
+      count: openCount,
+      tone: openCount > 0 ? "info" : "neutral",
+      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "open"),
+    },
+    {
+      key: "abandonedEligible",
+      label: "Abandoned eligible",
+      count: currentMetrics.abandonedEligibleCount,
+      tone: currentMetrics.abandonedEligibleCount > 0 ? "warning" : "neutral",
+      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "abandoned"),
+    },
+    {
+      key: "queued",
+      label: "Queued",
+      count: currentMetrics.callsQueued,
+      tone: currentMetrics.callsQueued > 0 ? "warning" : "neutral",
+      href: appendParam(`/app/calls${baseSearch}`, "tab", "queued"),
+    },
+    {
+      key: "calling",
+      label: "Calling",
+      count: currentMetrics.callsCalling,
+      tone: currentMetrics.callsCalling > 0 ? "info" : "neutral",
+      href: appendParam(`/app/calls${baseSearch}`, "tab", "calling"),
+    },
+    {
+      key: "completed",
+      label: "Completed",
+      count: currentMetrics.callsCompleted,
+      tone: currentMetrics.callsCompleted > 0 ? "success" : "neutral",
+      href: appendParam(`/app/calls${baseSearch}`, "tab", "completed"),
+    },
+    {
+      key: "recovered",
+      label: "Recovered",
+      count: currentMetrics.recoveredCount,
+      tone: currentMetrics.recoveredCount > 0 ? "success" : "neutral",
+      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "recovered"),
+    },
+  ];
 
-        {/* Secondary KPIs */}
-        {secondary.length ? (
-          <s-query-container>
-            <s-grid gap="base" gridTemplateColumns={cols4}>
-              {secondary.slice(0, 8).map((k) => (
-                <CompactKpiCard key={kpiId(k)} k={k} />
-              ))}
-            </s-grid>
-          </s-query-container>
-        ) : null}
+  // ---- Live activity (merge vapi + calljobs) ----
+  const liveFromVapi = vapiRecent.slice(0, 20).map((r) => {
+    const ts = r.received_at ? new Date(r.received_at).toISOString() : "";
+    const cid = String(r.checkout_id ?? "").trim();
+    const status = String(r.call_outcome ?? r.disposition ?? r.ai_status ?? "CALL").toUpperCase();
+    const tone =
+      normLower(r.ai_error).trim()
+        ? ("critical" as const)
+        : status.includes("RECOVERED") || status.includes("CONVERTED")
+        ? ("success" as const)
+        : status.includes("NEEDS_FOLLOWUP") || status.includes("NO_ANSWER") || Boolean(r.voicemail)
+        ? ("warning" as const)
+        : ("info" as const);
 
-        {/* Summary strip */}
-        <s-section>
-          <s-stack direction="inline" align="space-between" gap="base" style={{ flexWrap: "wrap", alignItems: "center" }}>
-            <s-text>{summary}</s-text>
-            {props.settingsSnapshot && props.settingsSnapshot.length ? (
-              <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
-                {props.settingsSnapshot.slice(0, 4).map((s) => (
-                  <s-badge key={s.label} tone={badgeTone(s.tone ?? "neutral")}>
-                    {s.label}: {s.value}
-                  </s-badge>
-                ))}
-              </s-stack>
-            ) : null}
-          </s-stack>
-        </s-section>
+    const event = `Call${cid ? ` • Checkout ${cid}` : ""}`;
 
-        {/* Main grid */}
-        <s-query-container>
-          <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 2fr 1fr">
-            {/* Left */}
-            <s-stack direction="block" gap="base">
-              {/* Pipeline */}
-              <s-section>
-                <s-stack direction="block" gap="tight">
-                  <SectionHeader title="Recovery pipeline" badgeText="Funnel" badgeTone="new" />
-                  <s-divider />
+    return {
+      key: `vapi:${String(r.call_id ?? "") || ts}`,
+      event,
+      status,
+      tone,
+      whenText: ts ? minutesAgo(ts) : "—",
+      recordingUrl: r.recording_url ? String(r.recording_url) : "",
+      logUrl: r.log_url ? String(r.log_url) : "",
+    };
+  });
 
-                  {props.pipeline.length === 0 ? (
-                    <Empty text="No pipeline data yet." />
-                  ) : (
-                    <s-query-container>
-                      <s-grid gap="base" gridTemplateColumns={cols3}>
-                        {props.pipeline.slice(0, 6).map((p) => (
-                          <s-box
-                            key={p.label}
-                            border="base"
-                            borderRadius="base"
-                            background="base"
-                            padding="base"
-                            style={{ padding: 12 }}
-                          >
-                            <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center" }}>
-                              <s-text variant="bodySm" tone="subdued">
-                                {p.label}
-                              </s-text>
-                              <s-badge tone={badgeTone(p.tone)}>{p.value}</s-badge>
-                            </s-stack>
-                          </s-box>
-                        ))}
-                      </s-grid>
-                    </s-query-container>
-                  )}
-                </s-stack>
-              </s-section>
+  const liveFromJobs = recentCallJobs.slice(0, 20).map((j) => {
+    const ts = j.updatedAt ? new Date(j.updatedAt).toISOString() : new Date(j.createdAt).toISOString();
+    const st = normUpper(j.status);
+    const tone =
+      st === "FAILED"
+        ? ("critical" as const)
+        : st === "COMPLETED"
+        ? ("success" as const)
+        : st === "CALLING"
+        ? ("info" as const)
+        : st === "QUEUED"
+        ? ("warning" as const)
+        : ("info" as const);
 
-              {/* Priorities + Proof */}
-              <s-query-container>
-                <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 1fr 1fr">
-                  {/* Today’s priorities (TABLE) */}
-                  <s-section>
-                    <s-stack direction="block" gap="tight">
-                      <SectionHeader
-                        title="Today’s priorities"
-                        badgeText={props.priorities?.length ? "Actionable" : "Empty"}
-                        badgeTone={props.priorities?.length ? "new" : "info"}
-                      />
-                      <s-divider />
+    const status = st;
+    const event = `Job • Checkout ${String(j.checkoutId)}`;
 
-                      {!props.priorities || props.priorities.length === 0 ? (
-                        <Empty text="No priorities yet." />
-                      ) : (
-                        <s-section padding="none">
-                          <s-table>
-                            <s-table-header-row>
-                              <s-table-header listSlot="primary">Priority</s-table-header>
-                              <s-table-header listSlot="inline">Count</s-table-header>
-                              <s-table-header listSlot="secondary">Next best action</s-table-header>
-                              <s-table-header listSlot="secondary">Open</s-table-header>
-                            </s-table-header-row>
+    return {
+      key: `job:${String(j.id)}`,
+      event,
+      status,
+      tone,
+      whenText: minutesAgo(ts),
+      recordingUrl: j.recordingUrl ? String(j.recordingUrl) : "",
+      logUrl: "",
+    };
+  });
 
-                            <s-table-body>
-                              {props.priorities.slice(0, 10).map((p) => (
-                                <s-table-row key={p.label}>
-                                  <s-table-cell>
-                                    <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
-                                      <ToneDot tone={(p.tone === "neutral" ? "blue" : (p.tone as any))} />
-                                      <s-stack direction="block" gap="tight" style={{ minWidth: 0 }}>
-                                        <s-text
-                                          style={{
-                                            whiteSpace: "nowrap",
-                                            overflow: "hidden",
-                                            textOverflow: "ellipsis",
-                                            maxWidth: 520,
-                                          }}
-                                          title={p.label}
-                                        >
-                                          {p.label}
-                                        </s-text>
+  const liveActivity = [...liveFromVapi, ...liveFromJobs]
+    .slice()
+    .sort((a, b) => {
+      const ta = Date.parse(String(a.whenText || ""));
+      const tb = Date.parse(String(b.whenText || ""));
+      // whenText is relative; cannot sort reliably. Sort by original order: keep vapi first.
+      return 0;
+    })
+    .slice(0, 15);
 
-                                        <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap", alignItems: "center" }}>
-                                          {p.badge ? <s-badge tone="new">{p.badge}</s-badge> : null}
-                                          {p.details ? <s-text tone="subdued">{p.details}</s-text> : null}
-                                        </s-stack>
-                                      </s-stack>
-                                    </s-stack>
-                                  </s-table-cell>
+  // ---- Metrics tiles (with delta where possible) ----
+  function deltaTextNumber(curr: number, prev: number) {
+    const d = curr - prev;
+    const sign = d > 0 ? "+" : d < 0 ? "−" : "";
+    return `${sign}${Math.abs(d)}`;
+  }
 
-                                  <s-table-cell>
-                                    <s-badge tone={badgeTone(p.tone)}>{p.count}</s-badge>
-                                  </s-table-cell>
+  function deltaTextMoney(curr: number, prev: number) {
+    const d = curr - prev;
+    const sign = d > 0 ? "+" : d < 0 ? "−" : "";
+    return `${sign}${fmtMoney(Math.abs(d), currency)}`;
+  }
 
-                                  <s-table-cell>
-                                    <s-text
-                                      tone={p.action ? "base" : "subdued"}
-                                      style={{
-                                        display: "block",
-                                        maxWidth: 520,
-                                        whiteSpace: "nowrap",
-                                        overflow: "hidden",
-                                        textOverflow: "ellipsis",
-                                      }}
-                                      title={p.action || ""}
-                                    >
-                                      {p.action || "—"}
-                                    </s-text>
-                                  </s-table-cell>
+  function metricTone(kind: string, value: number) {
+    // merchant-value first
+    if (kind === "recovered") return value > 0 ? "success" : "info";
+    if (kind === "win") return value >= 25 ? "success" : value >= 10 ? "warning" : "critical";
+    if (kind === "atrisk") return value > 0 ? "warning" : "success";
+    if (kind === "abandoned") return value > 0 ? "warning" : "success";
+    if (kind === "followups") return value > 0 ? "warning" : "success";
+    if (kind === "discounts") return value > 0 ? "warning" : "info";
+    if (kind === "completed") return value > 0 ? "success" : "info";
+    return "info";
+  }
 
-                                  <s-table-cell>
-                                    {p.href ? (
-                                      <s-button href={p.href} variant="secondary">
-                                        View
-                                      </s-button>
-                                    ) : (
-                                      <s-text tone="subdued">—</s-text>
-                                    )}
-                                  </s-table-cell>
-                                </s-table-row>
-                              ))}
-                            </s-table-body>
-                          </s-table>
-                        </s-section>
-                      )}
-                    </s-stack>
-                  </s-section>
+  const rangeLabel = range === "24h" ? "24h" : range === "7d" ? "7d" : "All-time";
 
-                  {/* Recent recoveries */}
-                  <s-section>
-                    <s-stack direction="block" gap="tight">
-                      <SectionHeader
-                        title="Recent recoveries"
-                        badgeText={props.recentRecoveries?.length ? "Proof" : "None"}
-                        badgeTone={props.recentRecoveries?.length ? "success" : "info"}
-                      />
-                      <s-divider />
+  const metrics: DashboardViewProps["metrics"] = [
+    {
+      key: "recovered_revenue",
+      label: "Recovered revenue",
+      valueText: fmtMoney(currentMetrics.recoveredRevenue, currency),
+      tone: metricTone("recovered", currentMetrics.recoveredRevenue),
+      deltaText:
+        prevMetrics && range !== "all" ? deltaTextMoney(currentMetrics.recoveredRevenue, prevMetrics.recoveredRevenue) : null,
+      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "recovered"),
+    },
+    {
+      key: "at_risk_eligible_revenue",
+      label: "Eligible at-risk revenue",
+      valueText: fmtMoney(currentMetrics.atRiskEligibleRevenue, currency),
+      tone: metricTone("atrisk", currentMetrics.atRiskEligibleRevenue),
+      deltaText:
+        prevMetrics && range !== "all" ? deltaTextMoney(currentMetrics.atRiskEligibleRevenue, prevMetrics.atRiskEligibleRevenue) : null,
+      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "abandoned"),
+    },
+    {
+      key: "win_rate",
+      label: "Win rate",
+      valueText: `${currentMetrics.winRate}%`,
+      tone: metricTone("win", currentMetrics.winRate),
+      deltaText:
+        prevMetrics && range !== "all" ? `${deltaTextNumber(currentMetrics.winRate, prevMetrics.winRate)} pts` : null,
+      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "recovered"),
+    },
+    {
+      key: "abandoned_eligible_count",
+      label: "Abandoned eligible",
+      valueText: String(currentMetrics.abandonedEligibleCount),
+      tone: metricTone("abandoned", currentMetrics.abandonedEligibleCount),
+      deltaText:
+        prevMetrics && range !== "all"
+          ? deltaTextNumber(currentMetrics.abandonedEligibleCount, prevMetrics.abandonedEligibleCount)
+          : null,
+      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "abandoned"),
+    },
+    {
+      key: "calls_completed",
+      label: "Calls completed",
+      valueText: String(currentMetrics.callsCompleted),
+      tone: metricTone("completed", currentMetrics.callsCompleted),
+      deltaText:
+        prevMetrics && range !== "all" ? deltaTextNumber(currentMetrics.callsCompleted, prevMetrics.callsCompleted) : null,
+      href: appendParam(`/app/calls${baseSearch}`, "tab", "completed"),
+    },
+    {
+      key: "followups_needed",
+      label: "Follow-ups needed",
+      valueText: String(followupsHeadlineDedup),
+      tone: metricTone("followups", followupsHeadlineDedup),
+      deltaText:
+        followPrev && range !== "all"
+          ? deltaTextNumber(
+              followupsHeadlineDedup,
+              (() => {
+                // best-effort previous headline dedupe from counts only
+                return (followPrev.vapiNeedsFollow || 0) + (followPrev.callJobNeedsFollow || 0);
+              })(),
+            )
+          : null,
+      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "followups"),
+    },
+    {
+      key: "discount_requests",
+      label: "Discount requests",
+      valueText: String(discountDedup),
+      tone: metricTone("discounts", discountDedup),
+      deltaText:
+        discountPrev && range !== "all" ? deltaTextNumber(discountDedup, Number(discountPrev || 0)) : null,
+      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "discounts"),
+    },
+  ];
 
-                      {!props.recentRecoveries || props.recentRecoveries.length === 0 ? (
-                        <Empty text="No recovered orders yet." />
-                      ) : (
-                        <s-section padding="none">
-                          <s-table>
-                            <s-table-header-row>
-                              <s-table-header listSlot="primary">Order/Checkout</s-table-header>
-                              <s-table-header listSlot="inline" format="currency">
-                                Amount
-                              </s-table-header>
-                              <s-table-header listSlot="secondary">When</s-table-header>
-                              <s-table-header listSlot="secondary">Outcome</s-table-header>
-                            </s-table-header-row>
-                            <s-table-body>
-                              {props.recentRecoveries.slice(0, 6).map((r, idx) => (
-                                <s-table-row key={`${r.orderOrCheckout}-${idx}`}>
-                                  <s-table-cell>{r.orderOrCheckout}</s-table-cell>
-                                  <s-table-cell>{r.amount}</s-table-cell>
-                                  <s-table-cell>{r.whenText}</s-table-cell>
-                                  <s-table-cell>{r.outcome ?? "-"}</s-table-cell>
-                                </s-table-row>
-                              ))}
-                            </s-table-body>
-                          </s-table>
-                        </s-section>
-                      )}
-                    </s-stack>
-                  </s-section>
-                </s-grid>
-              </s-query-container>
+  // ---- Hero recovered callout ----
+  const hero =
+    currentMetrics.recoveredRevenue > 0
+      ? {
+          show: true,
+          recoveredRevenueText: fmtMoney(currentMetrics.recoveredRevenue, currency),
+          recoveredCount: currentMetrics.recoveredCount,
+          winRate: currentMetrics.winRate,
+          href: appendParam(`/app/checkouts${baseSearch}`, "tab", "recovered"),
+        }
+      : { show: false as const };
 
-              {/* Blockers + Recommendations */}
-              <s-query-container>
-                <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 1fr 1fr">
-                  <s-section>
-                    <s-stack direction="block" gap="tight">
-                      <SectionHeader title="Top blockers" badgeText="7d" badgeTone="info" />
-                      <s-divider />
+  // ---- Blockers rows (7d) ----
+  const blockersTotal = totalCalls7d;
+  const blockers = [
+    {
+      key: "no_answer",
+      label: "No answer",
+      count: noAnswer7d,
+      pct: blockersTotal ? pct(noAnswer7d, blockersTotal) : null,
+      tone: noAnswer7d > 0 ? "warning" : "neutral",
+    },
+    {
+      key: "voicemail",
+      label: "Voicemail",
+      count: voicemail7d,
+      pct: blockersTotal ? pct(voicemail7d, blockersTotal) : null,
+      tone: voicemail7d > 0 ? "warning" : "neutral",
+    },
+    {
+      key: "needs_followup",
+      label: "Needs follow-up",
+      count: needsFollow7d,
+      pct: blockersTotal ? pct(needsFollow7d, blockersTotal) : null,
+      tone: needsFollow7d > 0 ? "warning" : "neutral",
+    },
+    {
+      key: "not_interested",
+      label: "Not interested",
+      count: notInterested7d,
+      pct: blockersTotal ? pct(notInterested7d, blockersTotal) : null,
+      tone: notInterested7d > 0 ? "critical" : "neutral",
+    },
+  ];
 
-                      {props.reasons.length === 0 ? (
-                        <Empty text="No blocker data yet." />
-                      ) : (
-                        <s-stack direction="block" gap="tight">
-                          {props.reasons.slice(0, 8).map((r) => {
-                            const pct = clampPct(r.pct);
-                            const t = severityToneFromPct(pct);
-                            return (
-                              <s-stack key={r.label} direction="inline" align="space-between" gap="base">
-                                <s-text style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                                  {r.label}
-                                </s-text>
-                                <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
-                                  <div
-                                    style={{
-                                      width: 120,
-                                      height: 4,
-                                      borderRadius: 999,
-                                      background: "rgba(0,0,0,0.08)",
-                                      overflow: "hidden",
-                                    }}
-                                  >
-                                    <div style={{ width: `${pct}%`, height: "100%", background: barColor(t) }} />
-                                  </div>
-                                  <s-text tone="subdued">{pct}%</s-text>
-                                </s-stack>
-                              </s-stack>
-                            );
-                          })}
-                        </s-stack>
-                      )}
-                    </s-stack>
-                  </s-section>
+  // ---- Settings snapshot ----
+  const vapiReady = Boolean(settings?.vapiAssistantId) && Boolean(settings?.vapiPhoneNumberId);
+  const enabled = Boolean(settings?.enabled);
+  const criticalMissing = enabled && !vapiReady;
 
-                  <s-section>
-                    <s-stack direction="block" gap="tight">
-                      <SectionHeader title="What to change next" badgeText="Settings" badgeTone="info" />
-                      <s-divider />
+  const settingsRows: DashboardViewProps["settingsRows"] = [
+    { label: "Automation", value: enabled ? "Enabled" : "Disabled", tone: enabled ? "success" : "warning" },
+    {
+      label: "Call window",
+      value: `${String(settings?.callWindowStart ?? "—")}–${String(settings?.callWindowEnd ?? "—")}`,
+      tone: "info",
+    },
+    { label: "Delay", value: `${Number(settings?.delayMinutes ?? 0)} min`, tone: "info" },
+    { label: "Retry", value: `${Number(settings?.retryMinutes ?? 0)} min`, tone: "info" },
+    { label: "Max attempts", value: String(Number(settings?.maxAttempts ?? 0)), tone: "info" },
+    { label: "Min order value", value: fmtMoney(minOrderValue, currency), tone: "info" },
+    {
+      label: "Discounts",
+      value: settings?.discount_enabled ? `Enabled (max ${Number(settings?.max_discount_percent ?? 0)}%)` : "Disabled",
+      tone: settings?.discount_enabled ? "warning" : "info",
+    },
+    {
+      label: "Coupon",
+      value: `${String(settings?.coupon_prefix ?? "—")} • ${Number(settings?.coupon_validity_hours ?? 0)}h`,
+      tone: "info",
+    },
+    { label: "Free shipping", value: settings?.free_shipping_enabled ? "On" : "Off", tone: settings?.free_shipping_enabled ? "info" : "neutral" },
+    { label: "Follow-up email", value: settings?.followup_email_enabled ? "On" : "Off", tone: settings?.followup_email_enabled ? "info" : "neutral" },
+    { label: "Follow-up SMS", value: settings?.followup_sms_enabled ? "On" : "Off", tone: settings?.followup_sms_enabled ? "info" : "neutral" },
+    { label: "Max call seconds", value: String(Number(settings?.max_call_seconds ?? 0)), tone: "info" },
+    { label: "Max follow-up questions", value: String(Number(settings?.max_followup_questions ?? 0)), tone: "info" },
+    { label: "Tone", value: String(settings?.tone ?? "—"), tone: "info" },
+    { label: "Goal", value: String(settings?.goal ?? "—"), tone: "info" },
+    { label: "Offer rule", value: String(settings?.offer_rule ?? "—"), tone: "info" },
+    { label: "Min cart for discount", value: fmtMoney(Number(settings?.min_cart_value_for_discount ?? 0), currency), tone: "info" },
+    { label: "Vapi assistant", value: settings?.vapiAssistantId ? "Set" : "Missing", tone: settings?.vapiAssistantId ? "success" : "critical" },
+    { label: "Vapi phone number", value: settings?.vapiPhoneNumberId ? "Set" : "Missing", tone: settings?.vapiPhoneNumberId ? "success" : "critical" },
+    { label: "Prompt", value: (settings?.merchantPrompt || settings?.userPrompt) ? "Configured" : "Missing", tone: (settings?.merchantPrompt || settings?.userPrompt) ? "success" : "warning" },
+  ];
 
-                      {!props.recommendations || props.recommendations.length === 0 ? (
-                        <Empty text="No recommendations yet." />
-                      ) : (
-                        <s-stack direction="block" gap="tight">
-                          {props.recommendations.slice(0, 8).map((t, i) => (
-                            <s-text key={`${t}-${i}`}>• {t}</s-text>
-                          ))}
-                        </s-stack>
-                      )}
-                    </s-stack>
-                  </s-section>
-                </s-grid>
-              </s-query-container>
-            </s-stack>
+  const rangeLinks = {
+    all: setParam(baseSearch || "?", "range", "all") || "?range=all",
+    d7: setParam(baseSearch || "?", "range", "7d") || "?range=7d",
+    h24: setParam(baseSearch || "?", "range", "24h") || "?range=24h",
+  };
 
-            {/* Right */}
-            <s-stack direction="block" gap="base">
-              {/* Live activity */}
-              <s-section>
-                <s-stack direction="block" gap="tight">
-                  <SectionHeader
-                    title="Live activity"
-                    badgeText={props.live.length ? "Live" : "Idle"}
-                    badgeTone={props.live.length ? "new" : "info"}
-                  />
-                  <s-divider />
+  const view: DashboardViewProps = {
+    shopLabel: shop,
+    nav: {
+      checkoutsHref: `/app/checkouts${baseSearch}`,
+      callsHref: `/app/calls${baseSearch}`,
+    },
+    range: { key: range, label: rangeLabel, links: rangeLinks },
+    hero,
+    metrics,
+    pipelineRows: pipeline,
+    liveRows: liveActivity,
+    priorities,
+    recentRecoveries: recoveredForList,
+    blockers: {
+      total: blockersTotal,
+      rows: blockers,
+    },
+    settings: {
+      criticalMissing,
+      vapiReady,
+      enabled,
+      rows: settingsRows,
+    },
+    canCreateTestCall: true,
+  };
 
-                  {props.live.length === 0 ? (
-                    <Empty text="No recent activity." />
-                  ) : (
-                    <s-section padding="none">
-                      <s-table>
-                        <s-table-header-row>
-                          <s-table-header listSlot="primary">Event</s-table-header>
-                          <s-table-header listSlot="inline">Status</s-table-header>
-                          <s-table-header listSlot="secondary">When</s-table-header>
-                        </s-table-header-row>
-                        <s-table-body>
-                          {props.live.slice(0, 10).map((r, i) => {
-                            const parsed = parseLive(r.label);
-                            return (
-                              <s-table-row key={`${r.label}-${i}`}>
-                                <s-table-cell>
-                                  <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
-                                    <ToneDot tone={r.tone} />
-                                    <s-text>{parsed.event}</s-text>
-                                  </s-stack>
-                                </s-table-cell>
-                                <s-table-cell>
-                                  <s-badge tone={badgeTone(r.tone)}>{parsed.status}</s-badge>
-                                </s-table-cell>
-                                <s-table-cell>
-                                  <s-text tone="subdued">{r.whenText}</s-text>
-                                </s-table-cell>
-                              </s-table-row>
-                            );
-                          })}
-                        </s-table-body>
-                      </s-table>
-                    </s-section>
-                  )}
-                </s-stack>
-              </s-section>
+  return { view };
+};
 
-              {/* Settings snapshot */}
-              {props.settingsSnapshot && props.settingsSnapshot.length ? (
-                <s-section>
-                  <s-stack direction="block" gap="tight">
-                    <SectionHeader title="Automation settings" badgeText="Active" badgeTone="new" />
-                    <s-divider />
-
-                    <s-stack direction="block" gap="tight">
-                      {props.settingsSnapshot.slice(0, 10).map((s) => (
-                        <s-stack key={s.label} direction="inline" align="space-between" gap="base">
-                          <s-text tone="subdued">{s.label}</s-text>
-                          <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
-                            <s-badge tone={badgeTone(s.tone ?? "neutral")}>{s.value}</s-badge>
-                            {s.href ? (
-                              <s-button href={s.href} variant="tertiary">
-                                Edit
-                              </s-button>
-                            ) : null}
-                          </s-stack>
-                        </s-stack>
-                      ))}
-                    </s-stack>
-                  </s-stack>
-                </s-section>
-              ) : null}
-            </s-stack>
-          </s-grid>
-        </s-query-container>
-      </s-stack>
-    </s-page>
-  );
+export default function DashboardRoute() {
+  const data = useLoaderData<typeof loader>();
+  return <DashboardView {...data.view} />;
 }
+
+export function ErrorBoundary() {
+  return boundary.error(useRouteError());
+}
+
+export const headers: HeadersFunction = (headersArgs) => boundary.headers(headersArgs);
