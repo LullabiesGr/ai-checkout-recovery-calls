@@ -131,11 +131,25 @@ function pickCurrency(v: any): string {
   if (s === "USD" || s === "EUR" || s === "GBP") return s;
   return "USD";
 }
-function withRequestSearch(path: string, request: Request) {
-  const u = new URL(request.url);
-  if (!u.search) return path;
-  if (path.includes("?")) return path;
-  return `${path}${u.search}`;
+
+/**
+ * FIX: merge Shopify embedded params (host/shop/embedded/etc) with target params (saved=1)
+ * so the redirect stays inside the embedded app context and doesn't "kick you out".
+ */
+function withSearchMerged(path: string, request: Request) {
+  const req = new URL(request.url);
+  const target = new URL(path, req.origin);
+
+  const out = new URL(target.pathname, req.origin);
+
+  // keep all params from the current request (Shopify embedded context)
+  req.searchParams.forEach((v, k) => out.searchParams.set(k, v));
+
+  // then apply/override with params from target (e.g., saved=1)
+  target.searchParams.forEach((v, k) => out.searchParams.set(k, v));
+
+  const qs = out.searchParams.toString();
+  return qs ? `${out.pathname}?${qs}` : out.pathname;
 }
 
 async function readSettingsExtras(shop: string): Promise<ExtrasRow | null> {
@@ -234,7 +248,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     maxDiscountPercent: clamp(Number(extras?.max_discount_percent ?? 10), 0, 50),
     offerRule: pickOfferRule(extras?.offer_rule ?? "ask_only"),
     minCartValueForDiscount: extras?.min_cart_value_for_discount == null ? null : Number(extras.min_cart_value_for_discount),
-    couponPrefix: (String(extras?.coupon_prefix ?? "").trim() ? String(extras?.coupon_prefix).trim() : null),
+    couponPrefix: String(extras?.coupon_prefix ?? "").trim() ? String(extras?.coupon_prefix).trim() : null,
     couponValidityHours: clamp(Number(extras?.coupon_validity_hours ?? 24), 1, 168),
     freeShippingEnabled: Boolean(extras?.free_shipping_enabled ?? false),
 
@@ -318,7 +332,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     followupSmsEnabled,
   });
 
-  return new Response(null, { status: 303, headers: { Location: withRequestSearch("/app/settings?saved=1", request) } });
+  return new Response(null, {
+    status: 303,
+    headers: { Location: withSearchMerged("/app/settings?saved=1", request) },
+  });
 };
 
 /* =========================
@@ -397,9 +414,7 @@ export default function Settings() {
     >
       <Layout>
         <Layout.Section>
-          {saved ? (
-            <Banner tone="success" title="Saved" />
-          ) : null}
+          {saved ? <Banner tone="success" title="Saved" /> : null}
 
           <fetcher.Form method="post" id="settings-form">
             <BlockStack gap="400">
@@ -595,8 +610,16 @@ export default function Settings() {
                   </Text>
 
                   <InlineStack gap="600">
-                    <Checkbox label="Allow follow-up email suggestion" checked={followupEmailEnabled} onChange={setFollowupEmailEnabled} />
-                    <Checkbox label="Allow follow-up SMS suggestion" checked={followupSmsEnabled} onChange={setFollowupSmsEnabled} />
+                    <Checkbox
+                      label="Allow follow-up email suggestion"
+                      checked={followupEmailEnabled}
+                      onChange={setFollowupEmailEnabled}
+                    />
+                    <Checkbox
+                      label="Allow follow-up SMS suggestion"
+                      checked={followupSmsEnabled}
+                      onChange={setFollowupSmsEnabled}
+                    />
                   </InlineStack>
 
                   <input type="hidden" name="followupEmailEnabled" value={followupEmailEnabled ? "on" : ""} />

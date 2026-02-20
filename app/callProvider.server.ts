@@ -84,8 +84,10 @@ function toneGuidance(tone: Tone) {
 }
 
 function goalGuidance(goal: Goal) {
-  if (goal === "qualify_and_follow_up") return "Goal: qualify intent fast, then secure permission for follow-up (email/SMS) if they won't complete now.";
-  if (goal === "support_only") return "Goal: support only. Do not offer discounts proactively unless asked. Focus on help, trust, and logistics.";
+  if (goal === "qualify_and_follow_up")
+    return "Goal: qualify intent fast, then secure permission for follow-up (email/SMS) if they won't complete now.";
+  if (goal === "support_only")
+    return "Goal: support only. Do not offer discounts proactively unless asked. Focus on help, trust, and logistics.";
   return "Goal: complete checkout on this call if possible.";
 }
 
@@ -146,8 +148,158 @@ function followupGuidance(args: {
 - If they decline, stop asking and end politely.`;
 }
 
+// =========================
+// Follow-up memory helpers
+// =========================
+
+type PrevSummaryRow = {
+  received_at: string | null;
+  answered: boolean | null;
+  voicemail: boolean | null;
+  sentiment: string | null;
+  call_outcome: string | null;
+  disposition: string | null;
+
+  summary_clean: string | null;
+  summary: string | null;
+
+  objections_text: string | null;
+  key_quotes_text: string | null;
+
+  best_next_action: string | null;
+  next_best_action: string | null;
+  follow_up_message: string | null;
+
+  discount_percent: number | null;
+  ended_reason: string | null;
+};
+
+function trunc(s: any, max: number) {
+  const x = String(s ?? "");
+  if (x.length <= max) return x;
+  return x.slice(0, Math.max(0, max - 1)) + "…";
+}
+
+function cleanLine(s: any) {
+  return String(s ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function readPreviousCallMemory(params: {
+  shop: string;
+  checkoutId: string;
+  currentCallJobId: string;
+}): Promise<string | null> {
+  const { shop, checkoutId, currentCallJobId } = params;
+
+  // Prefer vapi_call_summaries (structured, already AI-processed)
+  const rows = await (db as any).$queryRaw<PrevSummaryRow[]>`
+    select
+      received_at,
+      answered,
+      voicemail,
+      sentiment,
+      call_outcome,
+      disposition,
+      summary_clean,
+      summary,
+      objections_text,
+      key_quotes_text,
+      best_next_action,
+      next_best_action,
+      follow_up_message,
+      discount_percent,
+      ended_reason
+    from public."vapi_call_summaries"
+    where shop = ${shop}
+      and checkout_id = ${checkoutId}
+      and (call_job_id is null or call_job_id <> ${currentCallJobId})
+    order by received_at desc nulls last
+    limit 2
+  `;
+
+  const picked = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  if (picked.length) {
+    const parts = picked.map((r, i) => {
+      const label = i === 0 ? "LAST CALL" : "PREVIOUS CALL";
+      const outcome = cleanLine(r.call_outcome || r.disposition || "unknown");
+      const ans = r.answered == null ? "unknown" : r.answered ? "yes" : "no";
+      const vm = r.voicemail == null ? "unknown" : r.voicemail ? "yes" : "no";
+      const sent = cleanLine(r.sentiment || "unknown");
+      const ended = cleanLine(r.ended_reason || "");
+      const sum = cleanLine(r.summary_clean || r.summary || "");
+      const obj = cleanLine(r.objections_text || "");
+      const quotes = cleanLine(r.key_quotes_text || "");
+      const next = cleanLine(r.best_next_action || r.next_best_action || "");
+      const fu = cleanLine(r.follow_up_message || "");
+      const disc = r.discount_percent == null ? "" : `discount_percent=${Number(r.discount_percent)}%`;
+
+      const lines: string[] = [];
+      lines.push(
+        `[${label}] outcome=${outcome}; answered=${ans}; voicemail=${vm}; sentiment=${sent}${
+          disc ? "; " + disc : ""
+        }${ended ? "; ended_reason=" + ended : ""}`
+      );
+      if (sum) lines.push(`summary: ${trunc(sum, 500)}`);
+      if (obj) lines.push(`objections: ${trunc(obj, 350)}`);
+      if (quotes) lines.push(`key_quotes: ${trunc(quotes, 300)}`);
+      if (next) lines.push(`next_action: ${trunc(next, 220)}`);
+      if (fu) lines.push(`follow_up_message: ${trunc(fu, 220)}`);
+
+      return lines.join("\n");
+    });
+
+    return trunc(parts.join("\n\n"), 1400);
+  }
+
+  // Fallback to CallJob fields
+  const prevJob = await db.callJob.findFirst({
+    where: {
+      shop,
+      checkoutId,
+      id: { not: currentCallJobId },
+      status: { in: ["COMPLETED", "FAILED"] },
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      status: true,
+      outcome: true,
+      endedReason: true,
+      sentiment: true,
+      reason: true,
+      nextAction: true,
+      followUp: true,
+      transcript: true,
+    },
+  });
+
+  if (!prevJob) return null;
+
+  const lines: string[] = [];
+  lines.push(
+    `[LAST CALL] status=${cleanLine(prevJob.status)}; outcome=${cleanLine(prevJob.outcome)}; sentiment=${cleanLine(
+      prevJob.sentiment
+    )}; ended_reason=${cleanLine(prevJob.endedReason)}`
+  );
+  if (prevJob.reason) lines.push(`reason: ${trunc(cleanLine(prevJob.reason), 240)}`);
+  if (prevJob.nextAction) lines.push(`next_action: ${trunc(cleanLine(prevJob.nextAction), 240)}`);
+  if (prevJob.followUp) lines.push(`follow_up: ${trunc(cleanLine(prevJob.followUp), 240)}`);
+
+  const t = cleanLine(prevJob.transcript || "");
+  if (t) lines.push(`transcript_excerpt: ${trunc(t, 700)}`);
+
+  return trunc(lines.join("\n"), 1400);
+}
+
+// =========================
+// Prompt builder
+// =========================
+
 function buildSystemPrompt(args: {
   merchantPrompt?: string | null;
+  attemptNumber?: number; // 1 for first call, 2+ for follow-ups
+  previousMemory?: string | null; // output of readPreviousCallMemory(...)
   checkout: {
     checkoutId: string;
     customerName?: string | null;
@@ -190,14 +342,31 @@ function buildSystemPrompt(args: {
       ? "No cart items available."
       : items.map((it: any) => `- ${it?.title ?? "Item"} x${Number(it?.quantity ?? 1)}`).join("\n");
 
+  const attemptN = Number(args.attemptNumber ?? 1);
+  const memory = (args.previousMemory ?? "").trim();
+
+  const memoryBlock = memory
+    ? `
+Previous call memory (ground truth, do not contradict):
+${memory}
+
+Memory rules:
+- Continue from the customer's last intent/objections.
+- If a follow-up was promised (call later / send link / discount), acknowledge it first.
+- If memory is unclear, ask one confirmation question max, then proceed.
+`.trim()
+    : "";
+
   const base = `
 You are the merchant's AI phone agent. Your job: recover an abandoned checkout politely and efficiently.
+${attemptN > 1 ? `This is a follow-up attempt (#${attemptN}).` : "This is the first attempt."}
 
 Hard rules:
 - Confirm identity. Ask if it's a good time.
 - Keep it short. Target a maximum call length of ~${playbook.maxCallSeconds} seconds.
 - Do not be pushy. If not interested, end politely and mark as not interested.
 - Never invent policies, discounts, or shipping offers beyond the rules below.
+${memoryBlock ? `\n\n${memoryBlock}\n` : ""}
 
 Playbook:
 - Tone: ${playbook.tone}. ${toneGuidance(playbook.tone)}
@@ -256,7 +425,8 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     discountEnabled: Boolean(extras?.discount_enabled ?? false),
     maxDiscountPercent: clamp(Number(extras?.max_discount_percent ?? 10), 0, 50),
     offerRule: pickOfferRule(extras?.offer_rule ?? "ask_only"),
-    minCartValueForDiscount: extras?.min_cart_value_for_discount == null ? null : Number(extras.min_cart_value_for_discount),
+    minCartValueForDiscount:
+      extras?.min_cart_value_for_discount == null ? null : Number(extras.min_cart_value_for_discount),
     couponPrefix: (extras?.coupon_prefix ?? "").trim() ? String(extras?.coupon_prefix).trim() : null,
     couponValidityHours: clamp(Number(extras?.coupon_validity_hours ?? 24), 1, 168),
     freeShippingEnabled: Boolean(extras?.free_shipping_enabled ?? false),
@@ -265,8 +435,25 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     followupSmsEnabled: Boolean(extras?.followup_sms_enabled ?? false),
   };
 
+  // attempt number: how many CallJobs already exist for this checkout (excluding current)
+  const priorCallsCount = await db.callJob.count({
+    where: { shop: params.shop, checkoutId: job.checkoutId, id: { not: job.id } },
+  });
+  const attemptNumber = priorCallsCount + 1;
+
+  const previousMemory =
+    attemptNumber >= 2
+      ? await readPreviousCallMemory({
+          shop: params.shop,
+          checkoutId: job.checkoutId,
+          currentCallJobId: job.id,
+        })
+      : null;
+
   const systemPrompt = buildSystemPrompt({
-    merchantPrompt: (settings as any)?.userPrompt ?? "", // ✅ this is the user custom prompt
+    merchantPrompt: (settings as any)?.userPrompt ?? "",
+    attemptNumber,
+    previousMemory,
     checkout: {
       checkoutId: String(checkout.checkoutId),
       customerName: checkout.customerName,
@@ -287,10 +474,6 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
 
   const webhookUrl = VAPI_SERVER_URL.replace(/\/$/, "");
 
-  // ✅ KEY FIX:
-  // Use assistantId (your global assistant) AND override its prompt via assistant.model.messages.
-  // Vapi accepts assistant overrides; sending both is fine, but you MUST include the override under assistant.model.messages.
-  // Your previous payload missing merchantPrompt happens when the override is not used or you sent the wrong endpoint.
   const res = await fetch("https://api.vapi.ai/call/phone", {
     method: "POST",
     headers: {
@@ -307,7 +490,6 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
         name: checkout.customerName ?? undefined,
       },
 
-      // ✅ per-call override (this is what injects userPrompt)
       assistant: {
         model: {
           provider: "openai",
@@ -317,7 +499,9 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
             {
               role: "user",
               content:
-                "Start the call now. Greet the customer, mention they almost completed checkout, and ask if they want help finishing the order.",
+                attemptNumber >= 2
+                  ? "Follow-up call. Use the Previous call memory block to reference what happened last time and continue from the customer's last intent/objections. Keep it short and move to a concrete next step."
+                  : "Start the call now. Greet the customer, mention they almost completed checkout, and ask if they want help finishing the order.",
             },
           ],
         },

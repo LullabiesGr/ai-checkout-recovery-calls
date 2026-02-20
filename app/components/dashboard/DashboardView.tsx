@@ -123,8 +123,11 @@ export type DashboardViewProps = {
 
   settings: {
     enabled: boolean;
+
+    // keep prop shape compatible with existing loader
     vapiReady: boolean;
     criticalMissing: boolean;
+
     rows: Array<{ label: string; value: string; tone: BadgeTone }>;
   };
 
@@ -158,7 +161,27 @@ function metricTile(props: {
   );
 }
 
+function shouldHideSettingRowLabel(label: string) {
+  const s = (label || "").toLowerCase().trim();
+
+  // hide provider-internal identifiers from UI
+  // (assistant id / phone number id / provider ids)
+  if (s.includes("assistant id")) return true;
+  if (s.includes("phone number id")) return true;
+  if (s.includes("phone_number_id")) return true;
+  if (s.includes("assistant_id")) return true;
+
+  // also hide any explicit provider-name rows if they exist
+  if (s.includes("vapi")) return true;
+
+  return false;
+}
+
 export function DashboardView(props: DashboardViewProps) {
+  const settingsRows = React.useMemo(() => {
+    return (props.settings.rows || []).filter((r) => !shouldHideSettingRowLabel(r.label));
+  }, [props.settings.rows]);
+
   return (
     <s-page heading="Dashboard">
       <s-stack slot="secondary-actions" direction="inline" gap="tight">
@@ -205,10 +228,8 @@ export function DashboardView(props: DashboardViewProps) {
               </s-stack>
 
               {props.settings.criticalMissing ? (
-                <s-banner tone="critical" heading="Automation is enabled but Vapi is not ready">
-                  <s-text>
-                    Add Vapi Assistant ID and Phone Number ID in Settings to start calls.
-                  </s-text>
+                <s-banner tone="critical" heading="Automation is enabled but calls are not ready">
+                  <s-text>Complete call configuration in Settings to start calls.</s-text>
                 </s-banner>
               ) : null}
             </s-stack>
@@ -242,14 +263,9 @@ export function DashboardView(props: DashboardViewProps) {
             <s-heading size="small">Key metrics</s-heading>
             <s-text tone="subdued">Click a metric to drill into the relevant list view.</s-text>
 
-            <s-grid
-              gap="base"
-              gridTemplateColumns="@container (inline-size < 860px) 1fr 1fr, 1fr 1fr 1fr 1fr"
-            >
+            <s-grid gap="base" gridTemplateColumns="@container (inline-size < 860px) 1fr 1fr, 1fr 1fr 1fr 1fr">
               {props.metrics.map((m) => (
-                <React.Fragment key={m.key}>
-                  {metricTile(m)}
-                </React.Fragment>
+                <React.Fragment key={m.key}>{metricTile(m)}</React.Fragment>
               ))}
             </s-grid>
 
@@ -355,9 +371,7 @@ export function DashboardView(props: DashboardViewProps) {
                       <s-badge tone={toneBadge(p.tone)}>{String(p.count)}</s-badge>
                     </s-table-cell>
                     <s-table-cell>
-                      <s-text tone={p.nextBestAction ? "base" : "subdued"}>
-                        {p.nextBestAction || "—"}
-                      </s-text>
+                      <s-text tone={p.nextBestAction ? "base" : "subdued"}>{p.nextBestAction || "—"}</s-text>
                     </s-table-cell>
                     <s-table-cell>
                       <s-link href={p.href}>View</s-link>
@@ -417,7 +431,7 @@ export function DashboardView(props: DashboardViewProps) {
         <s-section heading="Top blockers (7d)">
           <s-box border="base" borderRadius="base" padding="base" background="base">
             <s-stack direction="block" gap="tight">
-              <s-text tone="subdued">Based on vapi_call_summaries in the last 7 days.</s-text>
+              <s-text tone="subdued">Based on call summaries in the last 7 days.</s-text>
               {props.blockers.total === 0 ? (
                 <s-text tone="subdued">No calls in the last 7 days.</s-text>
               ) : (
@@ -446,7 +460,7 @@ export function DashboardView(props: DashboardViewProps) {
             <s-stack direction="block" gap="base">
               {props.settings.enabled && !props.settings.vapiReady ? (
                 <s-banner tone="critical" heading="Calls cannot start yet">
-                  <s-text>Automation is enabled but Vapi IDs are missing.</s-text>
+                  <s-text>Automation is enabled but call configuration is missing.</s-text>
                 </s-banner>
               ) : null}
 
@@ -457,7 +471,7 @@ export function DashboardView(props: DashboardViewProps) {
                 </s-table-header-row>
 
                 <s-table-body>
-                  {props.settings.rows.map((r) => (
+                  {settingsRows.map((r) => (
                     <s-table-row key={r.label}>
                       <s-table-cell>{r.label}</s-table-cell>
                       <s-table-cell>
