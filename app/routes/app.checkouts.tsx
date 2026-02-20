@@ -16,24 +16,6 @@ import {
   type SupabaseCallSummary,
 } from "../lib/callInsights.shared";
 
-import {
-  Page,
-  Layout,
-  Card,
-  TextField,
-  Badge,
-  Button,
-  InlineStack,
-  BlockStack,
-  Box,
-  Text,
-  IndexTable,
-  Tooltip,
-  Divider,
-  Collapsible,
-  Spinner,
-} from "@shopify/polaris";
-
 /* ---------------- URL helpers (keep embedded params) ---------------- */
 function safeSearch(): string {
   if (typeof window === "undefined") return "";
@@ -48,16 +30,16 @@ function withSearch(path: string): string {
 }
 
 /* ---------------- Tones ---------------- */
-type PolarisTone = "success" | "critical" | "warning" | "info" | "new";
+type BadgeTone = "success" | "critical" | "warning" | "info" | "neutral";
 
-function toneForCheckoutStatus(status: string): PolarisTone {
+function toneForCheckoutStatus(status: string): BadgeTone {
   const s = safeStr(status).toUpperCase();
   if (s === "CONVERTED" || s === "RECOVERED") return "success";
   if (s === "ABANDONED") return "critical";
   if (s === "OPEN") return "warning";
   return "info";
 }
-function toneForJobStatus(status: string): PolarisTone {
+function toneForJobStatus(status: string): BadgeTone {
   const s = safeStr(status).toUpperCase();
   if (s === "COMPLETED") return "success";
   if (s === "CALLING") return "warning";
@@ -65,9 +47,9 @@ function toneForJobStatus(status: string): PolarisTone {
   if (s === "FAILED") return "critical";
   return "info";
 }
-function toneForOutcome(outcome: string | null): PolarisTone {
+function toneForOutcome(outcome: string | null): BadgeTone {
   const s = safeStr(outcome).toLowerCase();
-  if (!s) return "info";
+  if (!s) return "neutral";
   if (s.includes("recovered") || s.includes("converted")) return "success";
   if (s.includes("no_answer") || s.includes("voicemail")) return "warning";
   if (s.includes("needs_follow") || s.includes("needs follow") || s.includes("follow")) return "warning";
@@ -75,24 +57,21 @@ function toneForOutcome(outcome: string | null): PolarisTone {
   return "info";
 }
 
-function PBadge({
-  tone,
-  children,
-  tooltip,
-}: {
-  tone: PolarisTone;
-  children: React.ReactNode;
-  tooltip?: string;
-}) {
-  const b = (
-    <Badge tone={tone as any} size="small">
-      {children}
-    </Badge>
-  );
-  return tooltip ? <Tooltip content={tooltip}>{b}</Tooltip> : b;
-}
-
 /* ---------------- Types ---------------- */
+type CartItemLite = {
+  title?: string | null;
+  name?: string | null;
+  quantity?: number | string | null;
+  qty?: number | string | null;
+  image?: string | null;
+  imageUrl?: string | null;
+  thumbnail?: string | null;
+  src?: string | null;
+  url?: string | null;
+  variantTitle?: string | null;
+  sku?: string | null;
+};
+
 type Row = {
   checkoutId: string;
   status: string;
@@ -103,7 +82,11 @@ type Row = {
   email: string | null;
   value: number;
   currency: string;
+
+  itemsJson: any; // keep raw so we can render thumbnails in UI
   cartPreview: string | null;
+  thumbUrl: string | null;
+  itemsCount: number;
 
   callStatus: string | null;
   callOutcome: string | null;
@@ -120,6 +103,56 @@ type LoaderData = {
   shop: string;
   rows: Row[];
 };
+
+/* ---------------- Cart parsing helpers ---------------- */
+function safeJsonParse<T = any>(v: any): T | null {
+  if (v == null) return null;
+  if (typeof v === "object") return v as T;
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  if (!s) return null;
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    return null;
+  }
+}
+
+function pickThumbFromItem(it: CartItemLite): string {
+  const candidates = [it.imageUrl, it.image, it.thumbnail, it.src, it.url]
+    .map((x) => safeStr(x).trim())
+    .filter(Boolean);
+  return candidates[0] || "";
+}
+
+function toItemsArray(itemsJson: any): CartItemLite[] {
+  const parsed = safeJsonParse<any>(itemsJson) ?? itemsJson;
+  if (!parsed) return [];
+
+  if (Array.isArray(parsed)) return parsed as CartItemLite[];
+
+  // common shapes:
+  // { items: [...] } or { lineItems: [...] } or { cart: { items: [...] } }
+  const maybe =
+    (Array.isArray(parsed.items) && parsed.items) ||
+    (Array.isArray(parsed.lineItems) && parsed.lineItems) ||
+    (Array.isArray(parsed.lines) && parsed.lines) ||
+    (Array.isArray(parsed.cart?.items) && parsed.cart.items) ||
+    (Array.isArray(parsed.cart?.lineItems) && parsed.cart.lineItems) ||
+    null;
+
+  return Array.isArray(maybe) ? (maybe as CartItemLite[]) : [];
+}
+
+function getThumbAndCount(itemsJson: any): { thumbUrl: string | null; count: number } {
+  const items = toItemsArray(itemsJson);
+  const count = items.length;
+  for (const it of items) {
+    const url = pickThumbFromItem(it);
+    if (url) return { thumbUrl: url, count };
+  }
+  return { thumbUrl: null, count };
+}
 
 /* ---------------- Loader ---------------- */
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -335,6 +368,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     const recordingUrl = (pickRecordingUrl(sb) ?? (j?.recordingUrl ? String(j.recordingUrl) : null)) ?? null;
 
+    const cartPreview = buildCartPreview(c.itemsJson ?? null);
+    const { thumbUrl, count } = getThumbAndCount(c.itemsJson ?? null);
+
     return {
       checkoutId,
       status: String(c.status),
@@ -345,7 +381,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       email: c.email ?? null,
       value: Number(c.value ?? 0),
       currency: String(c.currency ?? "USD"),
-      cartPreview: buildCartPreview(c.itemsJson ?? null),
+
+      itemsJson: c.itemsJson ?? null,
+      cartPreview,
+      thumbUrl,
+      itemsCount: count,
 
       callStatus: j ? String(j.status) : null,
       callOutcome: (sb as any)?.call_outcome ? String((sb as any).call_outcome) : null,
@@ -362,8 +402,24 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return { shop, rows } satisfies LoaderData;
 };
 
-/* ---------------- UI helpers ---------------- */
-function PreBlock({ value }: { value: any }) {
+/* ---------------- Money helpers ---------------- */
+function sumMoney(rows: Row[], pred: (r: Row) => boolean) {
+  let n = 0;
+  for (const r of rows) if (pred(r)) n += Number(r.value || 0);
+  return n;
+}
+
+/* ---------------- UI helpers (minimal) ---------------- */
+function Badge({ tone, children, label }: { tone: BadgeTone; children: React.ReactNode; label?: string }) {
+  return (
+    // @ts-ignore - custom element
+    <s-badge tone={tone} accessibilityLabel={label || ""}>
+      {children}
+    </s-badge>
+  );
+}
+
+function MonoPre({ value }: { value: any }) {
   const text =
     value == null
       ? ""
@@ -378,47 +434,39 @@ function PreBlock({ value }: { value: any }) {
         })();
 
   return (
-    <Box
-      padding="300"
-      background="bg-surface-secondary"
-      borderColor="border"
-      borderWidth="025"
-      borderRadius="200"
-    >
-      <div
+    // @ts-ignore - custom element
+    <s-box padding="base" background="subdued" border="base" borderRadius="base">
+      <pre
         style={{
+          margin: 0,
           fontFamily:
             'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
           fontSize: 12,
           fontWeight: 650,
           whiteSpace: "pre-wrap",
           wordBreak: "break-word",
-          margin: 0,
         }}
       >
         {text || "—"}
-      </div>
-    </Box>
+      </pre>
+    </s-box>
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <BlockStack gap="100">
-      <Text variant="bodySm" tone="subdued">
+    // @ts-ignore - custom element
+    <s-stack gap="small-100">
+      {/* @ts-ignore */}
+      <s-text tone="subdued" variant="bodySm">
         {label}
-      </Text>
-      <Text variant="bodyMd" fontWeight="semibold">
-        {children}
-      </Text>
-    </BlockStack>
+      </s-text>
+      {/* @ts-ignore */}
+      <s-text variant="bodyMd" fontWeight="semibold">
+        {value}
+      </s-text>
+    </s-stack>
   );
-}
-
-function sumMoney(rows: Row[], pred: (r: Row) => boolean) {
-  let n = 0;
-  for (const r of rows) if (pred(r)) n += Number(r.value || 0);
-  return n;
 }
 
 /* ---------------- Page ---------------- */
@@ -457,7 +505,10 @@ export default function Checkouts() {
     }
   }, [selectedId, filtered]);
 
-  const selected = React.useMemo(() => filtered.find((r) => r.checkoutId === selectedId) ?? null, [filtered, selectedId]);
+  const selected = React.useMemo(
+    () => filtered.find((r) => r.checkoutId === selectedId) ?? null,
+    [filtered, selectedId],
+  );
 
   const detailsFetcher = useFetcher<any>();
   React.useEffect(() => {
@@ -467,6 +518,8 @@ export default function Checkouts() {
 
   const details = detailsFetcher.data?.shop ? detailsFetcher.data : null;
   const sb = details?.sb ?? null;
+
+  const loadingDetails = detailsFetcher.state !== "idle" && !details;
 
   const stats = React.useMemo(() => {
     const total = filtered.length;
@@ -486,399 +539,476 @@ export default function Checkouts() {
     return { total, abandonedCount, openCount, recoveredCount, atRisk, recovered };
   }, [filtered]);
 
-  const headings = [
-    { title: "Customer / Cart" },
-    { title: "Value" },
-    { title: "Checkout" },
-    { title: "Call" },
-    { title: "Outcome" },
-    { title: "Buy" },
-    { title: "Updated" },
-    { title: "Rec" },
-  ];
+  const [modalOpenKind, setModalOpenKind] = React.useState<"transcript" | "raw" | null>(null);
 
-  const loadingDetails = detailsFetcher.state !== "idle" && !details;
+  const itemsForDetails = React.useMemo(() => {
+    const itemsJson = details?.checkout?.itemsJson ?? selected?.itemsJson ?? null;
+    return toItemsArray(itemsJson);
+  }, [details?.checkout?.itemsJson, selected?.itemsJson]);
+
+  const modalHeading =
+    modalOpenKind === "transcript" ? "Transcript" : modalOpenKind === "raw" ? "Raw payload" : "Details";
+
+  const modalBody =
+    modalOpenKind === "transcript" ? (
+      <MonoPre value={sb?.transcript} />
+    ) : modalOpenKind === "raw" ? (
+      // keep it structured + readable
+      // show supabase payload first, then checkout raw
+      // (both are already available in the old UI)
+      <>
+        {/* @ts-ignore */}
+        <s-stack gap="base">
+          {/* @ts-ignore */}
+          <s-section heading="End-of-call report">
+            <MonoPre value={sb?.end_of_call_report} />
+          </s-section>
+          {/* @ts-ignore */}
+          <s-section heading="AI result">
+            <MonoPre value={sb?.ai_result} />
+          </s-section>
+          {/* @ts-ignore */}
+          <s-section heading="Structured outputs">
+            <MonoPre value={sb?.structured_outputs} />
+          </s-section>
+          {/* @ts-ignore */}
+          <s-section heading="Payload">
+            <MonoPre value={sb?.payload} />
+          </s-section>
+          {/* @ts-ignore */}
+          <s-section heading="Checkout raw">
+            <MonoPre value={details?.checkout?.raw} />
+          </s-section>
+        </s-stack>
+      </>
+    ) : (
+      <MonoPre value={null} />
+    );
 
   return (
-    <Page title="Checkouts" subtitle={shop}>
-      <Layout>
-        <Layout.Section>
-          <Card>
-            <BlockStack gap="300">
-              <InlineStack align="space-between" blockAlign="center" wrap gap="300">
-                <InlineStack gap="200" wrap>
-                  <PBadge tone="info" tooltip="Rows in current view">
+    <>
+      {/* @ts-ignore - custom element */}
+      <s-page heading="Checkouts" inlineSize="large">
+        {/* @ts-ignore */}
+        <s-section>
+          {/* @ts-ignore */}
+          <s-stack gap="base">
+            {/* TOP BAR: stats + search */}
+            {/* @ts-ignore */}
+            <s-grid columns="1fr 420px" gap="base" alignItems="start">
+              {/* STATS */}
+              {/* @ts-ignore */}
+              <s-stack gap="small-100">
+                {/* @ts-ignore */}
+                <s-stack direction="inline" gap="small-100" wrap>
+                  <Badge tone="info" label="Rows in current view">
                     {stats.total} rows
-                  </PBadge>
-                  <PBadge tone="critical" tooltip="Abandoned count in current view">
+                  </Badge>
+                  <Badge tone="critical" label="Abandoned count in current view">
                     Abandoned {stats.abandonedCount}
-                  </PBadge>
-                  <PBadge tone="warning" tooltip="Open checkouts in current view">
+                  </Badge>
+                  <Badge tone="warning" label="Open checkouts in current view">
                     Open {stats.openCount}
-                  </PBadge>
-                  <PBadge tone="success" tooltip="Recovered/Converted in current view">
+                  </Badge>
+                  <Badge tone="success" label="Recovered/Converted in current view">
                     Recovered {stats.recoveredCount}
-                  </PBadge>
-                  <PBadge tone="warning" tooltip="Sum of abandoned checkout value (current view)">
+                  </Badge>
+                  <Badge tone="warning" label="Sum of abandoned checkout value (current view)">
                     At-risk {stats.atRisk.toFixed(2)}
-                  </PBadge>
-                  <PBadge tone="success" tooltip="Sum of recovered/converted value (current view)">
+                  </Badge>
+                  <Badge tone="success" label="Sum of recovered/converted value (current view)">
                     Recovered {stats.recovered.toFixed(2)}
-                  </PBadge>
-                </InlineStack>
+                  </Badge>
+                </s-stack>
 
-                <Box minWidth="320px" width="100%" maxWidth="520px">
-                  <TextField
-                    label="Search"
-                    labelHidden
-                    value={query}
-                    onChange={setQuery}
-                    placeholder="Search by customer, phone, email, status, cart, AI…"
-                    autoComplete="off"
-                    clearButton
-                    onClearButtonClick={() => setQuery("")}
-                  />
-                </Box>
-              </InlineStack>
+                {/* @ts-ignore */}
+                <s-text tone="subdued" variant="bodySm">
+                  Click a checkout to view details on the right.
+                </s-text>
+              </s-stack>
 
-              <Divider />
+              {/* SEARCH */}
+              {/* @ts-ignore */}
+              <s-text-field
+                label="Search"
+                value={query}
+                placeholder="Search by customer, phone, email, status, cart, AI…"
+                clearButton
+                onInput={(e: any) => setQuery(String(e.currentTarget?.value ?? ""))}
+                onClearButtonClick={() => setQuery("")}
+              />
+            </s-grid>
 
-              <IndexTable
-                resourceName={{ singular: "checkout", plural: "checkouts" }}
-                itemCount={filtered.length}
-                headings={headings as any}
-                selectable={false}
-              >
-                {filtered.map((c, index) => {
-                  const isSel = c.checkoutId === selectedId;
-                  const checkoutTone = toneForCheckoutStatus(c.status);
-                  const callTone = c.callStatus ? toneForJobStatus(c.callStatus) : "info";
-                  const outcomeTone = toneForOutcome(c.callOutcome);
+            {/* @ts-ignore */}
+            <s-divider />
 
-                  const cartLine = safeStr(c.cartPreview);
-                  const customer = safeStr(c.customerName) || "—";
-                  const phone = safeStr(c.phone);
+            {/* MAIN: list + details (side-by-side) */}
+            {/* @ts-ignore */}
+            <s-grid columns="minmax(420px, 1fr) minmax(420px, 1fr)" gap="base" alignItems="start">
+              {/* LEFT: CLICKABLE LIST */}
+              {/* @ts-ignore */}
+              <s-section heading="Latest checkouts">
+                {/* @ts-ignore */}
+                <s-stack gap="small-100">
+                  {filtered.length === 0 ? (
+                    // @ts-ignore
+                    <s-box padding="base" background="subdued" borderRadius="base">
+                      {/* @ts-ignore */}
+                      <s-text tone="subdued">No results.</s-text>
+                    </s-box>
+                  ) : (
+                    filtered.map((c) => {
+                      const isSel = c.checkoutId === selectedId;
+                      const checkoutTone = toneForCheckoutStatus(c.status);
+                      const callTone = c.callStatus ? toneForJobStatus(c.callStatus) : "neutral";
+                      const outcomeTone = toneForOutcome(c.callOutcome);
 
-                  const updatedText = formatWhen(c.updatedAt);
-                  const abandonedText = c.abandonedAt ? formatWhen(c.abandonedAt) : "";
+                      const customer = safeStr(c.customerName) || "—";
+                      const phone = safeStr(c.phone);
+                      const updatedText = formatWhen(c.updatedAt);
+                      const abandonedText = c.abandonedAt ? formatWhen(c.abandonedAt) : "";
 
-                  return (
-                    <IndexTable.Row
-                      id={c.checkoutId}
-                      key={c.checkoutId}
-                      position={index}
-                      selected={isSel}
-                      onClick={() => setSelectedId(c.checkoutId)}
-                    >
-                      <IndexTable.Cell>
-                        <BlockStack gap="100">
-                          <InlineStack gap="200" blockAlign="center" wrap>
-                            <Text variant="bodyMd" fontWeight="semibold">
-                              {customer}
-                            </Text>
-                            {phone ? (
-                              <Text variant="bodySm" tone="subdued">
-                                {phone}
-                              </Text>
-                            ) : null}
-                            <Text variant="bodySm" tone="subdued">
-                              #{c.checkoutId}
-                            </Text>
-                          </InlineStack>
+                      return (
+                        // @ts-ignore
+                        <s-clickable
+                          key={c.checkoutId}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Open checkout ${c.checkoutId}`}
+                          background={isSel ? "subdued" : "transparent"}
+                          border="base"
+                          borderRadius="base"
+                          padding="base"
+                          onClick={() => setSelectedId(c.checkoutId)}
+                        >
+                          {/* @ts-ignore */}
+                          <s-grid columns="48px 1fr" gap="base" alignItems="start">
+                            {/* THUMBNAIL */}
+                            <div style={{ width: 48, height: 48 }}>
+                              {/* @ts-ignore */}
+                              <s-thumbnail
+                                src={c.thumbUrl || undefined}
+                                alt={c.thumbUrl ? "Cart item preview" : "No image available"}
+                                size="small-200"
+                              />
+                            </div>
 
-                          {cartLine ? (
-                            <Tooltip content={cartLine}>
-                              <Text variant="bodySm" tone="subdued" truncate>
-                                {cartLine}
-                              </Text>
-                            </Tooltip>
+                            {/* CONTENT */}
+                            {/* @ts-ignore */}
+                            <s-stack gap="small-100">
+                              {/* @ts-ignore */}
+                              <s-stack direction="inline" gap="small-100" wrap alignItems="center">
+                                {/* @ts-ignore */}
+                                <s-text variant="bodyMd" fontWeight="semibold">
+                                  {customer}
+                                </s-text>
+                                {phone ? (
+                                  // @ts-ignore
+                                  <s-text variant="bodySm" tone="subdued">
+                                    {phone}
+                                  </s-text>
+                                ) : null}
+                                {/* @ts-ignore */}
+                                <s-text variant="bodySm" tone="subdued">
+                                  #{c.checkoutId}
+                                </s-text>
+                              </s-stack>
+
+                              {/* CART LINE */}
+                              {safeStr(c.cartPreview) ? (
+                                // @ts-ignore
+                                <s-text variant="bodySm" tone="subdued">
+                                  {safeStr(c.cartPreview)}
+                                </s-text>
+                              ) : (
+                                // @ts-ignore
+                                <s-text variant="bodySm" tone="subdued">
+                                  —
+                                </s-text>
+                              )}
+
+                              {/* BADGES */}
+                              {/* @ts-ignore */}
+                              <s-stack direction="inline" gap="small-100" wrap alignItems="center">
+                                <Badge tone={checkoutTone}>{safeStr(c.status).toUpperCase()}</Badge>
+                                {c.itemsCount ? <Badge tone="info">{c.itemsCount} items</Badge> : <Badge tone="neutral">0 items</Badge>}
+                                {c.abandonedAt ? <Badge tone="info">Abandoned {abandonedText}</Badge> : null}
+                                {c.callStatus ? <Badge tone={callTone}>{safeStr(c.callStatus).toUpperCase()}</Badge> : <Badge tone="neutral">NO CALL</Badge>}
+                                <Badge tone={outcomeTone}>{c.callOutcome ? safeStr(c.callOutcome).toUpperCase() : "—"}</Badge>
+                                {c.buyProbabilityPct == null ? <Badge tone="neutral">Buy —</Badge> : <Badge tone="info">Buy {c.buyProbabilityPct}%</Badge>}
+                              </s-stack>
+
+                              {/* FOOT */}
+                              {/* @ts-ignore */}
+                              <s-stack direction="inline" gap="small-100" wrap alignItems="center">
+                                {/* @ts-ignore */}
+                                <s-text variant="bodySm" tone="subdued">
+                                  {Number(c.value || 0).toFixed(2)} {safeStr(c.currency)}
+                                </s-text>
+                                {/* @ts-ignore */}
+                                <s-text variant="bodySm" tone="subdued">
+                                  • Updated {updatedText}
+                                </s-text>
+                              </s-stack>
+                            </s-stack>
+                          </s-grid>
+                        </s-clickable>
+                      );
+                    })
+                  )}
+                </s-stack>
+              </s-section>
+
+              {/* RIGHT: DETAILS */}
+              {/* @ts-ignore */}
+              <s-section heading="Details">
+                {/* @ts-ignore */}
+                <s-stack gap="base">
+                  {/* header row */}
+                  {/* @ts-ignore */}
+                  <s-grid columns="1fr auto" gap="base" alignItems="center">
+                    {/* @ts-ignore */}
+                    <s-stack gap="small-100">
+                      {/* @ts-ignore */}
+                      <s-text tone="subdued" variant="bodySm">
+                        {selected ? `Checkout #${selected.checkoutId}` : "Select a checkout"}
+                      </s-text>
+                    </s-stack>
+
+                    {loadingDetails ? (
+                      // @ts-ignore
+                      <s-spinner size="small" />
+                    ) : null}
+                  </s-grid>
+
+                  {/* @ts-ignore */}
+                  <s-divider />
+
+                  {!selected ? (
+                    // @ts-ignore
+                    <s-text tone="subdued">—</s-text>
+                  ) : loadingDetails ? (
+                    // @ts-ignore
+                    <s-text tone="subdued">Loading…</s-text>
+                  ) : (
+                    // details content
+                    // @ts-ignore
+                    <s-stack gap="base">
+                      {/* status badges */}
+                      {/* @ts-ignore */}
+                      <s-stack direction="inline" gap="small-100" wrap>
+                        <Badge tone={toneForCheckoutStatus(details?.checkout?.status ?? selected.status)}>
+                          {safeStr(details?.checkout?.status ?? selected.status).toUpperCase()}
+                        </Badge>
+
+                        {details?.latestJob?.status ? (
+                          <Badge tone={toneForJobStatus(details.latestJob.status)}>{safeStr(details.latestJob.status).toUpperCase()}</Badge>
+                        ) : null}
+
+                        {sb?.call_outcome ? <Badge tone={toneForOutcome(sb.call_outcome)}>{safeStr(sb.call_outcome).toUpperCase()}</Badge> : null}
+
+                        {sb?.ai_status ? <Badge tone="info">{`AI ${safeStr(sb.ai_status).toUpperCase()}`}</Badge> : <Badge tone="neutral">AI —</Badge>}
+
+                        {typeof sb?.buy_probability === "number" ? (
+                          <Badge tone="info">{`Buy ${Math.round(sb.buy_probability)}%`}</Badge>
+                        ) : (
+                          <Badge tone="neutral">Buy —</Badge>
+                        )}
+                      </s-stack>
+
+                      {/* key fields */}
+                      {/* @ts-ignore */}
+                      <s-box padding="base" background="subdued" borderRadius="base">
+                        {/* @ts-ignore */}
+                        <s-stack gap="base">
+                          {/* @ts-ignore */}
+                          <s-grid columns="repeat(3, minmax(0, 1fr))" gap="base" alignItems="start">
+                            <Field label="Customer" value={details?.checkout?.customerName ?? selected.customerName ?? "—"} />
+                            <Field label="Phone" value={details?.checkout?.phone ?? selected.phone ?? "—"} />
+                            <Field label="Email" value={details?.checkout?.email ?? selected.email ?? "—"} />
+                          </s-grid>
+
+                          {/* @ts-ignore */}
+                          <s-grid columns="repeat(3, minmax(0, 1fr))" gap="base" alignItems="start">
+                            <Field
+                              label="Cart total"
+                              value={`${safeStr(details?.checkout?.value ?? selected.value)} ${safeStr(details?.checkout?.currency ?? selected.currency)}`}
+                            />
+                            <Field label="Updated" value={formatWhen(details?.checkout?.updatedAt ?? selected.updatedAt)} />
+                            <Field label="Abandoned" value={details?.checkout?.abandonedAt ? formatWhen(details.checkout.abandonedAt) : "—"} />
+                          </s-grid>
+                        </s-stack>
+                      </s-box>
+
+                      {/* items list with thumbnails */}
+                      {/* @ts-ignore */}
+                      <s-section heading="Items">
+                        {/* @ts-ignore */}
+                        <s-stack gap="small-100">
+                          {itemsForDetails.length === 0 ? (
+                            // @ts-ignore
+                            <s-text tone="subdued">—</s-text>
                           ) : (
-                            <Text variant="bodySm" tone="subdued">
-                              —
-                            </Text>
+                            itemsForDetails.slice(0, 25).map((it, idx) => {
+                              const title = safeStr(it.title || it.name) || "Item";
+                              const qtyRaw = it.quantity ?? it.qty ?? "";
+                              const qty = safeStr(qtyRaw) ? `×${safeStr(qtyRaw)}` : "";
+                              const img = pickThumbFromItem(it);
+                              const subtitleParts = [safeStr(it.variantTitle), safeStr(it.sku)].filter(Boolean);
+                              const subtitle = subtitleParts.join(" • ");
+
+                              return (
+                                // @ts-ignore
+                                <s-box key={`${title}-${idx}`} border="base" borderRadius="base" padding="base">
+                                  {/* @ts-ignore */}
+                                  <s-grid columns="48px 1fr" gap="base" alignItems="center">
+                                    <div style={{ width: 48, height: 48 }}>
+                                      {/* @ts-ignore */}
+                                      <s-thumbnail
+                                        src={img || undefined}
+                                        alt={img ? `Preview of ${title}` : "No image available"}
+                                        size="small-200"
+                                      />
+                                    </div>
+                                    {/* @ts-ignore */}
+                                    <s-stack gap="small-100">
+                                      {/* @ts-ignore */}
+                                      <s-stack direction="inline" gap="small-100" wrap alignItems="center">
+                                        {/* @ts-ignore */}
+                                        <s-text variant="bodyMd" fontWeight="semibold">
+                                          {title}
+                                        </s-text>
+                                        {qty ? <Badge tone="info">{qty}</Badge> : null}
+                                      </s-stack>
+                                      {subtitle ? (
+                                        // @ts-ignore
+                                        <s-text variant="bodySm" tone="subdued">
+                                          {subtitle}
+                                        </s-text>
+                                      ) : null}
+                                    </s-stack>
+                                  </s-grid>
+                                </s-box>
+                              );
+                            })
                           )}
+                        </s-stack>
+                      </s-section>
 
-                          <InlineStack gap="200" wrap>
-                            <PBadge tone={checkoutTone}>{safeStr(c.status).toUpperCase()}</PBadge>
-                            {c.abandonedAt ? (
-                              <PBadge tone="info" tooltip={`Abandoned at ${c.abandonedAt}`}>
-                                Abandoned {abandonedText}
-                              </PBadge>
-                            ) : null}
-                          </InlineStack>
-                        </BlockStack>
-                      </IndexTable.Cell>
-
-                      <IndexTable.Cell>
-                        <Text variant="bodyMd" fontWeight="semibold">
-                          {Number(c.value || 0).toFixed(2)} {safeStr(c.currency)}
-                        </Text>
-                      </IndexTable.Cell>
-
-                      <IndexTable.Cell>
-                        <PBadge tone={checkoutTone}>{safeStr(c.status).toUpperCase()}</PBadge>
-                      </IndexTable.Cell>
-
-                      <IndexTable.Cell>
-                        {c.callStatus ? <PBadge tone={callTone}>{safeStr(c.callStatus).toUpperCase()}</PBadge> : <PBadge tone="info">—</PBadge>}
-                      </IndexTable.Cell>
-
-                      <IndexTable.Cell>
-                        <InlineStack gap="200" wrap>
-                          <PBadge tone={outcomeTone}>{c.callOutcome ? safeStr(c.callOutcome).toUpperCase() : "—"}</PBadge>
-                          <PBadge tone="info">{`AI: ${c.aiStatus ? safeStr(c.aiStatus).toUpperCase() : "—"}`}</PBadge>
-                        </InlineStack>
-                      </IndexTable.Cell>
-
-                      <IndexTable.Cell>
-                        {c.buyProbabilityPct == null ? <PBadge tone="info">—</PBadge> : <PBadge tone="info">{c.buyProbabilityPct}%</PBadge>}
-                      </IndexTable.Cell>
-
-                      <IndexTable.Cell>
-                        <Text variant="bodySm" tone="subdued">
-                          {updatedText}
-                        </Text>
-                      </IndexTable.Cell>
-
-                      <IndexTable.Cell>
-                        <Button
-                          variant="tertiary"
-                          disabled={!c.recordingUrl}
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            if (c.recordingUrl) window.open(c.recordingUrl, "_blank", "noreferrer");
+                      {/* actions */}
+                      {/* @ts-ignore */}
+                      <s-stack direction="inline" gap="small-100" wrap>
+                        {/* @ts-ignore */}
+                        <s-button
+                          variant="primary"
+                          disabled={!(details?.recordingUrl ?? selected.recordingUrl)}
+                          onClick={() => {
+                            const url = details?.recordingUrl ?? selected.recordingUrl;
+                            if (url) window.open(url, "_blank", "noreferrer");
                           }}
                         >
-                          Open
-                        </Button>
-                      </IndexTable.Cell>
-                    </IndexTable.Row>
-                  );
-                })}
-              </IndexTable>
-            </BlockStack>
-          </Card>
-        </Layout.Section>
+                          Open recording
+                        </s-button>
 
-        <Layout.Section secondary>
-          <div style={{ position: "sticky", top: 16 }}>
-            <Card>
-              <BlockStack gap="300">
-                <InlineStack align="space-between" blockAlign="center">
-                  <BlockStack gap="100">
-                    <Text variant="headingMd" as="h2">
-                      Details
-                    </Text>
-                    <Text variant="bodySm" tone="subdued">
-                      {selected ? `Checkout #${selected.checkoutId}` : "Select a checkout"}
-                    </Text>
-                  </BlockStack>
-                  {loadingDetails ? <Spinner size="small" /> : null}
-                </InlineStack>
+                        {/* @ts-ignore */}
+                        <s-button
+                          variant="secondary"
+                          disabled={!safeStr(sb?.log_url).trim()}
+                          onClick={() => {
+                            const url = safeStr(sb?.log_url).trim();
+                            if (url) window.open(url, "_blank", "noreferrer");
+                          }}
+                        >
+                          Open logs
+                        </s-button>
 
-                <Divider />
-
-                {!selected ? (
-                  <Text tone="subdued">—</Text>
-                ) : loadingDetails ? (
-                  <Text tone="subdued">Loading…</Text>
-                ) : (
-                  <BlockStack gap="300">
-                    <InlineStack gap="200" wrap>
-                      <PBadge tone={toneForCheckoutStatus(details?.checkout?.status ?? selected.status)}>
-                        {safeStr(details?.checkout?.status ?? selected.status).toUpperCase()}
-                      </PBadge>
-                      {details?.latestJob?.status ? (
-                        <PBadge tone={toneForJobStatus(details.latestJob.status)}>
-                          {safeStr(details.latestJob.status).toUpperCase()}
-                        </PBadge>
-                      ) : null}
-                      {sb?.call_outcome ? (
-                        <PBadge tone={toneForOutcome(sb.call_outcome)}>{safeStr(sb.call_outcome).toUpperCase()}</PBadge>
-                      ) : null}
-                      {sb?.ai_status ? <PBadge tone="info">{`AI: ${safeStr(sb.ai_status).toUpperCase()}`}</PBadge> : null}
-                      {typeof sb?.buy_probability === "number" ? (
-                        <PBadge tone="info">{`Buy: ${Math.round(sb.buy_probability)}%`}</PBadge>
-                      ) : null}
-                    </InlineStack>
-
-                    <Box padding="300" background="bg-surface-secondary" borderRadius="200">
-                      <BlockStack gap="300">
-                        <InlineStack gap="600" wrap>
-                          <Field label="Customer">{details?.checkout?.customerName ?? selected.customerName ?? "—"}</Field>
-                          <Field label="Phone">{details?.checkout?.phone ?? selected.phone ?? "—"}</Field>
-                          <Field label="Email">{details?.checkout?.email ?? selected.email ?? "—"}</Field>
-                        </InlineStack>
-
-                        <InlineStack gap="600" wrap>
-                          <Field label="Cart total">
-                            {safeStr(details?.checkout?.value ?? selected.value)} {safeStr(details?.checkout?.currency ?? selected.currency)}
-                          </Field>
-                          <Field label="Updated">{formatWhen(details?.checkout?.updatedAt ?? selected.updatedAt)}</Field>
-                          <Field label="Abandoned">{details?.checkout?.abandonedAt ? formatWhen(details.checkout.abandonedAt) : "—"}</Field>
-                        </InlineStack>
-
-                        <Field label="Cart">{selected.cartPreview ?? "—"}</Field>
-                      </BlockStack>
-                    </Box>
-
-                    <InlineStack gap="200" wrap>
-                      <Button
-                        variant="primary"
-                        disabled={!(details?.recordingUrl ?? selected.recordingUrl)}
-                        onClick={() => {
-                          const url = details?.recordingUrl ?? selected.recordingUrl;
-                          if (url) window.open(url, "_blank", "noreferrer");
-                        }}
-                      >
-                        Open recording
-                      </Button>
-
-                      <Button
-                        variant="secondary"
-                        disabled={!safeStr(sb?.log_url).trim()}
-                        onClick={() => {
-                          const url = safeStr(sb?.log_url).trim();
-                          if (url) window.open(url, "_blank", "noreferrer");
-                        }}
-                      >
-                        Open logs
-                      </Button>
-                    </InlineStack>
-
-                    <Divider />
-
-                    <BlockStack gap="300">
-                      <BlockStack gap="100">
-                        <Text variant="headingSm" as="h3">
-                          Summary
-                        </Text>
-                        <Text>{safeStr(sb?.summary_clean || sb?.summary) || "—"}</Text>
-                      </BlockStack>
-
-                      <BlockStack gap="100">
-                        <Text variant="headingSm" as="h3">
-                          Next best action
-                        </Text>
-                        <Text>{safeStr(sb?.next_best_action || sb?.best_next_action) || "—"}</Text>
-                      </BlockStack>
-
-                      <BlockStack gap="100">
-                        <Text variant="headingSm" as="h3">
-                          Follow-up message
-                        </Text>
-                        <PreBlock value={sb?.follow_up_message} />
-                      </BlockStack>
-
-                      <BlockStack gap="100">
-                        <Text variant="headingSm" as="h3">
-                          Key quotes
-                        </Text>
-                        <PreBlock value={sb?.key_quotes_text || sb?.key_quotes} />
-                      </BlockStack>
-
-                      <BlockStack gap="100">
-                        <Text variant="headingSm" as="h3">
-                          Objections
-                        </Text>
-                        <PreBlock value={sb?.objections_text || sb?.objections} />
-                      </BlockStack>
-
-                      <BlockStack gap="100">
-                        <Text variant="headingSm" as="h3">
-                          Issues to fix
-                        </Text>
-                        <PreBlock value={sb?.issues_to_fix_text || sb?.issues_to_fix} />
-                      </BlockStack>
-
-                      <BlockStack gap="100">
-                        <Text variant="headingSm" as="h3">
-                          Tags
-                        </Text>
-                        <PreBlock value={sb?.tagcsv || (Array.isArray(sb?.tags) ? sb.tags.join(", ") : "")} />
-                      </BlockStack>
-
-                      <InlineStack gap="200" wrap>
-                        {sb?.latest_status ? <PBadge tone="info">{`Latest: ${safeStr(sb.latest_status)}`}</PBadge> : null}
-                        {sb?.ended_reason ? <PBadge tone="info">{`Ended: ${safeStr(sb.ended_reason)}`}</PBadge> : null}
-                        {sb?.answered != null ? <PBadge tone="info">{`Answered: ${String(sb.answered)}`}</PBadge> : null}
-                        {sb?.voicemail != null ? <PBadge tone="info">{`Voicemail: ${String(sb.voicemail)}`}</PBadge> : null}
-                        {sb?.sentiment ? <PBadge tone="info">{`Sentiment: ${safeStr(sb.sentiment)}`}</PBadge> : null}
-                        {sb?.customer_intent ? <PBadge tone="info">{`Intent: ${safeStr(sb.customer_intent)}`}</PBadge> : null}
-                        {sb?.tone ? <PBadge tone="info">{`Tone: ${safeStr(sb.tone)}`}</PBadge> : null}
-                      </InlineStack>
-
-                      <BlockStack gap="100">
-                        <Text variant="headingSm" as="h3">
+                        {/* transcript modal */}
+                        {/* @ts-ignore */}
+                        <s-button
+                          variant="secondary"
+                          commandFor="details-modal"
+                          command="--show"
+                          disabled={!safeStr(sb?.transcript).trim()}
+                          onClick={() => setModalOpenKind("transcript")}
+                        >
                           Transcript
-                        </Text>
-                        <PreBlock value={sb?.transcript} />
-                      </BlockStack>
+                        </s-button>
 
-                      <RawSection sb={sb} checkoutRaw={details?.checkout?.raw} />
-                    </BlockStack>
-                  </BlockStack>
-                )}
-              </BlockStack>
-            </Card>
-          </div>
-        </Layout.Section>
-      </Layout>
-    </Page>
-  );
-}
+                        {/* raw modal */}
+                        {/* @ts-ignore */}
+                        <s-button variant="secondary" commandFor="details-modal" command="--show" onClick={() => setModalOpenKind("raw")}>
+                          Raw
+                        </s-button>
+                      </s-stack>
 
-function RawSection({ sb, checkoutRaw }: { sb: any; checkoutRaw: any }) {
-  const [open, setOpen] = React.useState(false);
+                      {/* summary sections */}
+                      {/* @ts-ignore */}
+                      <s-section heading="Summary">
+                        {/* @ts-ignore */}
+                        <s-text>{safeStr(sb?.summary_clean || sb?.summary) || "—"}</s-text>
+                      </s-section>
 
-  return (
-    <BlockStack gap="200">
-      <Button variant="tertiary" onClick={() => setOpen((v) => !v)}>
-        {open ? "Hide raw payload" : "Show raw payload"}
-      </Button>
+                      {/* @ts-ignore */}
+                      <s-section heading="Next best action">
+                        {/* @ts-ignore */}
+                        <s-text>{safeStr(sb?.next_best_action || sb?.best_next_action) || "—"}</s-text>
+                      </s-section>
 
-      <Collapsible open={open} id="raw-payload">
-        <Box paddingBlockStart="200">
-          <BlockStack gap="300">
-            <BlockStack gap="100">
-              <Text variant="headingSm" as="h3">
-                End-of-call report
-              </Text>
-              <PreBlock value={sb?.end_of_call_report} />
-            </BlockStack>
+                      {/* @ts-ignore */}
+                      <s-section heading="Follow-up message">
+                        <MonoPre value={sb?.follow_up_message} />
+                      </s-section>
 
-            <BlockStack gap="100">
-              <Text variant="headingSm" as="h3">
-                AI result
-              </Text>
-              <PreBlock value={sb?.ai_result} />
-            </BlockStack>
+                      {/* @ts-ignore */}
+                      <s-section heading="Key quotes">
+                        <MonoPre value={sb?.key_quotes_text || sb?.key_quotes} />
+                      </s-section>
 
-            <BlockStack gap="100">
-              <Text variant="headingSm" as="h3">
-                Structured outputs
-              </Text>
-              <PreBlock value={sb?.structured_outputs} />
-            </BlockStack>
+                      {/* @ts-ignore */}
+                      <s-section heading="Objections">
+                        <MonoPre value={sb?.objections_text || sb?.objections} />
+                      </s-section>
 
-            <BlockStack gap="100">
-              <Text variant="headingSm" as="h3">
-                Payload
-              </Text>
-              <PreBlock value={sb?.payload} />
-            </BlockStack>
+                      {/* @ts-ignore */}
+                      <s-section heading="Issues to fix">
+                        <MonoPre value={sb?.issues_to_fix_text || sb?.issues_to_fix} />
+                      </s-section>
 
-            <BlockStack gap="100">
-              <Text variant="headingSm" as="h3">
-                Checkout raw
-              </Text>
-              <PreBlock value={checkoutRaw} />
-            </BlockStack>
-          </BlockStack>
-        </Box>
-      </Collapsible>
-    </BlockStack>
+                      {/* @ts-ignore */}
+                      <s-section heading="Tags">
+                        <MonoPre value={sb?.tagcsv || (Array.isArray(sb?.tags) ? sb.tags.join(", ") : "")} />
+                      </s-section>
+
+                      {/* misc badges */}
+                      {/* @ts-ignore */}
+                      <s-stack direction="inline" gap="small-100" wrap>
+                        {sb?.latest_status ? <Badge tone="info">{`Latest ${safeStr(sb.latest_status)}`}</Badge> : null}
+                        {sb?.ended_reason ? <Badge tone="info">{`Ended ${safeStr(sb.ended_reason)}`}</Badge> : null}
+                        {sb?.answered != null ? <Badge tone="info">{`Answered ${String(sb.answered)}`}</Badge> : null}
+                        {sb?.voicemail != null ? <Badge tone="info">{`Voicemail ${String(sb.voicemail)}`}</Badge> : null}
+                        {sb?.sentiment ? <Badge tone="info">{`Sentiment ${safeStr(sb.sentiment)}`}</Badge> : null}
+                        {sb?.customer_intent ? <Badge tone="info">{`Intent ${safeStr(sb.customer_intent)}`}</Badge> : null}
+                        {sb?.tone ? <Badge tone="info">{`Tone ${safeStr(sb.tone)}`}</Badge> : null}
+                      </s-stack>
+                    </s-stack>
+                  )}
+                </s-stack>
+              </s-section>
+            </s-grid>
+          </s-stack>
+        </s-section>
+      </s-page>
+
+      {/* MODAL (App Home Polaris web components) */}
+      {/* @ts-ignore */}
+      <s-modal id="details-modal" heading={modalHeading} padding="base" onClose={() => setModalOpenKind(null)}>
+        {modalBody}
+
+        {/* @ts-ignore */}
+        <s-button slot="secondary-actions" variant="secondary" commandFor="details-modal" command="--hide" onClick={() => setModalOpenKind(null)}>
+          Close
+        </s-button>
+      </s-modal>
+    </>
   );
 }
 

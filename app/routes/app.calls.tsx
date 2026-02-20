@@ -144,17 +144,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   await syncAbandonedCheckoutsFromShopify({ admin, shop, limit: 50 });
   await markAbandonedByDelay(shop, settings.delayMinutes);
 
-  await enqueueCallJobs({
-    shop,
-    enabled: Boolean(settings.enabled),
-    minOrderValue: Number(settings.minOrderValue ?? 0),
-    callWindowStart: String(settings.callWindowStart ?? "09:00"),
-    callWindowEnd: String(settings.callWindowEnd ?? "19:00"),
-    delayMinutes: Number(settings.delayMinutes ?? 30),
-    maxAttempts: Number(settings.maxAttempts ?? 2),
-    retryMinutes: Number(settings.retryMinutes ?? 180),
-  });
-
+  
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
   const [queued, calling, completed7d, jobs] = await Promise.all([

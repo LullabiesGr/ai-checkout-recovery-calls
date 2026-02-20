@@ -15,26 +15,34 @@ function parseHHMM(hhmm: string): number | null {
   return hh * 60 + mm;
 }
 
-function nextTimeWithinWindow(now: Date, startHHMM: string, endHHMM: string, leadMinutes: number) {
+function clamp(n: number, min: number, max: number) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return min;
+  return Math.max(min, Math.min(max, x));
+}
+
+/**
+ * If target is inside window -> keep.
+ * Else move to next window start (same day or next day).
+ */
+function adjustToWindow(target: Date, startHHMM: string, endHHMM: string) {
   const start = parseHHMM(startHHMM) ?? 9 * 60;
   const end = parseHHMM(endHHMM) ?? 19 * 60;
-
-  const scheduled = new Date(now.getTime() + leadMinutes * 60 * 1000);
 
   const windowStart = Math.min(start, end);
   const windowEnd = Math.max(start, end);
 
-  const minsScheduled = scheduled.getHours() * 60 + scheduled.getMinutes();
-  if (minsScheduled >= windowStart && minsScheduled <= windowEnd) return scheduled;
+  const tMins = target.getHours() * 60 + target.getMinutes();
+  if (tMins >= windowStart && tMins <= windowEnd) return target;
 
-  const minsNow = now.getHours() * 60 + now.getMinutes();
-
-  const next = new Date(now);
+  const next = new Date(target);
   next.setSeconds(0, 0);
   next.setHours(Math.floor(windowStart / 60), windowStart % 60, 0, 0);
 
-  if (minsNow > windowEnd) next.setDate(next.getDate() + 1);
-  else if (minsNow > windowStart) next.setDate(next.getDate() + 1);
+  // if target time is after today's end OR after start (but outside window), schedule next day window start
+  if (tMins > windowEnd || tMins > windowStart) {
+    next.setDate(next.getDate() + 1);
+  }
 
   return next;
 }
@@ -117,9 +125,7 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
       // IMPORTANT:
       // - Keep status ABANDONED (Shopify already considers it abandoned),
       // - Use abandonedAt = Shopify updatedAt/createdAt so delay can be enforced reliably.
-      const abandonedAt = completedAt
-        ? null
-        : new Date(n?.updatedAt ?? n?.createdAt ?? Date.now());
+      const abandonedAt = completedAt ? null : new Date(n?.updatedAt ?? n?.createdAt ?? Date.now());
 
       await db.checkout.upsert({
         where: { shop_checkoutId: { shop, checkoutId } },
@@ -199,6 +205,14 @@ export async function markAbandonedByDelay(shop: string, delayMinutes: number) {
   });
 }
 
+/**
+ * Enqueue logic (uses minutes from Settings):
+ * - 1st call time is based on abandonedAt + delayMinutes (NOT "now")
+ * - Next call is based on last attempt + retryMinutes
+ * - Stops at maxAttempts
+ *
+ * Also prevents spam by not enqueueing if the computed target time is still in the future.
+ */
 export async function enqueueCallJobs(params: {
   shop: string;
   enabled: boolean;
@@ -206,8 +220,8 @@ export async function enqueueCallJobs(params: {
   callWindowStart: string;
   callWindowEnd: string;
   delayMinutes: number;
-  maxAttempts: number;   // per-checkout cap
-  retryMinutes: number;  // if you want re-queue after failures
+  maxAttempts: number; // per-checkout cap
+  retryMinutes: number; // spacing between attempts
 }) {
   const {
     shop,
@@ -223,18 +237,22 @@ export async function enqueueCallJobs(params: {
   if (!enabled) return { enqueued: 0 };
 
   const now = new Date();
-  const delayCutoff = new Date(now.getTime() - Math.max(0, Number(delayMinutes || 0)) * 60 * 1000);
 
-  // Only ABANDONED checkouts whose abandonedAt is old enough (delay respected)
+  const minValue = Number(minOrderValue ?? 0);
+  const delayM = Math.max(0, Number(delayMinutes ?? 30));
+  const retryM = Math.max(0, Number(retryMinutes ?? 180));
+  const maxA = clamp(Number(maxAttempts ?? 2), 1, 10);
+
+  // Candidates must be ABANDONED with phone and abandonedAt set.
   const candidates = await db.checkout.findMany({
     where: {
       shop,
       status: "ABANDONED",
       phone: { not: null },
-      value: { gte: minOrderValue },
-      abandonedAt: { not: null, lte: delayCutoff },
+      value: { gte: minValue },
+      abandonedAt: { not: null },
     },
-    select: { checkoutId: true, phone: true },
+    select: { checkoutId: true, phone: true, abandonedAt: true },
     take: 200,
   });
 
@@ -255,44 +273,60 @@ export async function enqueueCallJobs(params: {
     });
     if (inFlight) continue;
 
-    // Cap total call jobs per checkout (this is what stops “every 2 minutes forever”)
+    // Cap total call jobs per checkout
     const totalForCheckout = await db.callJob.count({
       where: { shop, checkoutId: c.checkoutId },
     });
-    if (totalForCheckout >= Math.max(1, Number(maxAttempts || 1))) continue;
+    if (totalForCheckout >= maxA) continue;
 
-    // Optional: if last attempt failed recently, enforce retryMinutes
+    // Last job (to compute the next allowed time)
     const last = await db.callJob.findFirst({
       where: { shop, checkoutId: c.checkoutId },
       orderBy: { createdAt: "desc" },
-      select: { status: true, createdAt: true },
+      select: { status: true, createdAt: true, scheduledFor: true },
     });
 
-    if (last && (last.status === "FAILED" || last.status === "COMPLETED")) {
-      const retryMs = Math.max(0, Number(retryMinutes || 0)) * 60 * 1000;
-      if (retryMs > 0) {
-        const nextAllowed = new Date(new Date(last.createdAt).getTime() + retryMs);
-        if (nextAllowed > now) continue;
-      }
+    // Compute target time from SETTINGS minutes (not from cron tick time)
+    let target: Date;
+
+    if (!last) {
+      // 1st attempt: abandonedAt + delayMinutes
+      const base = new Date(c.abandonedAt as any);
+      target = new Date(base.getTime() + delayM * 60 * 1000);
+    } else {
+      // Next attempt only after terminal status
+      if (last.status !== "FAILED" && last.status !== "COMPLETED") continue;
+
+      // Anchor on last scheduledFor (preferred) or createdAt
+      const anchor = new Date((last as any).scheduledFor ?? last.createdAt);
+      target = new Date(anchor.getTime() + retryM * 60 * 1000);
     }
 
-    // Scheduling:
-    // - delay is already enforced by abandonedAt cutoff
-    // - so leadMinutes must be 0 (otherwise you “re-delay” from now every cron tick)
-    const scheduledFor = nextTimeWithinWindow(now, callWindowStart, callWindowEnd, 0);
+    // Not due yet -> do not enqueue now (prevents “spam inserts every cron tick”)
+    if (target > now) continue;
 
-    await db.callJob.create({
-      data: {
-        shop,
-        checkoutId: c.checkoutId,
-        phone,
-        scheduledFor,
-        status: "QUEUED",
-        attempts: 0,
-      },
-    });
+    // Respect call window; if outside, move to next window start
+    const scheduledFor = adjustToWindow(target, callWindowStart, callWindowEnd);
 
-    enqueued += 1;
+    try {
+      await db.callJob.create({
+        data: {
+          shop,
+          checkoutId: c.checkoutId,
+          phone,
+          scheduledFor,
+          status: "QUEUED",
+          attempts: 0,
+        },
+      });
+
+      enqueued += 1;
+    } catch (e: any) {
+      // If you add a DB unique partial index (recommended), ignore unique conflicts here.
+      const msg = String(e?.message ?? "").toLowerCase();
+      if (msg.includes("unique")) continue;
+      throw e;
+    }
   }
 
   return { enqueued };
