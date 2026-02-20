@@ -52,7 +52,18 @@ export type DashboardViewProps = {
   live: LiveRow[];
   reasons: ReasonRow[];
 
-  priorities?: Array<{ label: string; count: number; tone: Tone; href?: string }>;
+  // UPDATED: richer priorities rows (table-friendly)
+  priorities?: Array<{
+    label: string;
+    count: number;
+    tone: Tone;
+    href?: string;
+
+    // Optional enrichment from outcomes table (Supabase vapi_call_summaries)
+    action?: string; // next_best_action / best_next_action
+    details?: string; // e.g. "Buy 70% • NO_ANSWER"
+    badge?: string; // e.g. "AI" / "Calls" / "Revenue"
+  }>;
 
   recentRecoveries?: Array<{
     orderOrCheckout: string;
@@ -351,7 +362,6 @@ export function DashboardView(props: DashboardViewProps) {
   if (recovered) primary.push(recovered);
   if (atRisk && (!recovered || kpiId(atRisk) !== kpiId(recovered))) primary.push(atRisk);
 
-  // fallback: ensure 2 primary cards when possible
   if (primary.length < 2) {
     for (const k of props.kpis) {
       if (primary.length >= 2) break;
@@ -422,7 +432,6 @@ export function DashboardView(props: DashboardViewProps) {
     </s-stack>
   );
 
-  // avoid repeat() because it renders as single-column in your screenshots
   const cols2 = "@container (inline-size < 860px) 1fr, 1fr 1fr";
   const cols3 = "@container (inline-size < 860px) 1fr, 1fr 1fr 1fr";
   const cols4 = "@container (inline-size < 860px) 1fr 1fr, 1fr 1fr 1fr 1fr";
@@ -445,7 +454,7 @@ export function DashboardView(props: DashboardViewProps) {
           </s-stack>
         </s-section>
 
-        {/* Primary value (2 cards, no duplicates below) */}
+        {/* Primary value (2 cards) */}
         <s-query-container>
           <s-grid gap="base" gridTemplateColumns={cols2}>
             {primary.slice(0, 2).map((k) => (
@@ -454,7 +463,7 @@ export function DashboardView(props: DashboardViewProps) {
           </s-grid>
         </s-query-container>
 
-        {/* Secondary KPIs (compact grid) */}
+        {/* Secondary KPIs */}
         {secondary.length ? (
           <s-query-container>
             <s-grid gap="base" gridTemplateColumns={cols4}>
@@ -465,14 +474,9 @@ export function DashboardView(props: DashboardViewProps) {
           </s-query-container>
         ) : null}
 
-        {/* Summary strip (small) */}
+        {/* Summary strip */}
         <s-section>
-          <s-stack
-            direction="inline"
-            align="space-between"
-            gap="base"
-            style={{ flexWrap: "wrap", alignItems: "center" }}
-          >
+          <s-stack direction="inline" align="space-between" gap="base" style={{ flexWrap: "wrap", alignItems: "center" }}>
             <s-text>{summary}</s-text>
             {props.settingsSnapshot && props.settingsSnapshot.length ? (
               <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
@@ -491,7 +495,7 @@ export function DashboardView(props: DashboardViewProps) {
           <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 2fr 1fr">
             {/* Left */}
             <s-stack direction="block" gap="base">
-              {/* Pipeline (compact 3 columns) */}
+              {/* Pipeline */}
               <s-section>
                 <s-stack direction="block" gap="tight">
                   <SectionHeader title="Recovery pipeline" badgeText="Funnel" badgeTone="new" />
@@ -528,7 +532,7 @@ export function DashboardView(props: DashboardViewProps) {
               {/* Priorities + Proof */}
               <s-query-container>
                 <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 1fr 1fr">
-                  {/* Priorities */}
+                  {/* Today’s priorities (TABLE) */}
                   <s-section>
                     <s-stack direction="block" gap="tight">
                       <SectionHeader
@@ -541,26 +545,76 @@ export function DashboardView(props: DashboardViewProps) {
                       {!props.priorities || props.priorities.length === 0 ? (
                         <Empty text="No priorities yet." />
                       ) : (
-                        <s-stack direction="block" gap="tight">
-                          {props.priorities.slice(0, 6).map((p) => (
-                            <s-stack key={p.label} direction="inline" align="space-between" gap="base">
-                              <s-stack direction="inline" gap="tight" style={{ minWidth: 0, alignItems: "center" }}>
-                                <ToneDot tone={(p.tone === "neutral" ? "blue" : (p.tone as any))} />
-                                <s-text style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                                  {p.label}
-                                </s-text>
-                              </s-stack>
-                              <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
-                                <s-badge tone={badgeTone(p.tone)}>{p.count}</s-badge>
-                                {p.href ? (
-                                  <s-button href={p.href} variant="tertiary">
-                                    View
-                                  </s-button>
-                                ) : null}
-                              </s-stack>
-                            </s-stack>
-                          ))}
-                        </s-stack>
+                        <s-section padding="none">
+                          <s-table>
+                            <s-table-header-row>
+                              <s-table-header listSlot="primary">Priority</s-table-header>
+                              <s-table-header listSlot="inline">Count</s-table-header>
+                              <s-table-header listSlot="secondary">Next best action</s-table-header>
+                              <s-table-header listSlot="secondary">Open</s-table-header>
+                            </s-table-header-row>
+
+                            <s-table-body>
+                              {props.priorities.slice(0, 10).map((p) => (
+                                <s-table-row key={p.label}>
+                                  <s-table-cell>
+                                    <s-stack direction="inline" gap="tight" style={{ alignItems: "center" }}>
+                                      <ToneDot tone={(p.tone === "neutral" ? "blue" : (p.tone as any))} />
+                                      <s-stack direction="block" gap="tight" style={{ minWidth: 0 }}>
+                                        <s-text
+                                          style={{
+                                            whiteSpace: "nowrap",
+                                            overflow: "hidden",
+                                            textOverflow: "ellipsis",
+                                            maxWidth: 520,
+                                          }}
+                                          title={p.label}
+                                        >
+                                          {p.label}
+                                        </s-text>
+
+                                        <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap", alignItems: "center" }}>
+                                          {p.badge ? <s-badge tone="new">{p.badge}</s-badge> : null}
+                                          {p.details ? <s-text tone="subdued">{p.details}</s-text> : null}
+                                        </s-stack>
+                                      </s-stack>
+                                    </s-stack>
+                                  </s-table-cell>
+
+                                  <s-table-cell>
+                                    <s-badge tone={badgeTone(p.tone)}>{p.count}</s-badge>
+                                  </s-table-cell>
+
+                                  <s-table-cell>
+                                    <s-text
+                                      tone={p.action ? "base" : "subdued"}
+                                      style={{
+                                        display: "block",
+                                        maxWidth: 520,
+                                        whiteSpace: "nowrap",
+                                        overflow: "hidden",
+                                        textOverflow: "ellipsis",
+                                      }}
+                                      title={p.action || ""}
+                                    >
+                                      {p.action || "—"}
+                                    </s-text>
+                                  </s-table-cell>
+
+                                  <s-table-cell>
+                                    {p.href ? (
+                                      <s-button href={p.href} variant="secondary">
+                                        View
+                                      </s-button>
+                                    ) : (
+                                      <s-text tone="subdued">—</s-text>
+                                    )}
+                                  </s-table-cell>
+                                </s-table-row>
+                              ))}
+                            </s-table-body>
+                          </s-table>
+                        </s-section>
                       )}
                     </s-stack>
                   </s-section>
@@ -668,9 +722,9 @@ export function DashboardView(props: DashboardViewProps) {
               </s-query-container>
             </s-stack>
 
-            {/* Right: Live + Settings */}
+            {/* Right */}
             <s-stack direction="block" gap="base">
-              {/* Live activity as table (readable) */}
+              {/* Live activity */}
               <s-section>
                 <s-stack direction="block" gap="tight">
                   <SectionHeader
