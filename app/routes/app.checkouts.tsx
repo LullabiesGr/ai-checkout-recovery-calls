@@ -16,6 +16,32 @@ import {
   type SupabaseCallSummary,
 } from "../lib/callInsights.shared";
 
+declare global {
+  namespace JSX {
+    interface IntrinsicElements {
+      "s-page": any;
+      "s-section": any;
+      "s-box": any;
+      "s-text": any;
+      "s-badge": any;
+      "s-divider": any;
+      "s-grid": any;
+      "s-stack": any;
+      "s-table": any;
+      "s-table-header-row": any;
+      "s-table-header": any;
+      "s-table-body": any;
+      "s-table-row": any;
+      "s-table-cell": any;
+      "s-button": any;
+      "s-thumbnail": any;
+      "s-spinner": any;
+      "s-modal": any;
+      "s-link": any;
+    }
+  }
+}
+
 /* ---------------- URL helpers (keep embedded params) ---------------- */
 function safeSearch(): string {
   if (typeof window === "undefined") return "";
@@ -75,6 +101,7 @@ type CartItemLite = {
 type Row = {
   checkoutId: string;
   status: string;
+  createdAt: string;
   updatedAt: string;
   abandonedAt: string | null;
   customerName: string | null;
@@ -83,7 +110,7 @@ type Row = {
   value: number;
   currency: string;
 
-  itemsJson: any; // keep raw so we can render thumbnails in UI
+  itemsJson: any;
   cartPreview: string | null;
   thumbUrl: string | null;
   itemsCount: number;
@@ -94,6 +121,19 @@ type Row = {
   buyProbabilityPct: number | null;
   recordingUrl: string | null;
   logUrl: string | null;
+
+  // from outcomes table (use them everywhere)
+  nextBestAction: string | null;
+  followUpMessage: string | null;
+  summaryClean: string | null;
+
+  sentiment: string | null;
+  tone: string | null;
+  customerIntent: string | null;
+  latestStatus: string | null;
+  endedReason: string | null;
+  answered: boolean | null;
+  voicemail: boolean | null;
 
   latestJobId: string | null;
   latestProviderCallId: string | null;
@@ -131,8 +171,6 @@ function toItemsArray(itemsJson: any): CartItemLite[] {
 
   if (Array.isArray(parsed)) return parsed as CartItemLite[];
 
-  // common shapes:
-  // { items: [...] } or { lineItems: [...] } or { cart: { items: [...] } }
   const maybe =
     (Array.isArray(parsed.items) && parsed.items) ||
     (Array.isArray(parsed.lineItems) && parsed.lineItems) ||
@@ -152,6 +190,25 @@ function getThumbAndCount(itemsJson: any): { thumbUrl: string | null; count: num
     if (url) return { thumbUrl: url, count };
   }
   return { thumbUrl: null, count };
+}
+
+/* ---------------- Formatting ---------------- */
+function fmtMoney(amount: number, currency: string) {
+  const v = Number.isFinite(amount) ? amount : 0;
+  const cur = (currency || "USD").toUpperCase();
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: cur,
+      maximumFractionDigits: 2,
+    }).format(v);
+  } catch {
+    return `${v.toFixed(2)} ${cur}`;
+  }
+}
+function pct(part: number, whole: number) {
+  if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round((part / whole) * 100)));
 }
 
 /* ---------------- Loader ---------------- */
@@ -220,7 +277,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   function cleanIdList(values: string[]) {
     return uniq(values).map((x) => x.replace(/[,"'()]/g, ""));
   }
-
   function pickNewer(a: any, b: any) {
     const ta = Date.parse(String(a?.last_received_at ?? a?.received_at ?? ""));
     const tb = Date.parse(String(b?.last_received_at ?? b?.received_at ?? ""));
@@ -374,6 +430,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return {
       checkoutId,
       status: String(c.status),
+      createdAt: new Date(c.createdAt).toISOString(),
       updatedAt: new Date(c.updatedAt).toISOString(),
       abandonedAt: c.abandonedAt ? new Date(c.abandonedAt).toISOString() : null,
       customerName: c.customerName ?? null,
@@ -394,6 +451,22 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       recordingUrl,
       logUrl: safeStr((sb as any)?.log_url).trim() ? String((sb as any).log_url) : null,
 
+      nextBestAction: safeStr((sb as any)?.next_best_action || (sb as any)?.best_next_action).trim()
+        ? String((sb as any)?.next_best_action || (sb as any)?.best_next_action)
+        : null,
+      followUpMessage: safeStr((sb as any)?.follow_up_message).trim() ? String((sb as any)?.follow_up_message) : null,
+      summaryClean: safeStr((sb as any)?.summary_clean || (sb as any)?.summary).trim()
+        ? String((sb as any)?.summary_clean || (sb as any)?.summary)
+        : null,
+
+      sentiment: safeStr((sb as any)?.sentiment).trim() ? String((sb as any)?.sentiment) : null,
+      tone: safeStr((sb as any)?.tone).trim() ? String((sb as any)?.tone) : null,
+      customerIntent: safeStr((sb as any)?.customer_intent).trim() ? String((sb as any)?.customer_intent) : null,
+      latestStatus: safeStr((sb as any)?.latest_status).trim() ? String((sb as any)?.latest_status) : null,
+      endedReason: safeStr((sb as any)?.ended_reason).trim() ? String((sb as any)?.ended_reason) : null,
+      answered: typeof (sb as any)?.answered === "boolean" ? Boolean((sb as any)?.answered) : null,
+      voicemail: typeof (sb as any)?.voicemail === "boolean" ? Boolean((sb as any)?.voicemail) : null,
+
       latestJobId: j?.id ? String(j.id) : null,
       latestProviderCallId: j?.providerCallId ? String(j.providerCallId) : null,
     };
@@ -402,163 +475,114 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return { shop, rows } satisfies LoaderData;
 };
 
-/* ---------------- Money helpers ---------------- */
+/* ---------------- UI helpers ---------------- */
 function sumMoney(rows: Row[], pred: (r: Row) => boolean) {
   let n = 0;
   for (const r of rows) if (pred(r)) n += Number(r.value || 0);
   return n;
 }
 
-/* ---------------- UI helpers (minimal) ---------------- */
+function isRecovered(r: Row) {
+  const s = safeStr(r.status).toUpperCase();
+  if (s === "RECOVERED" || s === "CONVERTED") return true;
+  const o = safeStr(r.callOutcome).toLowerCase();
+  return o.includes("recovered") || o.includes("converted");
+}
+function isAtRisk(r: Row) {
+  return safeStr(r.status).toUpperCase() === "ABANDONED";
+}
+
+function urgencyScore(r: Row) {
+  // higher score = show higher
+  let score = 0;
+
+  const status = safeStr(r.status).toUpperCase();
+  if (status === "ABANDONED") score += 80;
+  else if (status === "OPEN") score += 35;
+
+  const callStatus = safeStr(r.callStatus).toUpperCase();
+  if (callStatus === "FAILED") score += 35;
+  if (!callStatus) score += 20;
+  if (callStatus === "QUEUED") score += 10;
+  if (callStatus === "CALLING") score += 6;
+
+  const outcome = safeStr(r.callOutcome).toLowerCase();
+  if (outcome.includes("needs_follow") || outcome.includes("follow")) score += 25;
+  if (outcome.includes("voicemail") || outcome.includes("no_answer")) score += 18;
+  if (outcome.includes("not_recovered") || outcome.includes("not interested")) score += 22;
+
+  const buy = typeof r.buyProbabilityPct === "number" ? r.buyProbabilityPct : 0;
+  score += Math.round(buy * 0.35);
+
+  const val = Number(r.value || 0);
+  score += Math.min(30, Math.round(val / 100));
+
+  return score;
+}
+
 function Badge({ tone, children, label }: { tone: BadgeTone; children: React.ReactNode; label?: string }) {
-  return (
-    // @ts-ignore - custom element
-    <s-badge tone={tone} accessibilityLabel={label || ""}>
-      {children}
-    </s-badge>
-  );
+  // @ts-ignore
+  return <s-badge tone={tone} accessibilityLabel={label || ""}>{children}</s-badge>;
 }
 
-function MonoPre({ value }: { value: any }) {
-  const text =
-    value == null
-      ? ""
-      : typeof value === "string"
-      ? value
-      : (() => {
-          try {
-            return JSON.stringify(value, null, 2);
-          } catch {
-            return String(value);
-          }
-        })();
-
-  return (
-    // @ts-ignore - custom element
-    <s-box padding="base" background="subdued" border="base" borderRadius="base">
-      <pre
-        style={{
-          margin: 0,
-          fontFamily:
-            'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-          fontSize: 12,
-          fontWeight: 650,
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-        }}
-      >
-        {text || "—"}
-      </pre>
-    </s-box>
-  );
+function clip(text: string) {
+  try {
+    void navigator.clipboard.writeText(text);
+  } catch {}
 }
 
-function Field({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    // @ts-ignore - custom element
-    <s-stack gap="small-100">
-      {/* @ts-ignore */}
-      <s-text tone="subdued" variant="bodySm">
-        {label}
-      </s-text>
-      {/* @ts-ignore */}
-      <s-text variant="bodyMd" fontWeight="semibold">
-        {value}
-      </s-text>
-    </s-stack>
-  );
+function tiny(v: any) {
+  const s = safeStr(v).trim();
+  return s ? s : "—";
 }
-
-/* ---------------- Page ---------------- */
-// REPLACE ONLY THE UI PART: export default function Checkouts() { ... }  (keep your loader/helpers as-is)
 
 export default function Checkouts() {
   const { shop, rows } = useLoaderData<typeof loader>();
 
-  /* ---------------- Filters ---------------- */
-  const [query, setQuery] = React.useState("");
-  const [statusFilter, setStatusFilter] = React.useState<"ALL" | "ABANDONED" | "OPEN" | "RECOVERED">("ALL");
-  const [callFilter, setCallFilter] = React.useState<"ALL" | "NO_CALL" | "QUEUED" | "CALLING" | "COMPLETED" | "FAILED">(
-    "ALL",
+  const recoveredRows = React.useMemo(() => rows.filter(isRecovered), [rows]);
+  const atRiskRows = React.useMemo(() => rows.filter(isAtRisk), [rows]);
+
+  const recoveredValue = React.useMemo(
+    () => sumMoney(rows, (r) => isRecovered(r)),
+    [rows],
   );
-  const [outcomeFilter, setOutcomeFilter] = React.useState<"ALL" | "NO_ANSWER" | "VOICEMAIL" | "NEEDS_FOLLOW" | "NOT_RECOVERED" | "RECOVERED">(
-    "ALL",
+  const atRiskValue = React.useMemo(
+    () => sumMoney(rows, (r) => isAtRisk(r)),
+    [rows],
   );
-  const [buyMin, setBuyMin] = React.useState<"ALL" | "30" | "50" | "70">("ALL");
 
-  const q = query.trim().toLowerCase();
+  const winRate = React.useMemo(() => pct(recoveredRows.length, Math.max(1, rows.length)), [recoveredRows.length, rows.length]);
 
-  const filtered = React.useMemo(() => {
-    const norm = (v: any) => safeStr(v).toLowerCase();
+  const latest = rows[0] ?? null;
 
-    const matchOutcome = (raw: string | null) => {
-      const s = norm(raw);
-      if (outcomeFilter === "ALL") return true;
-      if (outcomeFilter === "NO_ANSWER") return s.includes("no_answer");
-      if (outcomeFilter === "VOICEMAIL") return s.includes("voicemail");
-      if (outcomeFilter === "NEEDS_FOLLOW") return s.includes("follow");
-      if (outcomeFilter === "NOT_RECOVERED") return s.includes("not_recovered") || s.includes("not interested");
-      if (outcomeFilter === "RECOVERED") return s.includes("recovered") || s.includes("converted");
-      return true;
-    };
+  // prioritize active work list (exclude recovered)
+  const workRows = React.useMemo(() => {
+    return rows
+      .filter((r) => !isRecovered(r))
+      .slice()
+      .sort((a, b) => urgencyScore(b) - urgencyScore(a))
+      .slice(0, 80);
+  }, [rows]);
 
-    const matchCheckoutStatus = (raw: string) => {
-      const s = safeStr(raw).toUpperCase();
-      if (statusFilter === "ALL") return true;
-      if (statusFilter === "RECOVERED") return s === "RECOVERED" || s === "CONVERTED";
-      return s === statusFilter;
-    };
-
-    const matchCallStatus = (raw: string | null) => {
-      const s = safeStr(raw).toUpperCase();
-      if (callFilter === "ALL") return true;
-      if (callFilter === "NO_CALL") return !s;
-      return s === callFilter;
-    };
-
-    const matchBuy = (buyProbabilityPct: number | null) => {
-      if (buyMin === "ALL") return true;
-      const min = Number(buyMin);
-      const v = typeof buyProbabilityPct === "number" ? buyProbabilityPct : -1;
-      return v >= min;
-    };
-
-    return rows.filter((c) => {
-      if (!matchCheckoutStatus(c.status)) return false;
-      if (!matchCallStatus(c.callStatus)) return false;
-      if (!matchOutcome(c.callOutcome)) return false;
-      if (!matchBuy(c.buyProbabilityPct)) return false;
-
-      if (!q) return true;
-      return (
-        norm(c.checkoutId).includes(q) ||
-        norm(c.customerName).includes(q) ||
-        norm(c.phone).includes(q) ||
-        norm(c.email).includes(q) ||
-        norm(c.cartPreview).includes(q) ||
-        norm(c.status).includes(q) ||
-        norm(c.callStatus).includes(q) ||
-        norm(c.callOutcome).includes(q) ||
-        norm(c.aiStatus).includes(q)
-      );
-    });
-  }, [rows, q, statusFilter, callFilter, outcomeFilter, buyMin]);
-
-  const [selectedId, setSelectedId] = React.useState<string | null>(filtered?.[0]?.checkoutId ?? null);
+  const [selectedId, setSelectedId] = React.useState<string | null>(() => {
+    // default: most urgent non-recovered; fallback latest
+    return workRows[0]?.checkoutId ?? latest?.checkoutId ?? null;
+  });
 
   React.useEffect(() => {
-    if (!selectedId && filtered?.[0]?.checkoutId) setSelectedId(filtered[0].checkoutId);
-  }, [selectedId, filtered]);
+    if (!selectedId) setSelectedId(workRows[0]?.checkoutId ?? latest?.checkoutId ?? null);
+  }, [selectedId, workRows, latest]);
 
+  // keep selection valid
   React.useEffect(() => {
-    if (selectedId && !filtered.some((r) => r.checkoutId === selectedId)) {
-      setSelectedId(filtered?.[0]?.checkoutId ?? null);
-    }
-  }, [selectedId, filtered]);
+    if (!selectedId) return;
+    const exists = rows.some((r) => r.checkoutId === selectedId);
+    if (!exists) setSelectedId(workRows[0]?.checkoutId ?? latest?.checkoutId ?? null);
+  }, [selectedId, rows, workRows, latest]);
 
-  const selected = React.useMemo(() => filtered.find((r) => r.checkoutId === selectedId) ?? null, [filtered, selectedId]);
+  const selected = React.useMemo(() => rows.find((r) => r.checkoutId === selectedId) ?? null, [rows, selectedId]);
 
-  /* ---------------- Details fetch (right panel) ---------------- */
+  // right-panel details fetch (full sb fields)
   const detailsFetcher = useFetcher<any>();
   React.useEffect(() => {
     if (!selected?.checkoutId) return;
@@ -574,35 +598,11 @@ export default function Checkouts() {
     return toItemsArray(itemsJson);
   }, [details?.checkout?.itemsJson, selected?.itemsJson]);
 
-  /* ---------------- Stats ---------------- */
-  const stats = React.useMemo(() => {
-    const total = filtered.length;
-    const abandonedCount = filtered.filter((r) => safeStr(r.status).toUpperCase() === "ABANDONED").length;
-    const openCount = filtered.filter((r) => safeStr(r.status).toUpperCase() === "OPEN").length;
-    const recoveredCount = filtered.filter((r) => {
-      const s = safeStr(r.status).toUpperCase();
-      return s === "RECOVERED" || s === "CONVERTED";
-    }).length;
+  const [modalKind, setModalKind] = React.useState<null | "transcript" | "raw" | "evidence">(null);
 
-    const atRisk = sumMoney(filtered, (r) => safeStr(r.status).toUpperCase() === "ABANDONED");
-    const recovered = sumMoney(filtered, (r) => {
-      const s = safeStr(r.status).toUpperCase();
-      return s === "RECOVERED" || s === "CONVERTED";
-    });
+  const compactCell: React.CSSProperties = { paddingTop: 6, paddingBottom: 6, verticalAlign: "top" };
 
-    return { total, abandonedCount, openCount, recoveredCount, atRisk, recovered };
-  }, [filtered]);
-
-  /* ---------------- Popovers (no “open down the page”) ---------------- */
-  const [openPopoverId, setOpenPopoverId] = React.useState<string | null>(null);
-  const [openPopoverKind, setOpenPopoverKind] = React.useState<"ai" | "raw" | "transcript">("ai");
-  const isPopoverOpen = (id: string, kind: typeof openPopoverKind) => openPopoverId === `${kind}:${id}`;
-  const openPopover = (id: string, kind: typeof openPopoverKind) => setOpenPopoverId(`${kind}:${id}`);
-  const closePopover = () => setOpenPopoverId(null);
-
-  /* ---------------- Compact layout styles ---------------- */
-  const compactCellStyle: React.CSSProperties = { paddingTop: 6, paddingBottom: 6, verticalAlign: "top" };
-  const monoSmall: React.CSSProperties = {
+  const mono: React.CSSProperties = {
     margin: 0,
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
     fontSize: 12,
@@ -611,121 +611,216 @@ export default function Checkouts() {
     wordBreak: "break-word",
   };
 
+  const currency = (rows.find((r) => safeStr(r.currency))?.currency ?? "USD").toUpperCase();
+
+  const recoveredRecent = React.useMemo(() => {
+    return recoveredRows
+      .slice()
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+      .slice(0, 6);
+  }, [recoveredRows]);
+
   return (
     <>
       {/* @ts-ignore */}
       <s-page heading="Checkouts" inlineSize="large">
+        {/* TOP VALUE STRIP */}
         {/* @ts-ignore */}
         <s-section>
           {/* @ts-ignore */}
-          <s-stack gap="base">
-            {/* VALUE + STATS */}
+          <s-grid
+            gap="base"
+            gridTemplateColumns="@container (inline-size < 960px) 1fr, 1.2fr 0.8fr"
+          >
+            {/* VALUE BOX */}
             {/* @ts-ignore */}
-            <s-box padding="base" border="base" borderRadius="base" background="subdued">
+            <s-box border="base" borderRadius="base" padding="base" background="subdued">
               {/* @ts-ignore */}
-              <s-stack gap="small-100">
+              <s-stack gap="tight">
                 {/* @ts-ignore */}
-                <s-text variant="headingMd">Actionable checkouts: AI outcome + next best action, side-by-side.</s-text>
+                <s-text variant="headingMd">Recovered revenue + AI call outcomes.</s-text>
                 {/* @ts-ignore */}
-                <s-stack direction="inline" gap="small-100" wrap>
+                <s-text tone="subdued">
+                  Win rate {winRate}% • {rows.length} checkouts tracked • Latest update {latest ? formatWhen(latest.updatedAt) : "—"}
+                </s-text>
+
+                {/* @ts-ignore */}
+                <s-grid gap="base" gridTemplateColumns="@container (inline-size < 860px) 1fr, 1fr 1fr 1fr">
                   {/* @ts-ignore */}
-                  <s-badge tone="info">{stats.total} rows</s-badge>
+                  <s-box border="base" borderRadius="base" padding="base">
+                    {/* @ts-ignore */}
+                    <s-stack gap="tight">
+                      {/* @ts-ignore */}
+                      <s-text tone="subdued" variant="bodySm">Recovered</s-text>
+                      {/* @ts-ignore */}
+                      <s-text variant="headingLg">{fmtMoney(recoveredValue, currency)}</s-text>
+                      {/* @ts-ignore */}
+                      <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
+                        {/* @ts-ignore */}
+                        <s-badge tone="success">{recoveredRows.length} wins</s-badge>
+                        {/* @ts-ignore */}
+                        <s-badge tone="info">{winRate}% win</s-badge>
+                      </s-stack>
+                    </s-stack>
+                  </s-box>
+
                   {/* @ts-ignore */}
-                  <s-badge tone="critical">Abandoned {stats.abandonedCount}</s-badge>
+                  <s-box border="base" borderRadius="base" padding="base">
+                    {/* @ts-ignore */}
+                    <s-stack gap="tight">
+                      {/* @ts-ignore */}
+                      <s-text tone="subdued" variant="bodySm">At-risk</s-text>
+                      {/* @ts-ignore */}
+                      <s-text variant="headingLg">{fmtMoney(atRiskValue, currency)}</s-text>
+                      {/* @ts-ignore */}
+                      <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
+                        {/* @ts-ignore */}
+                        <s-badge tone="critical">{atRiskRows.length} abandoned</s-badge>
+                        {/* @ts-ignore */}
+                        <s-badge tone="warning">Needs action</s-badge>
+                      </s-stack>
+                    </s-stack>
+                  </s-box>
+
                   {/* @ts-ignore */}
-                  <s-badge tone="warning">Open {stats.openCount}</s-badge>
-                  {/* @ts-ignore */}
-                  <s-badge tone="success">Recovered {stats.recoveredCount}</s-badge>
-                  {/* @ts-ignore */}
-                  <s-badge tone="warning">At-risk {stats.atRisk.toFixed(2)}</s-badge>
-                  {/* @ts-ignore */}
-                  <s-badge tone="success">Recovered {stats.recovered.toFixed(2)}</s-badge>
-                </s-stack>
+                  <s-box border="base" borderRadius="base" padding="base">
+                    {/* @ts-ignore */}
+                    <s-stack gap="tight">
+                      {/* @ts-ignore */}
+                      <s-text tone="subdued" variant="bodySm">Most recent</s-text>
+                      {/* @ts-ignore */}
+                      <s-text variant="headingMd">
+                        {latest ? fmtMoney(Number(latest.value || 0), latest.currency) : "—"}
+                      </s-text>
+                      {/* @ts-ignore */}
+                      <s-text tone="subdued" variant="bodySm">
+                        {latest ? `${safeStr(latest.customerName) || "—"} • ${formatWhen(latest.updatedAt)}` : "—"}
+                      </s-text>
+                    </s-stack>
+                  </s-box>
+                </s-grid>
               </s-stack>
             </s-box>
 
-            {/* FILTER BAR (no horizontal scroll, wraps) */}
+            {/* RECOVERED WINS – SPECIAL BOX */}
             {/* @ts-ignore */}
-            <s-box padding="base" border="base" borderRadius="base">
-              {/* @ts-ignore */}
-              <s-grid columns="minmax(240px, 1.4fr) repeat(4, minmax(160px, 1fr))" gap="base" alignItems="end">
-                {/* @ts-ignore */}
-                <s-text-field
-                  label="Search"
-                  value={query}
-                  placeholder="Customer, phone, email, cart, AI…"
-                  clearButton
-                  onInput={(e: any) => setQuery(String(e.currentTarget?.value ?? ""))}
-                  onClearButtonClick={() => setQuery("")}
-                />
-
-                {/* @ts-ignore */}
-                <s-select
-                  label="Checkout status"
-                  value={statusFilter}
-                  onChange={(e: any) => setStatusFilter(String(e.currentTarget?.value ?? "ALL") as any)}
-                >
-                  <option value="ALL">All</option>
-                  <option value="ABANDONED">Abandoned</option>
-                  <option value="OPEN">Open</option>
-                  <option value="RECOVERED">Recovered/Converted</option>
-                </s-select>
-
-                {/* @ts-ignore */}
-                <s-select
-                  label="Call status"
-                  value={callFilter}
-                  onChange={(e: any) => setCallFilter(String(e.currentTarget?.value ?? "ALL") as any)}
-                >
-                  <option value="ALL">All</option>
-                  <option value="NO_CALL">No call</option>
-                  <option value="QUEUED">Queued</option>
-                  <option value="CALLING">Calling</option>
-                  <option value="COMPLETED">Completed</option>
-                  <option value="FAILED">Failed</option>
-                </s-select>
-
-                {/* @ts-ignore */}
-                <s-select
-                  label="Outcome"
-                  value={outcomeFilter}
-                  onChange={(e: any) => setOutcomeFilter(String(e.currentTarget?.value ?? "ALL") as any)}
-                >
-                  <option value="ALL">All</option>
-                  <option value="NO_ANSWER">No answer</option>
-                  <option value="VOICEMAIL">Voicemail</option>
-                  <option value="NEEDS_FOLLOW">Needs follow-up</option>
-                  <option value="NOT_RECOVERED">Not recovered</option>
-                  <option value="RECOVERED">Recovered</option>
-                </s-select>
-
-                {/* @ts-ignore */}
-                <s-select label="Buy ≥" value={buyMin} onChange={(e: any) => setBuyMin(String(e.currentTarget?.value ?? "ALL") as any)}>
-                  <option value="ALL">All</option>
-                  <option value="30">30%</option>
-                  <option value="50">50%</option>
-                  <option value="70">70%</option>
-                </s-select>
-              </s-grid>
-
-              {/* optional: keep datepicker slot ready without breaking layout */}
-              {/* @ts-ignore */}
-              <s-text tone="subdued" variant="bodySm">
-                Tip: add Datepicker later by filtering on updatedAt/abandonedAt (client-side) without touching loader.
-              </s-text>
-            </s-box>
-
-            {/* MAIN GRID (always side-by-side; wraps to 1 column on small via CSS) */}
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "minmax(520px, 1fr) minmax(520px, 1fr)",
-                gap: 16,
-              }}
+            <s-box
+              border="base"
+              borderRadius="base"
+              padding="base"
+              style={{ background: "rgba(0,128,96,0.08)" }}
             >
-              {/* LEFT: COMPACT TABLE LIST */}
               {/* @ts-ignore */}
-              <s-section heading="Latest checkouts">
+              <s-stack gap="tight">
+                {/* @ts-ignore */}
+                <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center" }}>
+                  {/* @ts-ignore */}
+                  <s-text variant="headingMd">Recovered wins</s-text>
+                  {/* @ts-ignore */}
+                  <s-badge tone="success">{recoveredRows.length}</s-badge>
+                </s-stack>
+
+                {/* @ts-ignore */}
+                <s-text tone="subdued" variant="bodySm">
+                  Click a win to open full outcome details on the right.
+                </s-text>
+
+                {/* @ts-ignore */}
+                <s-box border="base" borderRadius="base" style={{ overflow: "hidden", background: "rgba(255,255,255,0.7)" }}>
+                  {/* @ts-ignore */}
+                  <s-table style={{ tableLayout: "fixed", width: "100%" }}>
+                    {/* @ts-ignore */}
+                    <s-table-header-row>
+                      {/* @ts-ignore */}
+                      <s-table-header>Customer</s-table-header>
+                      {/* @ts-ignore */}
+                      <s-table-header format="numeric" style={{ width: 120 }}>Amount</s-table-header>
+                      {/* @ts-ignore */}
+                      <s-table-header style={{ width: 120 }}>When</s-table-header>
+                    </s-table-header-row>
+
+                    {/* @ts-ignore */}
+                    <s-table-body>
+                      {recoveredRecent.length === 0 ? (
+                        // @ts-ignore
+                        <s-table-row>
+                          {/* @ts-ignore */}
+                          <s-table-cell colSpan={3}>
+                            {/* @ts-ignore */}
+                            <s-text tone="subdued">No recovered checkouts yet.</s-text>
+                          </s-table-cell>
+                        </s-table-row>
+                      ) : (
+                        recoveredRecent.map((r) => {
+                          const id = r.checkoutId;
+                          return (
+                            // @ts-ignore
+                            <s-table-row key={id} clickDelegate={`win-${id}`}>
+                              {/* @ts-ignore */}
+                              <s-table-cell style={compactCell}>
+                                {/* @ts-ignore */}
+                                <s-link
+                                  id={`win-${id}`}
+                                  href="#"
+                                  onClick={(e: any) => {
+                                    e.preventDefault();
+                                    setSelectedId(id);
+                                  }}
+                                >
+                                  {/* @ts-ignore */}
+                                  <s-text fontWeight="semibold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                    {safeStr(r.customerName) || `Checkout #${id}`}
+                                  </s-text>
+                                </s-link>
+                                {/* @ts-ignore */}
+                                <s-text tone="subdued" variant="bodySm">
+                                  {safeStr(r.callOutcome) ? safeStr(r.callOutcome).toUpperCase() : "RECOVERED"}
+                                </s-text>
+                              </s-table-cell>
+                              {/* @ts-ignore */}
+                              <s-table-cell style={compactCell}>{fmtMoney(Number(r.value || 0), r.currency)}</s-table-cell>
+                              {/* @ts-ignore */}
+                              <s-table-cell style={compactCell}>{formatWhen(r.updatedAt)}</s-table-cell>
+                            </s-table-row>
+                          );
+                        })
+                      )}
+                    </s-table-body>
+                  </s-table>
+                </s-box>
+              </s-stack>
+            </s-box>
+          </s-grid>
+        </s-section>
+
+        {/* MAIN: WORK LIST + DETAILS */}
+        {/* @ts-ignore */}
+        <s-section>
+          {/* @ts-ignore */}
+          <s-grid
+            gap="base"
+            gridTemplateColumns="@container (inline-size < 1100px) 1fr, 1.15fr 0.85fr"
+          >
+            {/* LEFT: ACTION QUEUE (AT-RISK + OPEN + FAILED) */}
+            {/* @ts-ignore */}
+            <s-section>
+              {/* @ts-ignore */}
+              <s-stack gap="tight">
+                {/* @ts-ignore */}
+                <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center", flexWrap: "wrap" }}>
+                  {/* @ts-ignore */}
+                  <s-text variant="headingMd">Action queue</s-text>
+                  {/* @ts-ignore */}
+                  <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
+                    {/* @ts-ignore */}
+                    <s-badge tone="critical">{atRiskRows.length} abandoned</s-badge>
+                    {/* @ts-ignore */}
+                    <s-badge tone="info">{workRows.length} to review</s-badge>
+                    {/* @ts-ignore */}
+                    <s-badge tone="new">Sorted by urgency</s-badge>
+                  </s-stack>
+                </s-stack>
+
                 {/* @ts-ignore */}
                 <s-box border="base" borderRadius="base" style={{ overflow: "hidden" }}>
                   {/* @ts-ignore */}
@@ -733,77 +828,76 @@ export default function Checkouts() {
                     {/* @ts-ignore */}
                     <s-table-header-row>
                       {/* @ts-ignore */}
-                      <s-table-header style={{ width: 60 }}>Item</s-table-header>
+                      <s-table-header style={{ width: 60 }}>Img</s-table-header>
                       {/* @ts-ignore */}
                       <s-table-header>Customer / Cart</s-table-header>
                       {/* @ts-ignore */}
-                      <s-table-header style={{ width: 110 }} format="numeric">
-                        Value
-                      </s-table-header>
+                      <s-table-header format="numeric" style={{ width: 120 }}>Value</s-table-header>
                       {/* @ts-ignore */}
-                      <s-table-header style={{ width: 180 }}>Status</s-table-header>
+                      <s-table-header style={{ width: 190 }}>Signals</s-table-header>
                       {/* @ts-ignore */}
-                      <s-table-header style={{ width: 150 }}>AI</s-table-header>
+                      <s-table-header style={{ width: 260 }}>Next step</s-table-header>
                     </s-table-header-row>
 
                     {/* @ts-ignore */}
                     <s-table-body>
-                      {filtered.length === 0 ? (
+                      {workRows.length === 0 ? (
                         // @ts-ignore
                         <s-table-row>
                           {/* @ts-ignore */}
                           <s-table-cell colSpan={5}>
                             {/* @ts-ignore */}
-                            <s-text tone="subdued">No results.</s-text>
+                            <s-text tone="subdued">Nothing to work right now.</s-text>
                           </s-table-cell>
                         </s-table-row>
                       ) : (
-                        filtered.map((c) => {
-                          const isSel = c.checkoutId === selectedId;
+                        workRows.map((r) => {
+                          const isSel = r.checkoutId === selectedId;
+                          const id = r.checkoutId;
 
-                          const checkoutTone = toneForCheckoutStatus(c.status);
-                          const callTone = c.callStatus ? toneForJobStatus(c.callStatus) : "neutral";
-                          const outcomeTone = toneForOutcome(c.callOutcome);
+                          const checkoutTone = toneForCheckoutStatus(r.status);
+                          const callTone = r.callStatus ? toneForJobStatus(r.callStatus) : "neutral";
+                          const outcomeTone = toneForOutcome(r.callOutcome);
 
-                          const customer = safeStr(c.customerName) || "—";
-                          const phone = safeStr(c.phone);
-                          const cartLine = safeStr(c.cartPreview);
-                          const updatedText = formatWhen(c.updatedAt);
+                          const customer = safeStr(r.customerName) || "—";
+                          const phone = safeStr(r.phone);
+                          const cartLine = safeStr(r.cartPreview);
 
-                          const rowId = c.checkoutId;
+                          const nba = safeStr(r.nextBestAction);
+                          const nbaText = nba ? nba : "—";
 
                           return (
                             // @ts-ignore
                             <s-table-row
-                              key={rowId}
-                              clickDelegate={`open-${rowId}`}
+                              key={id}
+                              clickDelegate={`open-${id}`}
                               style={isSel ? { background: "var(--p-color-bg-surface-secondary)" } : undefined}
                             >
-                              {/* THUMB */}
                               {/* @ts-ignore */}
-                              <s-table-cell style={compactCellStyle}>
+                              <s-table-cell style={compactCell}>
                                 <div style={{ width: 44, height: 44 }}>
                                   {/* @ts-ignore */}
                                   <s-thumbnail
-                                    src={c.thumbUrl || undefined}
-                                    alt={c.thumbUrl ? "Cart item preview" : "No image"}
+                                    src={r.thumbUrl || undefined}
+                                    alt={r.thumbUrl ? "Item" : "No image"}
                                     size="small-200"
                                   />
                                 </div>
                               </s-table-cell>
 
-                              {/* CUSTOMER / CART */}
                               {/* @ts-ignore */}
-                              <s-table-cell style={compactCellStyle}>
+                              <s-table-cell style={compactCell}>
                                 {/* @ts-ignore */}
-                                <s-stack gap="small-100">
+                                <s-stack gap="tight">
                                   {/* @ts-ignore */}
-                                  <s-stack direction="inline" gap="small-100" wrap alignItems="center">
+                                  <s-stack direction="inline" gap="tight" style={{ alignItems: "center", flexWrap: "wrap" }}>
                                     {/* @ts-ignore */}
-                                    <s-link id={`open-${rowId}`} href="#"
+                                    <s-link
+                                      id={`open-${id}`}
+                                      href="#"
                                       onClick={(e: any) => {
                                         e.preventDefault();
-                                        setSelectedId(rowId);
+                                        setSelectedId(id);
                                       }}
                                     >
                                       {/* @ts-ignore */}
@@ -811,108 +905,95 @@ export default function Checkouts() {
                                     </s-link>
                                     {phone ? (
                                       // @ts-ignore
-                                      <s-text tone="subdued" variant="bodySm">
-                                        {phone}
-                                      </s-text>
+                                      <s-text tone="subdued" variant="bodySm">{phone}</s-text>
                                     ) : null}
                                     {/* @ts-ignore */}
-                                    <s-text tone="subdued" variant="bodySm">
-                                      #{rowId}
-                                    </s-text>
+                                    <s-text tone="subdued" variant="bodySm">#{id}</s-text>
                                   </s-stack>
 
                                   {/* @ts-ignore */}
-                                  <s-text tone="subdued" variant="bodySm" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  <s-text
+                                    tone="subdued"
+                                    variant="bodySm"
+                                    style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                                    title={cartLine}
+                                  >
                                     {cartLine || "—"}
                                   </s-text>
 
                                   {/* @ts-ignore */}
                                   <s-text tone="subdued" variant="bodySm">
-                                    Updated {updatedText}
+                                    Updated {formatWhen(r.updatedAt)}
                                   </s-text>
                                 </s-stack>
                               </s-table-cell>
 
-                              {/* VALUE */}
                               {/* @ts-ignore */}
-                              <s-table-cell style={compactCellStyle}>
+                              <s-table-cell style={compactCell}>
                                 {/* @ts-ignore */}
-                                <s-text fontWeight="semibold">
-                                  {Number(c.value || 0).toFixed(2)} {safeStr(c.currency)}
-                                </s-text>
+                                <s-text fontWeight="semibold">{fmtMoney(Number(r.value || 0), r.currency)}</s-text>
                                 {/* @ts-ignore */}
-                                <s-text tone="subdued" variant="bodySm">
-                                  {c.itemsCount ? `${c.itemsCount} items` : "0 items"}
-                                </s-text>
+                                <s-text tone="subdued" variant="bodySm">{r.itemsCount ? `${r.itemsCount} items` : "0 items"}</s-text>
                               </s-table-cell>
 
-                              {/* STATUS (compact badges) */}
                               {/* @ts-ignore */}
-                              <s-table-cell style={compactCellStyle}>
+                              <s-table-cell style={compactCell}>
                                 {/* @ts-ignore */}
-                                <s-stack direction="inline" gap="small-100" wrap>
+                                <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
                                   {/* @ts-ignore */}
-                                  <s-badge tone={checkoutTone}>{safeStr(c.status).toUpperCase()}</s-badge>
+                                  <s-badge tone={checkoutTone}>{safeStr(r.status).toUpperCase()}</s-badge>
                                   {/* @ts-ignore */}
-                                  <s-badge tone={callTone}>{c.callStatus ? safeStr(c.callStatus).toUpperCase() : "NO CALL"}</s-badge>
+                                  <s-badge tone={callTone}>{r.callStatus ? safeStr(r.callStatus).toUpperCase() : "NO CALL"}</s-badge>
                                   {/* @ts-ignore */}
-                                  <s-badge tone={outcomeTone}>{c.callOutcome ? safeStr(c.callOutcome).toUpperCase() : "—"}</s-badge>
+                                  <s-badge tone={outcomeTone}>{r.callOutcome ? safeStr(r.callOutcome).toUpperCase() : "—"}</s-badge>
+                                  {/* @ts-ignore */}
+                                  <s-badge tone="info">{r.buyProbabilityPct == null ? "Buy —" : `Buy ${r.buyProbabilityPct}%`}</s-badge>
                                 </s-stack>
                               </s-table-cell>
 
-                              {/* AI (popover, no vertical expansion) */}
                               {/* @ts-ignore */}
-                              <s-table-cell style={compactCellStyle}>
+                              <s-table-cell style={compactCell}>
                                 {/* @ts-ignore */}
-                                <s-stack gap="small-100">
+                                <s-stack gap="tight">
                                   {/* @ts-ignore */}
-                                  <s-badge tone="info">{c.buyProbabilityPct == null ? "Buy —" : `Buy ${c.buyProbabilityPct}%`}</s-badge>
-
-                                  {/* @ts-ignore */}
-                                  <s-popover
-                                    active={isPopoverOpen(rowId, "ai")}
-                                    onClose={closePopover}
-                                    placement="bottom"
-                                    activator={
-                                      // @ts-ignore
-                                      <s-button
-                                        variant="tertiary"
-                                        onClick={(e: any) => {
-                                          e.preventDefault();
-                                          e.stopPropagation();
-                                          openPopover(rowId, "ai");
-                                        }}
-                                      >
-                                        AI preview
-                                      </s-button>
-                                    }
+                                  <s-text
+                                    tone={nbaText === "—" ? "subdued" : "base"}
+                                    style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                                    title={nbaText}
                                   >
-                                    {/* @ts-ignore */}
-                                    <s-box padding="base" style={{ maxWidth: 420 }}>
-                                      {/* @ts-ignore */}
-                                      <s-stack gap="base">
-                                        {/* @ts-ignore */}
-                                        <s-text variant="headingSm">Next best action</s-text>
-                                        {/* @ts-ignore */}
-                                        <s-text tone="subdued">{safeStr((details?.checkout?.checkoutId === rowId ? details?.sb?.next_best_action : null) || "") || "Open row to load full AI fields."}</s-text>
+                                    {nbaText}
+                                  </s-text>
 
-                                        {/* @ts-ignore */}
-                                        <s-text variant="headingSm">Quick links</s-text>
-                                        {/* @ts-ignore */}
-                                        <s-stack direction="inline" gap="small-100" wrap>
-                                          {/* @ts-ignore */}
-                                          <s-button
-                                            variant="secondary"
-                                            onClick={() => {
-                                              setSelectedId(rowId);
-                                            }}
-                                          >
-                                            Open details
-                                          </s-button>
-                                        </s-stack>
-                                      </s-stack>
-                                    </s-box>
-                                  </s-popover>
+                                  {/* @ts-ignore */}
+                                  <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
+                                    {/* @ts-ignore */}
+                                    <s-button
+                                      variant="secondary"
+                                      onClick={() => setSelectedId(id)}
+                                    >
+                                      Open
+                                    </s-button>
+                                    {/* @ts-ignore */}
+                                    <s-button
+                                      variant="tertiary"
+                                      disabled={!r.recordingUrl}
+                                      onClick={() => {
+                                        if (r.recordingUrl) window.open(r.recordingUrl, "_blank", "noreferrer");
+                                      }}
+                                    >
+                                      Recording
+                                    </s-button>
+                                    {/* @ts-ignore */}
+                                    <s-button
+                                      variant="tertiary"
+                                      disabled={!r.logUrl}
+                                      onClick={() => {
+                                        if (r.logUrl) window.open(r.logUrl, "_blank", "noreferrer");
+                                      }}
+                                    >
+                                      Logs
+                                    </s-button>
+                                  </s-stack>
                                 </s-stack>
                               </s-table-cell>
                             </s-table-row>
@@ -922,316 +1003,436 @@ export default function Checkouts() {
                     </s-table-body>
                   </s-table>
                 </s-box>
-              </s-section>
+              </s-stack>
+            </s-section>
 
-              {/* RIGHT: STICKY DETAILS PANEL (never opens under the table) */}
-              <div style={{ position: "sticky", top: 16, alignSelf: "start" }}>
+            {/* RIGHT: DETAILS (STICKY) */}
+            <div style={{ position: "sticky", top: 16, alignSelf: "start" }}>
+              {/* @ts-ignore */}
+              <s-section>
                 {/* @ts-ignore */}
-                <s-section heading="Details">
+                <s-box border="base" borderRadius="base" padding="base">
                   {/* @ts-ignore */}
-                  <s-box border="base" borderRadius="base" padding="base">
+                  <s-stack gap="base">
+                    {/* Header */}
                     {/* @ts-ignore */}
-                    <s-stack gap="base">
-                      {/* header */}
+                    <s-stack direction="inline" align="space-between" gap="base" style={{ flexWrap: "wrap", alignItems: "center" }}>
                       {/* @ts-ignore */}
-                      <s-grid columns="1fr auto" gap="base" alignItems="center">
+                      <s-stack gap="tight">
                         {/* @ts-ignore */}
-                        <s-stack gap="small-100">
-                          {/* @ts-ignore */}
-                          <s-text tone="subdued" variant="bodySm">
-                            {selected ? `Checkout #${selected.checkoutId}` : "Select a checkout"}
-                          </s-text>
-                        </s-stack>
-                        {loadingDetails ? (
-                          // @ts-ignore
-                          <s-spinner size="small" />
-                        ) : null}
-                      </s-grid>
-
-                      {/* @ts-ignore */}
-                      <s-divider />
-
-                      {!selected ? (
+                        <s-text variant="headingMd">Details</s-text>
+                        {/* @ts-ignore */}
+                        <s-text tone="subdued" variant="bodySm">
+                          {selected ? `Checkout #${selected.checkoutId}` : "Select a checkout"}
+                        </s-text>
+                      </s-stack>
+                      {loadingDetails ? (
                         // @ts-ignore
-                        <s-text tone="subdued">—</s-text>
-                      ) : loadingDetails ? (
-                        // @ts-ignore
-                        <s-text tone="subdued">Loading…</s-text>
-                      ) : (
-                        // @ts-ignore
-                        <s-stack gap="base">
-                          {/* badges */}
-                          {/* @ts-ignore */}
-                          <s-stack direction="inline" gap="small-100" wrap>
-                            {/* @ts-ignore */}
-                            <s-badge tone={toneForCheckoutStatus(details?.checkout?.status ?? selected.status)}>
-                              {safeStr(details?.checkout?.status ?? selected.status).toUpperCase()}
-                            </s-badge>
-
-                            {details?.latestJob?.status ? (
-                              // @ts-ignore
-                              <s-badge tone={toneForJobStatus(details.latestJob.status)}>{safeStr(details.latestJob.status).toUpperCase()}</s-badge>
-                            ) : null}
-
-                            {sb?.call_outcome ? (
-                              // @ts-ignore
-                              <s-badge tone={toneForOutcome(sb.call_outcome)}>{safeStr(sb.call_outcome).toUpperCase()}</s-badge>
-                            ) : null}
-
-                            {sb?.ai_status ? (
-                              // @ts-ignore
-                              <s-badge tone="info">{`AI ${safeStr(sb.ai_status).toUpperCase()}`}</s-badge>
-                            ) : (
-                              // @ts-ignore
-                              <s-badge tone="neutral">AI —</s-badge>
-                            )}
-
-                            {typeof sb?.buy_probability === "number" ? (
-                              // @ts-ignore
-                              <s-badge tone="info">{`Buy ${Math.round(sb.buy_probability)}%`}</s-badge>
-                            ) : (
-                              // @ts-ignore
-                              <s-badge tone="neutral">Buy —</s-badge>
-                            )}
-                          </s-stack>
-
-                          {/* info grid */}
-                          {/* @ts-ignore */}
-                          <s-box padding="base" background="subdued" borderRadius="base">
-                            {/* @ts-ignore */}
-                            <s-stack gap="base">
-                              {/* @ts-ignore */}
-                              <s-grid columns="repeat(3, minmax(0, 1fr))" gap="base" alignItems="start">
-                                <Field label="Customer" value={details?.checkout?.customerName ?? selected.customerName ?? "—"} />
-                                <Field label="Phone" value={details?.checkout?.phone ?? selected.phone ?? "—"} />
-                                <Field label="Email" value={details?.checkout?.email ?? selected.email ?? "—"} />
-                              </s-grid>
-
-                              {/* @ts-ignore */}
-                              <s-grid columns="repeat(3, minmax(0, 1fr))" gap="base" alignItems="start">
-                                <Field
-                                  label="Cart total"
-                                  value={`${safeStr(details?.checkout?.value ?? selected.value)} ${safeStr(details?.checkout?.currency ?? selected.currency)}`}
-                                />
-                                <Field label="Updated" value={formatWhen(details?.checkout?.updatedAt ?? selected.updatedAt)} />
-                                <Field label="Abandoned" value={details?.checkout?.abandonedAt ? formatWhen(details.checkout.abandonedAt) : "—"} />
-                              </s-grid>
-                            </s-stack>
-                          </s-box>
-
-                          {/* primary actions */}
-                          {/* @ts-ignore */}
-                          <s-stack direction="inline" gap="small-100" wrap>
-                            {/* @ts-ignore */}
-                            <s-button
-                              variant="primary"
-                              disabled={!(details?.recordingUrl ?? selected.recordingUrl)}
-                              onClick={() => {
-                                const url = details?.recordingUrl ?? selected.recordingUrl;
-                                if (url) window.open(url, "_blank", "noreferrer");
-                              }}
-                            >
-                              Recording
-                            </s-button>
-
-                            {/* @ts-ignore */}
-                            <s-button
-                              variant="secondary"
-                              disabled={!safeStr(sb?.log_url).trim()}
-                              onClick={() => {
-                                const url = safeStr(sb?.log_url).trim();
-                                if (url) window.open(url, "_blank", "noreferrer");
-                              }}
-                            >
-                              Logs
-                            </s-button>
-
-                            {/* Transcript popover */}
-                            {/* @ts-ignore */}
-                            <s-popover
-                              active={isPopoverOpen(selected.checkoutId, "transcript")}
-                              onClose={closePopover}
-                              placement="bottom"
-                              activator={
-                                // @ts-ignore
-                                <s-button
-                                  variant="secondary"
-                                  disabled={!safeStr(sb?.transcript).trim()}
-                                  onClick={() => openPopover(selected.checkoutId, "transcript")}
-                                >
-                                  Transcript
-                                </s-button>
-                              }
-                            >
-                              {/* @ts-ignore */}
-                              <s-box padding="base" style={{ width: 520, maxWidth: "80vw" }}>
-                                <pre style={monoSmall}>{safeStr(sb?.transcript) || "—"}</pre>
-                              </s-box>
-                            </s-popover>
-
-                            {/* Raw popover */}
-                            {/* @ts-ignore */}
-                            <s-popover
-                              active={isPopoverOpen(selected.checkoutId, "raw")}
-                              onClose={closePopover}
-                              placement="bottom"
-                              activator={
-                                // @ts-ignore
-                                <s-button variant="secondary" onClick={() => openPopover(selected.checkoutId, "raw")}>
-                                  Raw
-                                </s-button>
-                              }
-                            >
-                              {/* @ts-ignore */}
-                              <s-box padding="base" style={{ width: 520, maxWidth: "80vw" }}>
-                                <pre style={monoSmall}>
-                                  {(() => {
-                                    try {
-                                      return JSON.stringify(
-                                        {
-                                          end_of_call_report: sb?.end_of_call_report ?? null,
-                                          ai_result: sb?.ai_result ?? null,
-                                          structured_outputs: sb?.structured_outputs ?? null,
-                                          payload: sb?.payload ?? null,
-                                          checkout_raw: details?.checkout?.raw ?? null,
-                                        },
-                                        null,
-                                        2,
-                                      );
-                                    } catch {
-                                      return "—";
-                                    }
-                                  })()}
-                                </pre>
-                              </s-box>
-                            </s-popover>
-                          </s-stack>
-
-                          {/* AI summary + NBA as compact grid blocks */}
-                          {/* @ts-ignore */}
-                          <s-grid columns="1fr" gap="base" alignItems="start">
-                            {/* @ts-ignore */}
-                            <s-box border="base" borderRadius="base" padding="base">
-                              {/* @ts-ignore */}
-                              <s-stack gap="small-100">
-                                {/* @ts-ignore */}
-                                <s-text variant="headingSm">Summary</s-text>
-                                {/* @ts-ignore */}
-                                <s-text tone="subdued">{safeStr(sb?.summary_clean || sb?.summary) || "—"}</s-text>
-                              </s-stack>
-                            </s-box>
-
-                            {/* @ts-ignore */}
-                            <s-box border="base" borderRadius="base" padding="base">
-                              {/* @ts-ignore */}
-                              <s-stack gap="small-100">
-                                {/* @ts-ignore */}
-                                <s-text variant="headingSm">Next best action</s-text>
-                                {/* @ts-ignore */}
-                                <s-text tone="subdued">{safeStr(sb?.next_best_action || sb?.best_next_action) || "—"}</s-text>
-                              </s-stack>
-                            </s-box>
-
-                            {/* @ts-ignore */}
-                            <s-box border="base" borderRadius="base" padding="base">
-                              {/* @ts-ignore */}
-                              <s-stack gap="small-100">
-                                {/* @ts-ignore */}
-                                <s-text variant="headingSm">Follow-up message</s-text>
-                                <pre style={monoSmall}>{safeStr(sb?.follow_up_message) || "—"}</pre>
-                              </s-stack>
-                            </s-box>
-                          </s-grid>
-
-                          {/* Items (compact, no huge rows) */}
-                          {/* @ts-ignore */}
-                          <s-section heading="Items">
-                            {/* @ts-ignore */}
-                            <s-box border="base" borderRadius="base" style={{ overflow: "hidden" }}>
-                              {/* @ts-ignore */}
-                              <s-table style={{ tableLayout: "fixed", width: "100%" }}>
-                                {/* @ts-ignore */}
-                                <s-table-header-row>
-                                  {/* @ts-ignore */}
-                                  <s-table-header style={{ width: 60 }}>Img</s-table-header>
-                                  {/* @ts-ignore */}
-                                  <s-table-header>Title</s-table-header>
-                                  {/* @ts-ignore */}
-                                  <s-table-header style={{ width: 90 }} format="numeric">
-                                    Qty
-                                  </s-table-header>
-                                </s-table-header-row>
-
-                                {/* @ts-ignore */}
-                                <s-table-body>
-                                  {itemsForDetails.length === 0 ? (
-                                    // @ts-ignore
-                                    <s-table-row>
-                                      {/* @ts-ignore */}
-                                      <s-table-cell colSpan={3}>
-                                        {/* @ts-ignore */}
-                                        <s-text tone="subdued">—</s-text>
-                                      </s-table-cell>
-                                    </s-table-row>
-                                  ) : (
-                                    itemsForDetails.slice(0, 25).map((it, idx) => {
-                                      const title = safeStr(it.title || it.name) || "Item";
-                                      const qtyRaw = it.quantity ?? it.qty ?? "";
-                                      const qty = safeStr(qtyRaw) || "—";
-                                      const img = pickThumbFromItem(it);
-
-                                      return (
-                                        // @ts-ignore
-                                        <s-table-row key={`${title}-${idx}`}>
-                                          {/* @ts-ignore */}
-                                          <s-table-cell style={compactCellStyle}>
-                                            <div style={{ width: 44, height: 44 }}>
-                                              {/* @ts-ignore */}
-                                              <s-thumbnail
-                                                src={img || undefined}
-                                                alt={img ? `Preview of ${title}` : "No image"}
-                                                size="small-200"
-                                              />
-                                            </div>
-                                          </s-table-cell>
-                                          {/* @ts-ignore */}
-                                          <s-table-cell style={compactCellStyle}>
-                                            {/* @ts-ignore */}
-                                            <s-text fontWeight="semibold">{title}</s-text>
-                                            {safeStr(it.variantTitle) ? (
-                                              // @ts-ignore
-                                              <s-text tone="subdued" variant="bodySm">
-                                                {safeStr(it.variantTitle)}
-                                              </s-text>
-                                            ) : null}
-                                          </s-table-cell>
-                                          {/* @ts-ignore */}
-                                          <s-table-cell style={compactCellStyle}>{qty}</s-table-cell>
-                                        </s-table-row>
-                                      );
-                                    })
-                                  )}
-                                </s-table-body>
-                              </s-table>
-                            </s-box>
-                          </s-section>
-                        </s-stack>
-                      )}
+                        <s-spinner size="small" />
+                      ) : null}
                     </s-stack>
-                  </s-box>
-                </s-section>
-              </div>
-            </div>
 
-            {/* responsive: collapse to 1 column on small screens without horizontal scroll */}
-            <style>{`
-              @media (max-width: 1140px) {
-                ._checkoutsGridFix { grid-template-columns: 1fr !important; }
-              }
-            `}</style>
-          </s-stack>
+                    {/* @ts-ignore */}
+                    <s-divider />
+
+                    {!selected ? (
+                      // @ts-ignore
+                      <s-text tone="subdued">—</s-text>
+                    ) : loadingDetails ? (
+                      // @ts-ignore
+                      <s-text tone="subdued">Loading…</s-text>
+                    ) : (
+                      // @ts-ignore
+                      <s-stack gap="base">
+                        {/* Status chips */}
+                        {/* @ts-ignore */}
+                        <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
+                          {/* @ts-ignore */}
+                          <s-badge tone={toneForCheckoutStatus(details?.checkout?.status ?? selected.status)}>
+                            {safeStr(details?.checkout?.status ?? selected.status).toUpperCase()}
+                          </s-badge>
+
+                          {details?.latestJob?.status ? (
+                            // @ts-ignore
+                            <s-badge tone={toneForJobStatus(details.latestJob.status)}>{safeStr(details.latestJob.status).toUpperCase()}</s-badge>
+                          ) : (
+                            // @ts-ignore
+                            <s-badge tone="neutral">NO JOB</s-badge>
+                          )}
+
+                          {sb?.call_outcome ? (
+                            // @ts-ignore
+                            <s-badge tone={toneForOutcome(sb.call_outcome)}>{safeStr(sb.call_outcome).toUpperCase()}</s-badge>
+                          ) : (
+                            // @ts-ignore
+                            <s-badge tone="neutral">OUTCOME —</s-badge>
+                          )}
+
+                          {sb?.ai_status ? (
+                            // @ts-ignore
+                            <s-badge tone="info">{`AI ${safeStr(sb.ai_status).toUpperCase()}`}</s-badge>
+                          ) : (
+                            // @ts-ignore
+                            <s-badge tone="neutral">AI —</s-badge>
+                          )}
+
+                          {typeof sb?.buy_probability === "number" ? (
+                            // @ts-ignore
+                            <s-badge tone="info">{`Buy ${Math.round(sb.buy_probability)}%`}</s-badge>
+                          ) : (
+                            // @ts-ignore
+                            <s-badge tone="neutral">Buy —</s-badge>
+                          )}
+
+                          {sb?.answered != null ? (
+                            // @ts-ignore
+                            <s-badge tone="new">{`Answered ${String(sb.answered)}`}</s-badge>
+                          ) : null}
+                          {sb?.voicemail != null ? (
+                            // @ts-ignore
+                            <s-badge tone="new">{`Voicemail ${String(sb.voicemail)}`}</s-badge>
+                          ) : null}
+                        </s-stack>
+
+                        {/* Customer + money */}
+                        {/* @ts-ignore */}
+                        <s-box padding="base" border="base" borderRadius="base" background="subdued">
+                          {/* @ts-ignore */}
+                          <s-grid gap="base" gridTemplateColumns="1fr 1fr">
+                            {/* @ts-ignore */}
+                            <s-stack gap="tight">
+                              {/* @ts-ignore */}
+                              <s-text tone="subdued" variant="bodySm">Customer</s-text>
+                              {/* @ts-ignore */}
+                              <s-text fontWeight="semibold">{tiny(details?.checkout?.customerName ?? selected.customerName)}</s-text>
+                              {/* @ts-ignore */}
+                              <s-text tone="subdued" variant="bodySm">{tiny(details?.checkout?.phone ?? selected.phone)}</s-text>
+                              {/* @ts-ignore */}
+                              <s-text tone="subdued" variant="bodySm">{tiny(details?.checkout?.email ?? selected.email)}</s-text>
+                            </s-stack>
+
+                            {/* @ts-ignore */}
+                            <s-stack gap="tight">
+                              {/* @ts-ignore */}
+                              <s-text tone="subdued" variant="bodySm">Cart total</s-text>
+                              {/* @ts-ignore */}
+                              <s-text fontWeight="semibold">
+                                {fmtMoney(Number(details?.checkout?.value ?? selected.value ?? 0), String(details?.checkout?.currency ?? selected.currency))}
+                              </s-text>
+                              {/* @ts-ignore */}
+                              <s-text tone="subdued" variant="bodySm">Updated {formatWhen(details?.checkout?.updatedAt ?? selected.updatedAt)}</s-text>
+                              {/* @ts-ignore */}
+                              <s-text tone="subdued" variant="bodySm">
+                                Abandoned {details?.checkout?.abandonedAt ? formatWhen(details.checkout.abandonedAt) : "—"}
+                              </s-text>
+                            </s-stack>
+                          </s-grid>
+                        </s-box>
+
+                        {/* Primary actions */}
+                        {/* @ts-ignore */}
+                        <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
+                          {/* @ts-ignore */}
+                          <s-button
+                            variant="primary"
+                            disabled={!(details?.recordingUrl ?? selected.recordingUrl)}
+                            onClick={() => {
+                              const url = details?.recordingUrl ?? selected.recordingUrl;
+                              if (url) window.open(url, "_blank", "noreferrer");
+                            }}
+                          >
+                            Recording
+                          </s-button>
+
+                          {/* @ts-ignore */}
+                          <s-button
+                            variant="secondary"
+                            disabled={!safeStr(sb?.log_url).trim()}
+                            onClick={() => {
+                              const url = safeStr(sb?.log_url).trim();
+                              if (url) window.open(url, "_blank", "noreferrer");
+                            }}
+                          >
+                            Logs
+                          </s-button>
+
+                          {/* @ts-ignore */}
+                          <s-button variant="secondary" disabled={!safeStr(sb?.transcript).trim()} onClick={() => setModalKind("transcript")}>
+                            Transcript
+                          </s-button>
+
+                          {/* @ts-ignore */}
+                          <s-button variant="secondary" onClick={() => setModalKind("evidence")}>
+                            Evidence
+                          </s-button>
+
+                          {/* @ts-ignore */}
+                          <s-button variant="secondary" onClick={() => setModalKind("raw")}>
+                            Raw
+                          </s-button>
+                        </s-stack>
+
+                        {/* Next best action – focus block */}
+                        {/* @ts-ignore */}
+                        <s-box border="base" borderRadius="base" padding="base" style={{ background: "rgba(0,91,211,0.06)" }}>
+                          {/* @ts-ignore */}
+                          <s-stack gap="tight">
+                            {/* @ts-ignore */}
+                            <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center", flexWrap: "wrap" }}>
+                              {/* @ts-ignore */}
+                              <s-text variant="headingSm">Next best action</s-text>
+                              {/* @ts-ignore */}
+                              <s-badge tone="info">AI</s-badge>
+                            </s-stack>
+                            {/* @ts-ignore */}
+                            <s-text>{safeStr(sb?.next_best_action || sb?.best_next_action) || selected.nextBestAction || "—"}</s-text>
+                          </s-stack>
+                        </s-box>
+
+                        {/* Follow-up message – copyable */}
+                        {/* @ts-ignore */}
+                        <s-box border="base" borderRadius="base" padding="base">
+                          {/* @ts-ignore */}
+                          <s-stack gap="tight">
+                            {/* @ts-ignore */}
+                            <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center", flexWrap: "wrap" }}>
+                              {/* @ts-ignore */}
+                              <s-text variant="headingSm">Follow-up message</s-text>
+                              {/* @ts-ignore */}
+                              <s-button
+                                variant="tertiary"
+                                disabled={!safeStr(sb?.follow_up_message || selected.followUpMessage).trim()}
+                                onClick={() => {
+                                  const txt = safeStr(sb?.follow_up_message || selected.followUpMessage).trim();
+                                  if (txt) clip(txt);
+                                }}
+                              >
+                                Copy
+                              </s-button>
+                            </s-stack>
+                            <pre style={mono}>{safeStr(sb?.follow_up_message || selected.followUpMessage) || "—"}</pre>
+                          </s-stack>
+                        </s-box>
+
+                        {/* Signals (use ALL outcome signals that exist) */}
+                        {/* @ts-ignore */}
+                        <s-box border="base" borderRadius="base" padding="base">
+                          {/* @ts-ignore */}
+                          <s-stack gap="tight">
+                            {/* @ts-ignore */}
+                            <s-text variant="headingSm">Conversation signals</s-text>
+                            {/* @ts-ignore */}
+                            <s-grid gap="base" gridTemplateColumns="1fr 1fr">
+                              {/* @ts-ignore */}
+                              <s-stack gap="tight">
+                                {/* @ts-ignore */}
+                                <s-text tone="subdued" variant="bodySm">Intent</s-text>
+                                {/* @ts-ignore */}
+                                <s-text>{tiny(sb?.customer_intent || selected.customerIntent)}</s-text>
+                              </s-stack>
+                              {/* @ts-ignore */}
+                              <s-stack gap="tight">
+                                {/* @ts-ignore */}
+                                <s-text tone="subdued" variant="bodySm">Sentiment</s-text>
+                                {/* @ts-ignore */}
+                                <s-text>{tiny(sb?.sentiment || selected.sentiment)}</s-text>
+                              </s-stack>
+                              {/* @ts-ignore */}
+                              <s-stack gap="tight">
+                                {/* @ts-ignore */}
+                                <s-text tone="subdued" variant="bodySm">Tone</s-text>
+                                {/* @ts-ignore */}
+                                <s-text>{tiny(sb?.tone || selected.tone)}</s-text>
+                              </s-stack>
+                              {/* @ts-ignore */}
+                              <s-stack gap="tight">
+                                {/* @ts-ignore */}
+                                <s-text tone="subdued" variant="bodySm">End reason</s-text>
+                                {/* @ts-ignore */}
+                                <s-text>{tiny(sb?.ended_reason || selected.endedReason)}</s-text>
+                              </s-stack>
+                              {/* @ts-ignore */}
+                              <s-stack gap="tight">
+                                {/* @ts-ignore */}
+                                <s-text tone="subdued" variant="bodySm">Latest status</s-text>
+                                {/* @ts-ignore */}
+                                <s-text>{tiny(sb?.latest_status || selected.latestStatus)}</s-text>
+                              </s-stack>
+                              {/* @ts-ignore */}
+                              <s-stack gap="tight">
+                                {/* @ts-ignore */}
+                                <s-text tone="subdued" variant="bodySm">AI status</s-text>
+                                {/* @ts-ignore */}
+                                <s-text>{tiny(sb?.ai_status || selected.aiStatus)}</s-text>
+                              </s-stack>
+                            </s-grid>
+                          </s-stack>
+                        </s-box>
+
+                        {/* Items */}
+                        {/* @ts-ignore */}
+                        <s-box border="base" borderRadius="base" style={{ overflow: "hidden" }}>
+                          {/* @ts-ignore */}
+                          <s-table style={{ tableLayout: "fixed", width: "100%" }}>
+                            {/* @ts-ignore */}
+                            <s-table-header-row>
+                              {/* @ts-ignore */}
+                              <s-table-header style={{ width: 60 }}>Img</s-table-header>
+                              {/* @ts-ignore */}
+                              <s-table-header>Item</s-table-header>
+                              {/* @ts-ignore */}
+                              <s-table-header style={{ width: 80 }} format="numeric">Qty</s-table-header>
+                            </s-table-header-row>
+
+                            {/* @ts-ignore */}
+                            <s-table-body>
+                              {itemsForDetails.length === 0 ? (
+                                // @ts-ignore
+                                <s-table-row>
+                                  {/* @ts-ignore */}
+                                  <s-table-cell colSpan={3}>
+                                    {/* @ts-ignore */}
+                                    <s-text tone="subdued">—</s-text>
+                                  </s-table-cell>
+                                </s-table-row>
+                              ) : (
+                                itemsForDetails.slice(0, 12).map((it, idx) => {
+                                  const title = safeStr(it.title || it.name) || "Item";
+                                  const qtyRaw = it.quantity ?? it.qty ?? "";
+                                  const qty = safeStr(qtyRaw) || "—";
+                                  const img = pickThumbFromItem(it);
+
+                                  return (
+                                    // @ts-ignore
+                                    <s-table-row key={`${title}-${idx}`}>
+                                      {/* @ts-ignore */}
+                                      <s-table-cell style={compactCell}>
+                                        <div style={{ width: 44, height: 44 }}>
+                                          {/* @ts-ignore */}
+                                          <s-thumbnail src={img || undefined} alt={img ? title : "No image"} size="small-200" />
+                                        </div>
+                                      </s-table-cell>
+                                      {/* @ts-ignore */}
+                                      <s-table-cell style={compactCell}>
+                                        {/* @ts-ignore */}
+                                        <s-text fontWeight="semibold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                          {title}
+                                        </s-text>
+                                        {safeStr(it.variantTitle) ? (
+                                          // @ts-ignore
+                                          <s-text tone="subdued" variant="bodySm">{safeStr(it.variantTitle)}</s-text>
+                                        ) : null}
+                                      </s-table-cell>
+                                      {/* @ts-ignore */}
+                                      <s-table-cell style={compactCell}>{qty}</s-table-cell>
+                                    </s-table-row>
+                                  );
+                                })
+                              )}
+                            </s-table-body>
+                          </s-table>
+                        </s-box>
+                      </s-stack>
+                    )}
+                  </s-stack>
+                </s-box>
+              </s-section>
+            </div>
+          </s-grid>
         </s-section>
       </s-page>
+
+      {/* MODAL: transcript / evidence / raw */}
+      {/* @ts-ignore */}
+      <s-modal
+        id="checkouts-modal"
+        heading={
+          modalKind === "transcript" ? "Transcript" : modalKind === "evidence" ? "Evidence" : modalKind === "raw" ? "Raw payload" : "Details"
+        }
+        padding="base"
+        open={!!modalKind}
+        onClose={() => setModalKind(null)}
+      >
+        {modalKind === "transcript" ? (
+          <pre style={mono}>{safeStr(sb?.transcript) || "—"}</pre>
+        ) : modalKind === "evidence" ? (
+          // show ALL the useful outcome fields, but in a readable grid/table
+          // key quotes, objections, issues, tags, summary, next action
+          // (kept in modal so the page doesn’t grow vertically)
+          // @ts-ignore
+          <s-stack gap="base">
+            {/* @ts-ignore */}
+            <s-box border="base" borderRadius="base" padding="base">
+              {/* @ts-ignore */}
+              <s-text variant="headingSm">Summary</s-text>
+              {/* @ts-ignore */}
+              <s-text tone="subdued">{safeStr(sb?.summary_clean || sb?.summary) || "—"}</s-text>
+            </s-box>
+
+            {/* @ts-ignore */}
+            <s-box border="base" borderRadius="base" padding="base">
+              {/* @ts-ignore */}
+              <s-text variant="headingSm">Next best action</s-text>
+              {/* @ts-ignore */}
+              <s-text tone="subdued">{safeStr(sb?.next_best_action || sb?.best_next_action) || "—"}</s-text>
+            </s-box>
+
+            {/* @ts-ignore */}
+            <s-grid gap="base" gridTemplateColumns="@container (inline-size < 900px) 1fr, 1fr 1fr">
+              {/* @ts-ignore */}
+              <s-box border="base" borderRadius="base" padding="base">
+                {/* @ts-ignore */}
+                <s-text variant="headingSm">Key quotes</s-text>
+                <pre style={mono}>{safeStr(sb?.key_quotes_text || sb?.key_quotes) || "—"}</pre>
+              </s-box>
+
+              {/* @ts-ignore */}
+              <s-box border="base" borderRadius="base" padding="base">
+                {/* @ts-ignore */}
+                <s-text variant="headingSm">Objections</s-text>
+                <pre style={mono}>{safeStr(sb?.objections_text || sb?.objections) || "—"}</pre>
+              </s-box>
+
+              {/* @ts-ignore */}
+              <s-box border="base" borderRadius="base" padding="base">
+                {/* @ts-ignore */}
+                <s-text variant="headingSm">Issues to fix</s-text>
+                <pre style={mono}>{safeStr(sb?.issues_to_fix_text || sb?.issues_to_fix) || "—"}</pre>
+              </s-box>
+
+              {/* @ts-ignore */}
+              <s-box border="base" borderRadius="base" padding="base">
+                {/* @ts-ignore */}
+                <s-text variant="headingSm">Tags</s-text>
+                <pre style={mono}>{safeStr(sb?.tagcsv || (Array.isArray(sb?.tags) ? sb.tags.join(", ") : "")) || "—"}</pre>
+              </s-box>
+            </s-grid>
+          </s-stack>
+        ) : modalKind === "raw" ? (
+          <pre style={mono}>
+            {(() => {
+              try {
+                return JSON.stringify(
+                  {
+                    sb: sb ?? null,
+                    checkout: details?.checkout ?? null,
+                    latestJob: details?.latestJob ?? null,
+                  },
+                  null,
+                  2,
+                );
+              } catch {
+                return "—";
+              }
+            })()}
+          </pre>
+        ) : null}
+
+        {/* @ts-ignore */}
+        <s-button slot="secondary-actions" variant="secondary" onClick={() => setModalKind(null)}>
+          Close
+        </s-button>
+      </s-modal>
     </>
   );
 }
