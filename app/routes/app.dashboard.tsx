@@ -84,7 +84,6 @@ function isRecoveredCheckoutRow(c: any) {
 }
 
 function checkoutTimeFilter(start: Date, end: Date) {
-  // include activity if any of these timestamps fall inside the window
   return {
     OR: [
       { updatedAt: { gte: start, lt: end } },
@@ -165,7 +164,6 @@ async function supabaseCount(params: URLSearchParams): Promise<number> {
   const env = supabaseEnv();
   if (!env) return 0;
 
-  // ensure we always get a content-range header
   params.set("select", "call_id");
   params.set("limit", "1");
 
@@ -237,10 +235,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const range: RangeKey = rangeParam === "7d" ? "7d" : rangeParam === "24h" ? "24h" : "all";
   const w = windowFromRange(range);
 
-  // keep embedded params but do not pass range to other routes
   const baseSearch = stripParam(fullSearch, "range");
 
-  // Settings (ALL fields listed)
   const settings = await db.settings.findFirst({
     where: { shop },
     select: {
@@ -275,8 +271,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const minOrderValue = Number(settings?.minOrderValue ?? 0);
   const currency = String(settings?.currency ?? "USD").toUpperCase();
 
-  // For sections and lists, fetch recent rows (keep app snappy)
-  // For range != all, narrow to current window; for all, still show recent.
   const checkoutWhereForLists =
     w.start != null
       ? {
@@ -352,42 +346,28 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
   ]);
 
-  // ---- Accurate metrics using Prisma counts/aggregates for current + previous window ----
   async function metricsForWindow(start: Date | null, end: Date) {
-    // recoveredCount
     const recoveredWhereBase: any = {
       shop,
-      OR: [
-        { status: "RECOVERED" },
-        { recoveredAt: { not: null } },
-        { recoveredOrderId: { not: null } },
-      ],
+      OR: [{ status: "RECOVERED" }, { recoveredAt: { not: null } }, { recoveredOrderId: { not: null } }],
     };
     if (start) recoveredWhereBase.AND = [checkoutTimeFilter(start, end)];
 
     const recoveredCount = await db.checkout.count({ where: recoveredWhereBase });
 
-    // recoveredRevenue = sum(recoveredAmount where >0) + sum(value where recoveredAmount <=0 or null)
     const recoveredAmountPos = await db.checkout.aggregate({
-      where: {
-        ...recoveredWhereBase,
-        recoveredAmount: { gt: 0 },
-      },
+      where: { ...recoveredWhereBase, recoveredAmount: { gt: 0 } },
       _sum: { recoveredAmount: true },
     });
 
     const recoveredValueFallback = await db.checkout.aggregate({
-      where: {
-        ...recoveredWhereBase,
-        OR: [{ recoveredAmount: { lte: 0 } }, { recoveredAmount: null }],
-      },
+      where: { ...recoveredWhereBase, OR: [{ recoveredAmount: { lte: 0 } }, { recoveredAmount: null }] },
       _sum: { value: true },
     });
 
     const recoveredRevenue =
       Number(recoveredAmountPos._sum.recoveredAmount ?? 0) + Number(recoveredValueFallback._sum.value ?? 0);
 
-    // abandonedEligible
     const abandonedEligibleWhere: any = {
       shop,
       status: "ABANDONED",
@@ -397,13 +377,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     if (start) abandonedEligibleWhere.AND = [checkoutTimeFilter(start, end)];
 
     const abandonedEligibleCount = await db.checkout.count({ where: abandonedEligibleWhere });
-    const abandonedEligibleSum = await db.checkout.aggregate({
-      where: abandonedEligibleWhere,
-      _sum: { value: true },
-    });
+    const abandonedEligibleSum = await db.checkout.aggregate({ where: abandonedEligibleWhere, _sum: { value: true } });
     const atRiskEligibleRevenue = Number(abandonedEligibleSum._sum.value ?? 0);
 
-    // calls completed + active
     const callCompletedWhere: any = { shop, status: "COMPLETED" };
     const callQueuedWhere: any = { shop, status: "QUEUED" };
     const callCallingWhere: any = { shop, status: "CALLING" };
@@ -442,31 +418,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   const currentMetrics = await metricsForWindow(w.start, w.now);
-  const prevMetrics =
-    w.prevStart && w.prevEnd ? await metricsForWindow(w.prevStart, w.prevEnd) : null;
+  const prevMetrics = w.prevStart && w.prevEnd ? await metricsForWindow(w.prevStart, w.prevEnd) : null;
 
-  // ---- Supabase vapi_call_summaries counts (exact) for current + previous windows ----
-  function supabaseRangeParams(start: Date | null, end: Date) {
+  function supabaseRangeParams(start: Date | null) {
     const p = new URLSearchParams();
     p.set("shop", `eq.${shop}`);
-    if (start) {
-      p.set("received_at", `gte.${start.toISOString()}`);
-      // PostgREST doesn't support lt on same key with set(); use and=() if needed.
-      // Keep it simple: use gte only; end is "now" so fine for dashboard.
-      // For previous window, we'll use gte prevStart and compute until prevEnd by fetching rows for mode (not for count).
-    }
-    // best-effort; counts remain accurate enough for current "now" windows.
+    if (start) p.set("received_at", `gte.${start.toISOString()}`);
     return p;
   }
 
-  // Follow-ups count: vapi (needs_followup) + calljob (NEEDS_FOLLOWUP)
   async function followupCounts(start: Date | null) {
-    // vapi needs_followup
-    const p = supabaseRangeParams(start, w.now);
+    const p = supabaseRangeParams(start);
     p.set("call_outcome", "eq.needs_followup");
     const vapiNeedsFollow = await supabaseCount(p);
 
-    // calljobs outcome
     const cjWhere: any = { shop, outcome: "NEEDS_FOLLOWUP" };
     if (start) cjWhere.updatedAt = { gte: start, lt: w.now };
     const callJobNeedsFollow = await db.callJob.count({ where: cjWhere });
@@ -477,10 +442,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const followNow = await followupCounts(w.start);
   const followPrev = w.prevStart ? await followupCounts(w.prevStart) : null;
 
-  // discount requests count from vapi
   async function discountCount(start: Date | null) {
-    const p = supabaseRangeParams(start, w.now);
-    // OR: discount_suggest=true OR discount_percent>0
+    const p = supabaseRangeParams(start);
     p.set("or", "(discount_suggest.eq.true,discount_percent.gt.0)");
     return supabaseCount(p);
   }
@@ -488,7 +451,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const discountNow = await discountCount(w.start);
   const discountPrev = w.prevStart ? await discountCount(w.prevStart) : null;
 
-  // ---- Live activity rows (recent) ----
   const vapiSelect = [
     "received_at",
     "call_id",
@@ -530,7 +492,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const vapiRecent = await supabaseFetchRows(vapiRecentParams);
 
-  // ---- Top blockers always 7d ----
   const blockersWindowStart = new Date(w.now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
   const totalCalls7d = await supabaseCount(
@@ -582,20 +543,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     })(),
   );
 
-  // ---- Derived sets for priorities ----
-  const recoveredCheckoutIds = new Set(
-    recentCheckouts.filter(isRecoveredCheckoutRow).map((c) => String(c.checkoutId)),
-  );
+  const recoveredCheckoutIds = new Set(recentCheckouts.filter(isRecoveredCheckoutRow).map((c) => String(c.checkoutId)));
 
-  const abandonedEligibleIds = new Set(
-    recentCheckouts
-      .filter((c) => normUpper(c.status) === "ABANDONED")
-      .filter((c) => Number(c.value ?? 0) >= minOrderValue)
-      .filter((c) => Boolean(c.phone) || Boolean(c.email))
-      .map((c) => String(c.checkoutId)),
-  );
-
-  // Priorities: compute from vapiRecent + calljobs + checkouts
   const vapiNeedsFollowRows = vapiRecent.filter((r) => normLower(r.call_outcome) === "needs_followup");
   const vapiHighIntentRows = vapiRecent.filter((r) => {
     const buy = typeof r.buy_probability === "number" ? r.buy_probability : -1;
@@ -604,7 +553,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     if (recoveredCheckoutIds.has(cid)) return false;
     return buy >= 70;
   });
-  const vapiDiscountRows = vapiRecent.filter((r) => Boolean(r.discount_suggest) || (Number(r.discount_percent ?? 0) > 0));
+  const vapiDiscountRows = vapiRecent.filter(
+    (r) => Boolean(r.discount_suggest) || Number(r.discount_percent ?? 0) > 0,
+  );
   const vapiHumanRows = vapiRecent.filter((r) => {
     const err = String(r.ai_error ?? "").trim();
     const st = normLower(r.ai_status);
@@ -686,7 +637,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       label: "Handle discount requests",
       count: discountDedup,
       rawCountText: `vapi ${discountNow}`,
-      nextBestAction: modeText(vapiDiscountRows.map((x) => x.next_best_action)) || "Review discount rationale and reply with an offer.",
+      nextBestAction:
+        modeText(vapiDiscountRows.map((x) => x.next_best_action)) || "Review discount rationale and reply with an offer.",
       href: appendParam(`/app/checkouts${baseSearch}`, "tab", "discounts"),
       tone: discountDedup > 0 ? "warning" : "neutral",
     },
@@ -695,7 +647,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       label: "Human intervention needed",
       count: humanDedup,
       rawCountText: `ai_error present`,
-      nextBestAction: modeText(vapiHumanRows.map((x) => x.next_best_action)) || "Review AI error and reprocess the call summary.",
+      nextBestAction:
+        modeText(vapiHumanRows.map((x) => x.next_best_action)) || "Review AI error and reprocess the call summary.",
       href: appendParam(`/app/calls${baseSearch}`, "tab", "ai_errors"),
       tone: humanDedup > 0 ? "critical" : "neutral",
     },
@@ -704,7 +657,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       label: "Review failed calls",
       count: failedDedup,
       rawCountText: `vapi + jobs ${callJobFailedCount}`,
-      nextBestAction: modeText(vapiFailedRows.map((x) => x.next_best_action)) || "Review objections and retry with updated script.",
+      nextBestAction:
+        modeText(vapiFailedRows.map((x) => x.next_best_action)) || "Review objections and retry with updated script.",
       href: appendParam(`/app/calls${baseSearch}`, "tab", "failed"),
       tone: failedDedup > 0 ? "critical" : "neutral",
     },
@@ -719,7 +673,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     },
   ];
 
-  // ---- Recent recoveries (must show even if recoveredAmount == 0) ----
   const recoveredForList = recentCheckouts
     .filter(isRecoveredCheckoutRow)
     .slice()
@@ -730,9 +683,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     })
     .slice(0, 10)
     .map((c) => {
-      const recoveredRowRevenue =
-        Number(c.recoveredAmount ?? 0) > 0 ? Number(c.recoveredAmount) : Number(c.value ?? 0);
-
+      const recoveredRowRevenue = Number(c.recoveredAmount ?? 0) > 0 ? Number(c.recoveredAmount) : Number(c.value ?? 0);
       const whenIso = c.recoveredAt ? new Date(c.recoveredAt).toISOString() : new Date(c.updatedAt).toISOString();
 
       return {
@@ -745,55 +696,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       };
     });
 
-  // ---- Recovery pipeline ----
   const openCount = recentCheckouts.filter((c) => normUpper(c.status) === "OPEN").length;
 
   const pipeline: DashboardViewProps["pipelineRows"] = [
-    {
-      key: "open",
-      label: "Open",
-      count: openCount,
-      tone: openCount > 0 ? "info" : "neutral",
-      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "open"),
-    },
-    {
-      key: "abandonedEligible",
-      label: "Abandoned eligible",
-      count: currentMetrics.abandonedEligibleCount,
-      tone: currentMetrics.abandonedEligibleCount > 0 ? "warning" : "neutral",
-      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "abandoned"),
-    },
-    {
-      key: "queued",
-      label: "Queued",
-      count: currentMetrics.callsQueued,
-      tone: currentMetrics.callsQueued > 0 ? "warning" : "neutral",
-      href: appendParam(`/app/calls${baseSearch}`, "tab", "queued"),
-    },
-    {
-      key: "calling",
-      label: "Calling",
-      count: currentMetrics.callsCalling,
-      tone: currentMetrics.callsCalling > 0 ? "info" : "neutral",
-      href: appendParam(`/app/calls${baseSearch}`, "tab", "calling"),
-    },
-    {
-      key: "completed",
-      label: "Completed",
-      count: currentMetrics.callsCompleted,
-      tone: currentMetrics.callsCompleted > 0 ? "success" : "neutral",
-      href: appendParam(`/app/calls${baseSearch}`, "tab", "completed"),
-    },
-    {
-      key: "recovered",
-      label: "Recovered",
-      count: currentMetrics.recoveredCount,
-      tone: currentMetrics.recoveredCount > 0 ? "success" : "neutral",
-      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "recovered"),
-    },
+    { key: "open", label: "Open", count: openCount, tone: openCount > 0 ? "info" : "neutral", href: appendParam(`/app/checkouts${baseSearch}`, "tab", "open") },
+    { key: "abandonedEligible", label: "Abandoned eligible", count: currentMetrics.abandonedEligibleCount, tone: currentMetrics.abandonedEligibleCount > 0 ? "warning" : "neutral", href: appendParam(`/app/checkouts${baseSearch}`, "tab", "abandoned") },
+    { key: "queued", label: "Queued", count: currentMetrics.callsQueued, tone: currentMetrics.callsQueued > 0 ? "warning" : "neutral", href: appendParam(`/app/calls${baseSearch}`, "tab", "queued") },
+    { key: "calling", label: "Calling", count: currentMetrics.callsCalling, tone: currentMetrics.callsCalling > 0 ? "info" : "neutral", href: appendParam(`/app/calls${baseSearch}`, "tab", "calling") },
+    { key: "completed", label: "Completed", count: currentMetrics.callsCompleted, tone: currentMetrics.callsCompleted > 0 ? "success" : "neutral", href: appendParam(`/app/calls${baseSearch}`, "tab", "completed") },
+    { key: "recovered", label: "Recovered", count: currentMetrics.recoveredCount, tone: currentMetrics.recoveredCount > 0 ? "success" : "neutral", href: appendParam(`/app/checkouts${baseSearch}`, "tab", "recovered") },
   ];
 
-  // ---- Live activity (merge vapi + calljobs) ----
   const liveFromVapi = vapiRecent.slice(0, 20).map((r) => {
     const ts = r.received_at ? new Date(r.received_at).toISOString() : "";
     const cid = String(r.checkout_id ?? "").trim();
@@ -848,17 +761,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     };
   });
 
-  const liveActivity = [...liveFromVapi, ...liveFromJobs]
-    .slice()
-    .sort((a, b) => {
-      const ta = Date.parse(String(a.whenText || ""));
-      const tb = Date.parse(String(b.whenText || ""));
-      // whenText is relative; cannot sort reliably. Sort by original order: keep vapi first.
-      return 0;
-    })
-    .slice(0, 15);
+  const liveActivity = [...liveFromVapi, ...liveFromJobs].slice(0, 15);
 
-  // ---- Metrics tiles (with delta where possible) ----
   function deltaTextNumber(curr: number, prev: number) {
     const d = curr - prev;
     const sign = d > 0 ? "+" : d < 0 ? "−" : "";
@@ -872,7 +776,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   function metricTone(kind: string, value: number) {
-    // merchant-value first
     if (kind === "recovered") return value > 0 ? "success" : "info";
     if (kind === "win") return value >= 25 ? "success" : value >= 10 ? "warning" : "critical";
     if (kind === "atrisk") return value > 0 ? "warning" : "success";
@@ -886,86 +789,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const rangeLabel = range === "24h" ? "24h" : range === "7d" ? "7d" : "All-time";
 
   const metrics: DashboardViewProps["metrics"] = [
-    {
-      key: "recovered_revenue",
-      label: "Recovered revenue",
-      valueText: fmtMoney(currentMetrics.recoveredRevenue, currency),
-      tone: metricTone("recovered", currentMetrics.recoveredRevenue),
-      deltaText:
-        prevMetrics && range !== "all" ? deltaTextMoney(currentMetrics.recoveredRevenue, prevMetrics.recoveredRevenue) : null,
-      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "recovered"),
-    },
-    {
-      key: "at_risk_eligible_revenue",
-      label: "Eligible at-risk revenue",
-      valueText: fmtMoney(currentMetrics.atRiskEligibleRevenue, currency),
-      tone: metricTone("atrisk", currentMetrics.atRiskEligibleRevenue),
-      deltaText:
-        prevMetrics && range !== "all" ? deltaTextMoney(currentMetrics.atRiskEligibleRevenue, prevMetrics.atRiskEligibleRevenue) : null,
-      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "abandoned"),
-    },
-    {
-      key: "win_rate",
-      label: "Win rate",
-      valueText: `${currentMetrics.winRate}%`,
-      tone: metricTone("win", currentMetrics.winRate),
-      deltaText:
-        prevMetrics && range !== "all" ? `${deltaTextNumber(currentMetrics.winRate, prevMetrics.winRate)} pts` : null,
-      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "recovered"),
-    },
-    {
-      key: "abandoned_eligible_count",
-      label: "Abandoned eligible",
-      valueText: String(currentMetrics.abandonedEligibleCount),
-      tone: metricTone("abandoned", currentMetrics.abandonedEligibleCount),
-      deltaText:
-        prevMetrics && range !== "all"
-          ? deltaTextNumber(currentMetrics.abandonedEligibleCount, prevMetrics.abandonedEligibleCount)
-          : null,
-      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "abandoned"),
-    },
-    {
-      key: "calls_completed",
-      label: "Calls completed",
-      valueText: String(currentMetrics.callsCompleted),
-      tone: metricTone("completed", currentMetrics.callsCompleted),
-      deltaText:
-        prevMetrics && range !== "all" ? deltaTextNumber(currentMetrics.callsCompleted, prevMetrics.callsCompleted) : null,
-      href: appendParam(`/app/calls${baseSearch}`, "tab", "completed"),
-    },
-    {
-      key: "followups_needed",
-      label: "Follow-ups needed",
-      valueText: String(followupsHeadlineDedup),
-      tone: metricTone("followups", followupsHeadlineDedup),
-      deltaText:
-        followPrev && range !== "all"
-          ? deltaTextNumber(
-              followupsHeadlineDedup,
-              (() => {
-                // best-effort previous headline dedupe from counts only
-                return (followPrev.vapiNeedsFollow || 0) + (followPrev.callJobNeedsFollow || 0);
-              })(),
-            )
-          : null,
-      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "followups"),
-    },
-    {
-      key: "discount_requests",
-      label: "Discount requests",
-      valueText: String(discountDedup),
-      tone: metricTone("discounts", discountDedup),
-      deltaText:
-        discountPrev && range !== "all" ? deltaTextNumber(discountDedup, Number(discountPrev || 0)) : null,
-      href: appendParam(`/app/checkouts${baseSearch}`, "tab", "discounts"),
-    },
+    { key: "recovered_revenue", label: "Recovered revenue", valueText: fmtMoney(currentMetrics.recoveredRevenue, currency), tone: metricTone("recovered", currentMetrics.recoveredRevenue), deltaText: prevMetrics && range !== "all" ? deltaTextMoney(currentMetrics.recoveredRevenue, prevMetrics.recoveredRevenue) : null, href: appendParam(`/app/checkouts${baseSearch}`, "tab", "recovered") },
+    { key: "at_risk_eligible_revenue", label: "Eligible at-risk revenue", valueText: fmtMoney(currentMetrics.atRiskEligibleRevenue, currency), tone: metricTone("atrisk", currentMetrics.atRiskEligibleRevenue), deltaText: prevMetrics && range !== "all" ? deltaTextMoney(currentMetrics.atRiskEligibleRevenue, prevMetrics.atRiskEligibleRevenue) : null, href: appendParam(`/app/checkouts${baseSearch}`, "tab", "abandoned") },
+    { key: "win_rate", label: "Win rate", valueText: `${currentMetrics.winRate}%`, tone: metricTone("win", currentMetrics.winRate), deltaText: prevMetrics && range !== "all" ? `${deltaTextNumber(currentMetrics.winRate, prevMetrics.winRate)} pts` : null, href: appendParam(`/app/checkouts${baseSearch}`, "tab", "recovered") },
+    { key: "abandoned_eligible_count", label: "Abandoned eligible", valueText: String(currentMetrics.abandonedEligibleCount), tone: metricTone("abandoned", currentMetrics.abandonedEligibleCount), deltaText: prevMetrics && range !== "all" ? deltaTextNumber(currentMetrics.abandonedEligibleCount, prevMetrics.abandonedEligibleCount) : null, href: appendParam(`/app/checkouts${baseSearch}`, "tab", "abandoned") },
+    { key: "calls_completed", label: "Calls completed", valueText: String(currentMetrics.callsCompleted), tone: metricTone("completed", currentMetrics.callsCompleted), deltaText: prevMetrics && range !== "all" ? deltaTextNumber(currentMetrics.callsCompleted, prevMetrics.callsCompleted) : null, href: appendParam(`/app/calls${baseSearch}`, "tab", "completed") },
+    { key: "followups_needed", label: "Follow-ups needed", valueText: String(followupsHeadlineDedup), tone: metricTone("followups", followupsHeadlineDedup), deltaText: followPrev && range !== "all" ? deltaTextNumber(followupsHeadlineDedup, (followPrev.vapiNeedsFollow || 0) + (followPrev.callJobNeedsFollow || 0)) : null, href: appendParam(`/app/checkouts${baseSearch}`, "tab", "followups") },
+    { key: "discount_requests", label: "Discount requests", valueText: String(discountDedup), tone: metricTone("discounts", discountDedup), deltaText: discountPrev && range !== "all" ? deltaTextNumber(discountDedup, Number(discountPrev || 0)) : null, href: appendParam(`/app/checkouts${baseSearch}`, "tab", "discounts") },
   ];
 
-  // ---- Hero recovered callout ----
   const hero =
     currentMetrics.recoveredRevenue > 0
       ? {
-          show: true,
+          show: true as const,
           recoveredRevenueText: fmtMoney(currentMetrics.recoveredRevenue, currency),
           recoveredCount: currentMetrics.recoveredCount,
           winRate: currentMetrics.winRate,
@@ -973,65 +809,27 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         }
       : { show: false as const };
 
-  // ---- Blockers rows (7d) ----
   const blockersTotal = totalCalls7d;
-  const blockers = [
-    {
-      key: "no_answer",
-      label: "No answer",
-      count: noAnswer7d,
-      pct: blockersTotal ? pct(noAnswer7d, blockersTotal) : null,
-      tone: noAnswer7d > 0 ? "warning" : "neutral",
-    },
-    {
-      key: "voicemail",
-      label: "Voicemail",
-      count: voicemail7d,
-      pct: blockersTotal ? pct(voicemail7d, blockersTotal) : null,
-      tone: voicemail7d > 0 ? "warning" : "neutral",
-    },
-    {
-      key: "needs_followup",
-      label: "Needs follow-up",
-      count: needsFollow7d,
-      pct: blockersTotal ? pct(needsFollow7d, blockersTotal) : null,
-      tone: needsFollow7d > 0 ? "warning" : "neutral",
-    },
-    {
-      key: "not_interested",
-      label: "Not interested",
-      count: notInterested7d,
-      pct: blockersTotal ? pct(notInterested7d, blockersTotal) : null,
-      tone: notInterested7d > 0 ? "critical" : "neutral",
-    },
+  const blockers: DashboardViewProps["blockers"]["rows"] = [
+    { key: "no_answer", label: "No answer", count: noAnswer7d, pct: blockersTotal ? pct(noAnswer7d, blockersTotal) : null, tone: noAnswer7d > 0 ? "warning" : "neutral" },
+    { key: "voicemail", label: "Voicemail", count: voicemail7d, pct: blockersTotal ? pct(voicemail7d, blockersTotal) : null, tone: voicemail7d > 0 ? "warning" : "neutral" },
+    { key: "needs_followup", label: "Needs follow-up", count: needsFollow7d, pct: blockersTotal ? pct(needsFollow7d, blockersTotal) : null, tone: needsFollow7d > 0 ? "warning" : "neutral" },
+    { key: "not_interested", label: "Not interested", count: notInterested7d, pct: blockersTotal ? pct(notInterested7d, blockersTotal) : null, tone: notInterested7d > 0 ? "critical" : "neutral" },
   ];
 
-  // ---- Settings snapshot ----
   const vapiReady = Boolean(settings?.vapiAssistantId) && Boolean(settings?.vapiPhoneNumberId);
   const enabled = Boolean(settings?.enabled);
   const criticalMissing = enabled && !vapiReady;
 
-  const settingsRows: DashboardViewProps["settingsRows"] = [
+  const settingsRows: DashboardViewProps["settings"]["rows"] = [
     { label: "Automation", value: enabled ? "Enabled" : "Disabled", tone: enabled ? "success" : "warning" },
-    {
-      label: "Call window",
-      value: `${String(settings?.callWindowStart ?? "—")}–${String(settings?.callWindowEnd ?? "—")}`,
-      tone: "info",
-    },
+    { label: "Call window", value: `${String(settings?.callWindowStart ?? "—")}–${String(settings?.callWindowEnd ?? "—")}`, tone: "info" },
     { label: "Delay", value: `${Number(settings?.delayMinutes ?? 0)} min`, tone: "info" },
     { label: "Retry", value: `${Number(settings?.retryMinutes ?? 0)} min`, tone: "info" },
     { label: "Max attempts", value: String(Number(settings?.maxAttempts ?? 0)), tone: "info" },
     { label: "Min order value", value: fmtMoney(minOrderValue, currency), tone: "info" },
-    {
-      label: "Discounts",
-      value: settings?.discount_enabled ? `Enabled (max ${Number(settings?.max_discount_percent ?? 0)}%)` : "Disabled",
-      tone: settings?.discount_enabled ? "warning" : "info",
-    },
-    {
-      label: "Coupon",
-      value: `${String(settings?.coupon_prefix ?? "—")} • ${Number(settings?.coupon_validity_hours ?? 0)}h`,
-      tone: "info",
-    },
+    { label: "Discounts", value: settings?.discount_enabled ? `Enabled (max ${Number(settings?.max_discount_percent ?? 0)}%)` : "Disabled", tone: settings?.discount_enabled ? "warning" : "info" },
+    { label: "Coupon", value: `${String(settings?.coupon_prefix ?? "—")} • ${Number(settings?.coupon_validity_hours ?? 0)}h`, tone: "info" },
     { label: "Free shipping", value: settings?.free_shipping_enabled ? "On" : "Off", tone: settings?.free_shipping_enabled ? "info" : "neutral" },
     { label: "Follow-up email", value: settings?.followup_email_enabled ? "On" : "Off", tone: settings?.followup_email_enabled ? "info" : "neutral" },
     { label: "Follow-up SMS", value: settings?.followup_sms_enabled ? "On" : "Off", tone: settings?.followup_sms_enabled ? "info" : "neutral" },
@@ -1043,7 +841,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     { label: "Min cart for discount", value: fmtMoney(Number(settings?.min_cart_value_for_discount ?? 0), currency), tone: "info" },
     { label: "Vapi assistant", value: settings?.vapiAssistantId ? "Set" : "Missing", tone: settings?.vapiAssistantId ? "success" : "critical" },
     { label: "Vapi phone number", value: settings?.vapiPhoneNumberId ? "Set" : "Missing", tone: settings?.vapiPhoneNumberId ? "success" : "critical" },
-    { label: "Prompt", value: (settings?.merchantPrompt || settings?.userPrompt) ? "Configured" : "Missing", tone: (settings?.merchantPrompt || settings?.userPrompt) ? "success" : "warning" },
+    { label: "Prompt", value: settings?.merchantPrompt || settings?.userPrompt ? "Configured" : "Missing", tone: settings?.merchantPrompt || settings?.userPrompt ? "success" : "warning" },
   ];
 
   const rangeLinks = {
@@ -1054,10 +852,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const view: DashboardViewProps = {
     shopLabel: shop,
-    nav: {
-      checkoutsHref: `/app/checkouts${baseSearch}`,
-      callsHref: `/app/calls${baseSearch}`,
-    },
+    nav: { checkoutsHref: `/app/checkouts${baseSearch}`, callsHref: `/app/calls${baseSearch}` },
     range: { key: range, label: rangeLabel, links: rangeLinks },
     hero,
     metrics,
@@ -1065,16 +860,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     liveRows: liveActivity,
     priorities,
     recentRecoveries: recoveredForList,
-    blockers: {
-      total: blockersTotal,
-      rows: blockers,
-    },
-    settings: {
-      criticalMissing,
-      vapiReady,
-      enabled,
-      rows: settingsRows,
-    },
+    blockers: { total: blockersTotal, rows: blockers },
+    settings: { criticalMissing, vapiReady, enabled, rows: settingsRows },
     canCreateTestCall: true,
   };
 
