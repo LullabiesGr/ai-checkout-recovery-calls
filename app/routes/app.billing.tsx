@@ -5,9 +5,6 @@ import { useFetcher, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
-import { useAppBridge } from "@shopify/app-bridge-react";
-import { Redirect } from "@shopify/app-bridge/actions";
-
 import { PLANS, isPlanKey, type PlanKey } from "../lib/billingPlans.shared";
 import {
   ensureBillingRow,
@@ -120,16 +117,25 @@ function badgeToneFromStatus(status: string) {
   return "info";
 }
 
+function topRedirect(url: string) {
+  if (typeof window === "undefined") return;
+  try {
+    if (window.top) window.top.location.assign(url);
+    else window.location.assign(url);
+  } catch {
+    window.location.assign(url);
+  }
+}
+
 export default function BillingRoute() {
   const { billing, usage } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<any>();
-  const app = useAppBridge();
 
   React.useEffect(() => {
     const url = fetcher.data?.confirmationUrl;
     if (!url) return;
-    Redirect.create(app).dispatch(Redirect.Action.REMOTE, url);
-  }, [fetcher.data, app]);
+    topRedirect(url);
+  }, [fetcher.data]);
 
   const activePlanKey = String(billing?.plan || "FREE") as PlanKey;
   const status = String(billing?.status || "NONE");
@@ -154,7 +160,6 @@ export default function BillingRoute() {
         </s-box>
 
         <s-grid columns="2" gap="500">
-          {/* Current plan */}
           <s-box padding="600" border="base" borderRadius="400" background="bg-surface">
             <s-stack direction="vertical" gap="300">
               <s-stack direction="horizontal" align="space-between">
@@ -198,11 +203,7 @@ export default function BillingRoute() {
                 {activePlanKey !== "FREE" ? (
                   <fetcher.Form method="post">
                     <input type="hidden" name="intent" value="increase_cap" />
-                    <input
-                      type="hidden"
-                      name="newCapEUR"
-                      value={String((capAmount ?? plan.usageCapEUR) + 50)}
-                    />
+                    <input type="hidden" name="newCapEUR" value={String((capAmount ?? plan.usageCapEUR) + 50)} />
                     <s-button type="submit">Increase cap +€50</s-button>
                   </fetcher.Form>
                 ) : null}
@@ -210,7 +211,6 @@ export default function BillingRoute() {
             </s-stack>
           </s-box>
 
-          {/* Plans */}
           <s-box padding="600" border="base" borderRadius="400" background="bg-surface">
             <s-stack direction="vertical" gap="400">
               <s-heading level="2">Plans</s-heading>
