@@ -148,6 +148,65 @@ model Session {
   @@index([shop])
 }
 
+enum BillingPlan {
+  FREE
+  STARTER
+  PRO
+  SCALE
+  PAYG
+}
+
+enum BillingStatus {
+  NONE
+  PENDING
+  ACTIVE
+  CANCELLED
+}
+
+model ShopBilling {
+  shop               String        @id
+  plan               BillingPlan   @default(FREE)
+  status             BillingStatus @default(NONE)
+
+  currencyCode       String        @default("EUR")
+  subscriptionId     String?
+  usageLineItemId    String?
+  recurringLineItemId String?
+
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+
+  includedSecondsUsed Int          @default(0)
+  freeSecondsUsed     Int          @default(0)
+
+  pendingPlan        BillingPlan?
+
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  charges            CallCharge[]
+}
+
+model CallCharge {
+  id               String   @id @default(cuid())
+  shop             String
+  callJobId        String   @unique
+
+  connectedSeconds Int
+  minutesBilled    Int
+  amountCents      Int
+  currencyCode     String
+
+  usageRecordId    String?
+  idempotencyKey   String   @unique
+
+  createdAt        DateTime @default(now())
+
+  billing          ShopBilling @relation(fields: [shop], references: [shop], onDelete: Cascade)
+
+  @@index([shop, createdAt])
+}
+
 enum PromptMode {
   append
   replace

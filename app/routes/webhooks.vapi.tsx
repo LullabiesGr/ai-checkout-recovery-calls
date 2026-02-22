@@ -1,6 +1,7 @@
 // app/routes/webhooks.vapi.ts
 import type { ActionFunctionArgs } from "react-router";
 import db from "../db.server";
+import { applyBillingForCall } from "../lib/billing.server";
 
 function requiredEnv(name: string) {
   const v = process.env[name];
@@ -80,6 +81,52 @@ function normalizeDisposition(v: any) {
     s === "unknown"
   ) return s;
   return "unknown";
+}
+
+function secondsBetweenIso(start?: any, end?: any) {
+  if (!start || !end) return 0;
+  const s = new Date(String(start)).getTime();
+  const e = new Date(String(end)).getTime();
+  if (!Number.isFinite(s) || !Number.isFinite(e)) return 0;
+  return Math.max(0, Math.floor((e - s) / 1000));
+}
+
+function extractConnectedSeconds(msg: any, call: any, artifact: any) {
+  const durationSeconds =
+    Number(msg?.durationSeconds ?? msg?.duration_seconds ?? call?.durationSeconds ?? call?.duration_seconds ?? NaN);
+
+  if (Number.isFinite(durationSeconds) && durationSeconds > 0) {
+    return Math.floor(durationSeconds);
+  }
+
+  const startedAt =
+    msg?.startedAt ??
+    msg?.startAt ??
+    call?.startedAt ??
+    call?.startAt ??
+    artifact?.startedAt ??
+    artifact?.startAt ??
+    null;
+
+  const endedAt =
+    msg?.endedAt ??
+    msg?.endAt ??
+    call?.endedAt ??
+    call?.endAt ??
+    artifact?.endedAt ??
+    artifact?.endAt ??
+    null;
+
+  return secondsBetweenIso(startedAt, endedAt);
+}
+
+function detectVoicemail(endedReason: string, msg: any, call: any, artifact: any) {
+  const r = String(endedReason ?? "").toLowerCase();
+  if (r.includes("voicemail") || r.includes("machine")) return true;
+  if (typeof msg?.analysis?.voicemail === "boolean") return msg.analysis.voicemail;
+  if (typeof call?.voicemail === "boolean") return call.voicemail;
+  if (typeof artifact?.voicemail === "boolean") return artifact.voicemail;
+  return false;
 }
 
 async function analyzeCallWithOpenAI(args: {
@@ -281,6 +328,8 @@ export async function action({ request }: ActionFunctionArgs) {
         })
       : null;
 
+    let answeredForBilling = false;
+
     if (analysis) {
       const sentiment = safeStr((analysis as any)?.sentiment ?? "", 30) || null;
       const tagsCsv = csvFromTags((analysis as any)?.tags) ?? null;
@@ -294,8 +343,8 @@ export async function action({ request }: ActionFunctionArgs) {
       const answered = (analysis as any)?.answered;
       const disposition = safeStr((analysis as any)?.disposition ?? "unknown", 30);
       const buyProbability = (analysis as any)?.buyProbability;
-      const churnProbability = (analysis as any)?.churnProbability;
-      const confidence = (analysis as any)?.confidence;
+
+      answeredForBilling = answered === true;
 
       await db.callJob.updateMany({
         where: { id: callJobId, shop },
@@ -307,10 +356,32 @@ export async function action({ request }: ActionFunctionArgs) {
           followUp,
           analysisJson: safeStr(JSON.stringify(analysis), 8000),
           outcome: safeStr(
-            `${sentiment ?? "unknown"} | ${tagsCsv ?? "-"} | ${shortSummary || reason || "no-reason"} | ${answered === true ? "answered" : answered === false ? "no_answer" : "unknown"} | ${disposition} | buy=${Math.round(clamp01(buyProbability) * 100)}%`,
+            `${sentiment ?? "unknown"} | ${tagsCsv ?? "-"} | ${shortSummary || reason || "no-reason"} | ${
+              answered === true ? "answered" : answered === false ? "no_answer" : "unknown"
+            } | ${disposition} | buy=${Math.round(clamp01(buyProbability) * 100)}%`,
             2000
           ),
         },
+      });
+    }
+
+    // BILLING (rounded minutes happens inside applyBillingForCall)
+    try {
+      const connectedSeconds = extractConnectedSeconds(msg, call, artifact);
+      const voicemail = detectVoicemail(endedReason, msg, call, artifact);
+
+      await applyBillingForCall({
+        shop,
+        callJobId,
+        connectedSeconds,
+        answered: answeredForBilling,
+        voicemail,
+      });
+    } catch (e: any) {
+      // swallow: never fail webhook
+      await db.callJob.updateMany({
+        where: { id: callJobId, shop },
+        data: { outcome: safeStr(`BILLING_ERROR: ${e?.message ?? String(e)}`, 2000) },
       });
     }
 

@@ -58,7 +58,8 @@ function pickGoal(v: any): Goal {
 
 function pickOfferRule(v: any): OfferRule {
   const s = String(v ?? "").trim().toLowerCase();
-  if (s === "price_objection" || s === "after_first_objection" || s === "always" || s === "ask_only") return s as OfferRule;
+  if (s === "price_objection" || s === "after_first_objection" || s === "always" || s === "ask_only")
+    return s as OfferRule;
   return "ask_only";
 }
 
@@ -184,14 +185,166 @@ function cleanLine(s: any) {
 }
 
 // =========================
-// Phone normalization (E.164)
+// JSON helper (single source of truth)
 // =========================
-function normalizePhoneE164(raw: any): string | null {
+function safeJsonParse(s: any): any | null {
+  try {
+    if (!s) return null;
+    return JSON.parse(String(s));
+  } catch {
+    return null;
+  }
+}
+
+// =========================
+// Country inference from checkout.raw (no DB country column)
+// =========================
+const ISO2_TO_CALLING_CODE: Record<string, string> = {
+  // North America
+  US: "1",
+  CA: "1",
+
+  // Europe
+  GR: "30",
+  GB: "44",
+  IE: "353",
+  FR: "33",
+  DE: "49",
+  IT: "39",
+  ES: "34",
+  PT: "351",
+  NL: "31",
+  BE: "32",
+  LU: "352",
+  CH: "41",
+  AT: "43",
+  SE: "46",
+  NO: "47",
+  DK: "45",
+  FI: "358",
+  PL: "48",
+  CZ: "420",
+  SK: "421",
+  HU: "36",
+  RO: "40",
+  BG: "359",
+  HR: "385",
+  SI: "386",
+  RS: "381",
+  BA: "387",
+  ME: "382",
+  MK: "389",
+  AL: "355",
+  TR: "90",
+  CY: "357",
+  MT: "356",
+  IS: "354",
+  EE: "372",
+  LV: "371",
+  LT: "370",
+  UA: "380",
+  MD: "373",
+
+  // Middle East
+  IL: "972",
+  AE: "971",
+  SA: "966",
+  QA: "974",
+  KW: "965",
+  BH: "973",
+  OM: "968",
+  JO: "962",
+  LB: "961",
+  IQ: "964",
+  IR: "98",
+
+  // Africa (common)
+  ZA: "27",
+  EG: "20",
+  MA: "212",
+  TN: "216",
+  DZ: "213",
+  NG: "234",
+  KE: "254",
+  GH: "233",
+
+  // Asia-Pacific
+  AU: "61",
+  NZ: "64",
+  JP: "81",
+  KR: "82",
+  CN: "86",
+  IN: "91",
+  PK: "92",
+  BD: "880",
+  SG: "65",
+  MY: "60",
+  TH: "66",
+  VN: "84",
+  ID: "62",
+  PH: "63",
+  HK: "852",
+  TW: "886",
+
+  // Latin America (common)
+  MX: "52",
+  BR: "55",
+  AR: "54",
+  CL: "56",
+  CO: "57",
+  PE: "51",
+};
+
+function inferIso2FromCheckoutRaw(checkoutRaw: string | null): string | null {
+  const j = safeJsonParse(checkoutRaw);
+  if (!j) return null;
+
+  // best: explicit country codes if you include them in the Shopify query
+  const candidates = [
+    j?.shippingAddress?.countryCodeV2,
+    j?.shippingAddress?.countryCode,
+    j?.billingAddress?.countryCodeV2,
+    j?.billingAddress?.countryCode,
+    j?.customer?.defaultAddress?.countryCodeV2,
+    j?.customer?.defaultAddress?.countryCode,
+  ]
+    .map((x: any) => String(x ?? "").trim())
+    .filter(Boolean);
+
+  if (candidates.length) return candidates[0].toUpperCase();
+
+  // fallback: try locale=xx-YY in abandonedCheckoutUrl (weaker signal)
+  const url = String(j?.abandonedCheckoutUrl ?? "").trim();
+  if (url) {
+    try {
+      const u = new URL(url);
+      const loc = String(u.searchParams.get("locale") ?? "").trim(); // e.g. en-US
+      const m = /([A-Za-z]{2})-([A-Za-z]{2})/.exec(loc);
+      if (m) return m[2].toUpperCase();
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
+function inferCallingCodeFromCheckoutRaw(checkoutRaw: string | null): string | null {
+  const iso2 = inferIso2FromCheckoutRaw(checkoutRaw);
+  if (!iso2) return null;
+  return ISO2_TO_CALLING_CODE[iso2] ?? null;
+}
+
+// =========================
+// Phone normalization (E.164) with checkout-based country inference
+// =========================
+function normalizePhoneE164(raw: any, defaultCallingCode?: string | null): string | null {
   const input = String(raw ?? "").trim();
   if (!input) return null;
 
   let s = input.replace(/^tel:/i, "").trim();
 
+  // international prefixes
   if (s.startsWith("00")) s = "+" + s.slice(2);
   if (s.startsWith("011")) s = "+" + s.slice(3);
 
@@ -199,20 +352,36 @@ function normalizePhoneE164(raw: any): string | null {
   const digits = s.replace(/\D/g, "");
   if (!digits) return null;
 
+  // already E.164-ish
   if (hasPlus) {
     if (digits.length < 8 || digits.length > 15) return null;
     return "+" + digits;
   }
 
-  // Heuristics for common cases
-  if (digits.length === 11 && digits.startsWith("1")) return "+" + digits; // US/CA
-  if (digits.length === 10 && (digits.startsWith("69") || digits.startsWith("2"))) return "+30" + digits; // GR
-  if (digits.length === 10 && digits.startsWith("0") && (digits[1] === "6" || digits[1] === "2"))
-    return "+30" + digits.slice(1);
+  // already includes calling code but missing '+'
+  if (digits.length >= 8 && digits.length <= 15) {
+    // if we can confirm it starts with inferred calling code, treat as international
+    if (defaultCallingCode && digits.startsWith(defaultCallingCode)) return "+" + digits;
 
-  if (digits.length >= 11 && digits.length <= 15) return "+" + digits;
+    // otherwise, if it's long enough, assume caller included full international digits
+    if (digits.length >= 11) return "+" + digits;
+  }
 
-  return null;
+  // local number; need a defaultCallingCode
+  if (!defaultCallingCode) return null;
+
+  let national = digits;
+
+  // strip trunk zeros for most countries (not perfect globally)
+  const keepLeadingZeroCallingCodes = new Set(["39"]); // Italy often keeps leading 0
+  if (national.startsWith("0") && !keepLeadingZeroCallingCodes.has(defaultCallingCode)) {
+    national = national.replace(/^0+/, "");
+    if (!national) return null;
+  }
+
+  const full = defaultCallingCode + national;
+  if (full.length < 8 || full.length > 15) return null;
+  return "+" + full;
 }
 
 async function readPreviousCallMemory(params: {
@@ -222,7 +391,6 @@ async function readPreviousCallMemory(params: {
 }): Promise<string | null> {
   const { shop, checkoutId, currentCallJobId } = params;
 
-  // Prefer vapi_call_summaries (safe minimal columns). If query fails, fallback to CallJob.
   try {
     const rows = await (db as any).$queryRaw<PrevSummaryRow[]>`
       select
@@ -250,7 +418,6 @@ async function readPreviousCallMemory(params: {
     // ignore
   }
 
-  // Fallback to CallJob fields
   const prevJob = await db.callJob.findFirst({
     where: {
       shop,
@@ -292,15 +459,6 @@ async function readPreviousCallMemory(params: {
 // =========================
 // Offer/SMS helpers
 // =========================
-
-function safeJsonParse(s: any): any | null {
-  try {
-    if (!s) return null;
-    return JSON.parse(String(s));
-  } catch {
-    return null;
-  }
-}
 
 function mergeAnalysisJson(prev: string | null, patch: any) {
   const base = safeJsonParse(prev) || {};
@@ -526,7 +684,7 @@ function buildFactsBlock(args: {
   lines.push(`checkout_id: ${checkout.checkoutId}`);
   lines.push(`customer_name: ${checkout.customerName ?? "-"}`);
   lines.push(`email: ${checkout.email ?? "-"}`);
-  lines.push(`phone: ${checkout.phone ?? "-"}`);
+  lines.push(`phone_e164: ${checkout.phone ?? "-"}`);
   lines.push(`cart_total: ${checkout.value} ${checkout.currency}`);
   lines.push(`cart_items:\n${cartText}`);
 
@@ -569,7 +727,7 @@ function buildSystemPrompt(args: {
     checkoutId: string;
     customerName?: string | null;
     email?: string | null;
-    phone?: string | null;
+    phone?: string | null; // MUST be E.164 here
     value: number;
     currency: string;
     itemsJson?: string | null;
@@ -592,10 +750,6 @@ function buildSystemPrompt(args: {
 }) {
   const { merchantPrompt, checkout, playbook } = args;
 
-  // PromptMode behavior
-  // - default_only: ignore merchantPrompt entirely
-  // - replace: system prompt becomes only merchantPrompt (fallback to base if empty)
-  // - append: merchantPrompt becomes HIGHEST PRIORITY instructions (still below Hard rules)
   const mode = pickPromptMode(args.promptMode ?? "append");
   const merchant = mode === "default_only" ? "" : String(merchantPrompt ?? "").trim();
 
@@ -632,6 +786,7 @@ Memory rules:
   const checkoutLink = offer?.checkoutLink ? offer.checkoutLink : null;
   const offerCode = offer?.offerCode ? offer.offerCode : null;
   const discountPercent = offer?.discountPercent ?? null;
+  const validityHours = offer?.couponValidityHours ?? playbook.couponValidityHours;
 
   const merchantBlock =
     mode === "append" && merchant
@@ -645,14 +800,15 @@ ${merchant}
 `.trim()
       : "";
 
+  // LOCK SMS destination to the E.164 we computed server-side.
   const smsBlock =
-    args.smsEnabled && checkoutLink
+    args.smsEnabled && checkoutLink && checkout.phone
       ? `
 SMS (tool use):
-- If the customer asks for the link or coupon code OR explicitly agrees to receive it by SMS, send exactly ONE SMS using the sms tool.
-- Do not send SMS if the customer declines.
-- Do not send multiple SMS messages.
-- Use: to=<customer number> and message=<pre-approved text from the user message>.
+- You MUST send SMS to this exact E.164 number only: ${checkout.phone}
+- Never use example numbers. Never use numbers the customer says during the call.
+- Send exactly ONE SMS only if the customer explicitly asks for SMS or agrees to receive it.
+- Tool args must be: to="${checkout.phone}" and body="<the pre-approved text>".
 `.trim()
       : "";
 
@@ -689,17 +845,19 @@ Playbook:
 ${smsBlock ? `\n\n${smsBlock}\n` : ""}
 
 Context:
-- Checkout ID: ${checkout.checkoutId}
-- Customer name: ${checkout.customerName ?? "-"}
-- Email: ${checkout.email ?? "-"}
-- Cart total: ${checkout.value} ${checkout.currency}
-- Cart items:
+- checkoutId: ${checkout.checkoutId}
+- customerName: ${checkout.customerName ?? "-"}
+- email: ${checkout.email ?? "-"}
+- phone_e164: ${checkout.phone ?? "-"}
+- cartTotal: ${checkout.value} ${checkout.currency}
+- cartItems:
 ${cartText}
 
-Offer context:
-- Checkout link: ${checkoutLink ?? "-"}
-- Offer percent: ${discountPercent == null ? "-" : `${Math.floor(Number(discountPercent) || 0)}%`}
-- Offer code: ${offerCode ?? "-"}
+Offer context (use these exact fields):
+- CHECKOUT_LINK: ${checkoutLink ?? "-"}
+- OFFER_CODE: ${offerCode ?? "-"}
+- PERCENT: ${discountPercent == null ? "-" : String(Math.floor(Number(discountPercent) || 0))}
+- VALIDITY_HOURS: ${String(Math.floor(Number(validityHours) || 24))}
 `.trim();
 
   if (mode === "replace") return merchant ? merchant : base;
@@ -721,6 +879,36 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
 
   const checkout = await db.checkout.findFirst({ where: { shop: params.shop, checkoutId: job.checkoutId } });
   if (!checkout) throw new Error("Checkout not found");
+
+  // --- Canonical phone: derive E.164 from checkout.phone/job.phone + country inferred from checkout.raw ---
+  const checkoutPhoneRaw = (checkout as any).phone ?? null;
+  const jobPhoneRaw = (job as any).phone ?? null;
+  const inferredIso2 = inferIso2FromCheckoutRaw((checkout as any).raw ?? null);
+  const inferredCallingCode = inferCallingCodeFromCheckoutRaw((checkout as any).raw ?? null);
+
+  const rawPhone = checkoutPhoneRaw ?? jobPhoneRaw;
+  const customerNumber = normalizePhoneE164(rawPhone, inferredCallingCode);
+
+  if (!customerNumber) {
+    await db.callJob.update({
+      where: { id: job.id },
+      data: {
+        status: "FAILED",
+        outcome: `INVALID_PHONE_E164: raw=${String(rawPhone ?? "")} inferredIso2=${String(inferredIso2 ?? "")}`,
+        analysisJson: mergeAnalysisJson(job.analysisJson ?? null, {
+          phone_validation: {
+            rawPhone,
+            checkoutPhoneRaw,
+            jobPhoneRaw,
+            inferredIso2,
+            inferredCallingCode,
+            at: new Date().toISOString(),
+          },
+        }),
+      },
+    });
+    throw new Error("Invalid customer phone (E.164 required).");
+  }
 
   const settings = await db.settings.findUnique({ where: { shop: params.shop } });
   const extras = await readSettingsExtras(params.shop);
@@ -816,7 +1004,8 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
   const discountLink = offerCode && recoveryUrl ? appendDiscountParam(recoveryUrl, offerCode) : recoveryUrl;
 
   const smsFrom = String(process.env.VAPI_SMS_FROM_NUMBER ?? "").trim(); // E.164
-  const smsEnabled = Boolean(playbook.followupSmsEnabled) && Boolean(smsFrom) && Boolean(discountLink);
+  const smsEnabled =
+    Boolean(playbook.followupSmsEnabled) && Boolean(smsFrom) && Boolean(discountLink) && Boolean(customerNumber);
   const tools = smsEnabled ? [{ type: "sms", metadata: { from: smsFrom } }] : undefined;
 
   const promptMode = pickPromptMode((settings as any)?.promptMode ?? "append");
@@ -838,7 +1027,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       checkoutId: String(checkout.checkoutId),
       customerName: checkout.customerName,
       email: checkout.email,
-      phone: checkout.phone,
+      phone: customerNumber, // LOCKED E.164
       value: checkout.value,
       currency: checkout.currency,
       itemsJson: checkout.itemsJson,
@@ -855,7 +1044,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
             checkoutId: String(checkout.checkoutId),
             customerName: checkout.customerName,
             email: checkout.email,
-            phone: checkout.phone,
+            phone: customerNumber, // E.164
             value: checkout.value,
             currency: checkout.currency,
             itemsJson: checkout.itemsJson,
@@ -865,6 +1054,13 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       : null;
 
   const messages: Array<{ role: "system" | "user"; content: string }> = [{ role: "system", content: systemPrompt }];
+
+  // hard lock "to" for the LLM
+  messages.push({
+    role: "user",
+    content: `SMS_TARGET_NUMBER_E164: ${customerNumber}. Use this exact number for any SMS.`,
+  });
+
   if (factsBlock) messages.push({ role: "user", content: factsBlock });
 
   if (smsEnabled && discountLink) {
@@ -898,21 +1094,26 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       smsEnabled,
       smsFrom: smsEnabled ? smsFrom : null,
     },
+    phone_resolution: {
+      rawPhone,
+      checkoutPhoneRaw,
+      jobPhoneRaw,
+      resolvedE164: customerNumber,
+      inferredIso2,
+      inferredCallingCode,
+      at: new Date().toISOString(),
+    },
   });
-
-  // Enforce E.164 BEFORE calling Vapi (fixes INVALID_PHONE_NUMBER)
-  const customerNumber = normalizePhoneE164((job as any).phone);
-  if (!customerNumber) {
-    await db.callJob.update({
-      where: { id: job.id },
-      data: { status: "FAILED", outcome: `INVALID_PHONE_E164: ${String((job as any).phone ?? "")}`, analysisJson: nextAnalysisJson },
-    });
-    throw new Error(`Invalid customer phone (E.164 required): ${String((job as any).phone ?? "")}`);
-  }
 
   await db.callJob.update({
     where: { id: job.id },
-    data: { status: "CALLING", provider: "vapi", outcome: null, analysisJson: nextAnalysisJson },
+    data: {
+      status: "CALLING",
+      provider: "vapi",
+      outcome: null,
+      analysisJson: nextAnalysisJson,
+      phone: customerNumber, // keep CallJob consistent for next runs/UI
+    },
   });
 
   const webhookUrl = VAPI_SERVER_URL.replace(/\/$/, "");
@@ -942,12 +1143,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
         },
 
         serverUrl: webhookUrl,
-        serverMessages: [
-          "status-update",
-          "end-of-call-report",
-          'transcript[transcriptType="final"]',
-          "tool-calls",
-        ],
+        serverMessages: ["status-update", "end-of-call-report", 'transcript[transcriptType="final"]', "tool-calls"],
 
         metadata: {
           shop: params.shop,
