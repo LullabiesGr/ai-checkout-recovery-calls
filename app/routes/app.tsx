@@ -50,6 +50,7 @@ export default function AppLayout() {
         <a href={link("/app/checkouts")}>Checkouts</a>
         <a href={link("/app/calls")}>Calls</a>
         <a href={link("/app/settings")}>Settings</a>
+        <a href={link("/app/billing")}>Billing</a>
       </NavMenu>
 
       <Page fullWidth>
