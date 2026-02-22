@@ -5,6 +5,18 @@ import { useFetcher, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
+import {
+  Page,
+  Layout,
+  Card,
+  BlockStack,
+  InlineStack,
+  Text,
+  Badge,
+  Button,
+  Divider,
+} from "@shopify/polaris";
+
 import { PLANS, isPlanKey, type PlanKey } from "../lib/billingPlans.shared";
 import {
   ensureBillingRow,
@@ -13,24 +25,6 @@ import {
   cancelActiveSubscription,
   requestCapIncrease,
 } from "../lib/billing.server";
-
-declare global {
-  namespace JSX {
-    interface IntrinsicElements {
-      "s-page": any;
-      "s-section": any;
-      "s-box": any;
-      "s-text": any;
-      "s-heading": any;
-      "s-badge": any;
-      "s-grid": any;
-      "s-stack": any;
-      "s-divider": any;
-      "s-button": any;
-      "s-button-group": any;
-    }
-  }
-}
 
 type LoaderData = {
   shop: string;
@@ -44,7 +38,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   await ensureBillingRow(shop);
   const sync = await syncBillingFromShopify({ shop, admin });
-
   const billing = await db.shopBilling.findUnique({ where: { shop } });
 
   return {
@@ -111,10 +104,10 @@ function formatEUR(amount: number) {
 
 function badgeToneFromStatus(status: string) {
   const s = String(status || "").toUpperCase();
-  if (s === "ACTIVE") return "success";
-  if (s === "PENDING") return "warning";
-  if (s === "CANCELLED") return "critical";
-  return "info";
+  if (s === "ACTIVE") return "success" as const;
+  if (s === "PENDING") return "warning" as const;
+  if (s === "CANCELLED") return "critical" as const;
+  return "info" as const;
 }
 
 function topRedirect(url: string) {
@@ -128,7 +121,7 @@ function topRedirect(url: string) {
 }
 
 export default function BillingRoute() {
-  const { billing, usage } = useLoaderData<typeof loader>();
+  const { shop, billing, usage } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<any>();
 
   React.useEffect(() => {
@@ -143,60 +136,60 @@ export default function BillingRoute() {
   const freeRemainingSec = Math.max(0, 10 * 60 - Number(billing?.freeSecondsUsed || 0));
   const freeRemainingMin = Math.floor(freeRemainingSec / 60);
 
-  const includedUsedSec = Number(billing?.includedSecondsUsed || 0);
   const plan = PLANS[activePlanKey] ?? PLANS.FREE;
+
+  const includedUsedSec = Number(billing?.includedSecondsUsed || 0);
   const includedTotalSec = plan.includedMinutes * 60;
   const includedRemainingMin = Math.max(0, Math.floor((includedTotalSec - includedUsedSec) / 60));
 
   const balanceUsed = usage?.balanceUsed ? Number(usage.balanceUsed.amount) : null;
   const capAmount = usage?.cappedAmount ? Number(usage.cappedAmount.amount) : null;
 
+  const isBusy = fetcher.state === "submitting" || fetcher.state === "loading";
+
   return (
-    <s-page>
-      <s-section>
-        <s-box padding="600">
-          <s-heading level="1">Billing</s-heading>
-          <s-text tone="subdued">Manage plan, included minutes, usage cap.</s-text>
-        </s-box>
+    <Page title="Billing" subtitle={shop}>
+      <Layout>
+        <Layout.Section>
+          <Card>
+            <BlockStack gap="300">
+              <InlineStack align="space-between">
+                <Text as="h2" variant="headingMd">
+                  Current plan
+                </Text>
+                <Badge tone={badgeToneFromStatus(status)}>{status}</Badge>
+              </InlineStack>
 
-        <s-grid columns="2" gap="500">
-          <s-box padding="600" border="base" borderRadius="400" background="bg-surface">
-            <s-stack direction="vertical" gap="300">
-              <s-stack direction="horizontal" align="space-between">
-                <s-heading level="2">Current plan</s-heading>
-                <s-badge tone={badgeToneFromStatus(status)}>{status}</s-badge>
-              </s-stack>
-
-              <s-text>
+              <Text as="p">
                 Plan: <b>{activePlanKey}</b>
-              </s-text>
+              </Text>
 
               {activePlanKey === "FREE" ? (
-                <s-text>
+                <Text as="p">
                   Free minutes remaining: <b>{freeRemainingMin} min</b>
-                </s-text>
+                </Text>
               ) : (
                 <>
-                  <s-text>
+                  <Text as="p">
                     Included minutes remaining (this cycle): <b>{includedRemainingMin} min</b>
-                  </s-text>
+                  </Text>
                   {balanceUsed != null && capAmount != null ? (
-                    <s-text>
+                    <Text as="p">
                       Usage spend (this cycle): <b>{formatEUR(balanceUsed)}</b> / cap <b>{formatEUR(capAmount)}</b>
-                    </s-text>
+                    </Text>
                   ) : null}
                 </>
               )}
 
-              <s-divider />
+              <Divider />
 
-              <s-button-group>
+              <InlineStack gap="200">
                 {activePlanKey !== "FREE" ? (
                   <fetcher.Form method="post">
                     <input type="hidden" name="intent" value="cancel" />
-                    <s-button tone="critical" type="submit">
+                    <Button tone="critical" submit loading={isBusy}>
                       Cancel subscription
-                    </s-button>
+                    </Button>
                   </fetcher.Form>
                 ) : null}
 
@@ -204,61 +197,65 @@ export default function BillingRoute() {
                   <fetcher.Form method="post">
                     <input type="hidden" name="intent" value="increase_cap" />
                     <input type="hidden" name="newCapEUR" value={String((capAmount ?? plan.usageCapEUR) + 50)} />
-                    <s-button type="submit">Increase cap +€50</s-button>
+                    <Button submit loading={isBusy}>
+                      Increase cap +€50
+                    </Button>
                   </fetcher.Form>
                 ) : null}
-              </s-button-group>
-            </s-stack>
-          </s-box>
+              </InlineStack>
+            </BlockStack>
+          </Card>
+        </Layout.Section>
 
-          <s-box padding="600" border="base" borderRadius="400" background="bg-surface">
-            <s-stack direction="vertical" gap="400">
-              <s-heading level="2">Plans</s-heading>
+        <Layout.Section>
+          <Card>
+            <BlockStack gap="400">
+              <Text as="h2" variant="headingMd">
+                Plans
+              </Text>
 
-              <s-stack direction="vertical" gap="300">
-                {(["FREE", "STARTER", "PRO", "SCALE", "PAYG"] as PlanKey[]).map((k) => {
-                  const p = PLANS[k];
-                  const isActive = k === activePlanKey;
+              {(["FREE", "STARTER", "PRO", "SCALE", "PAYG"] as PlanKey[]).map((k) => {
+                const p = PLANS[k];
+                const isActive = k === activePlanKey;
 
-                  return (
-                    <s-box key={k} padding="500" border="base" borderRadius="300" background="bg-surface">
-                      <s-stack direction="vertical" gap="250">
-                        <s-stack direction="horizontal" align="space-between">
-                          <s-heading level="3">
-                            {p.title} ({k})
-                          </s-heading>
-                          {isActive ? <s-badge tone="success">Active</s-badge> : null}
-                        </s-stack>
+                return (
+                  <Card key={k} sectioned>
+                    <BlockStack gap="200">
+                      <InlineStack align="space-between">
+                        <Text as="h3" variant="headingSm">
+                          {p.title} ({k})
+                        </Text>
+                        {isActive ? <Badge tone="success">Active</Badge> : null}
+                      </InlineStack>
 
-                        {k === "FREE" ? (
-                          <s-text>€0/month • 10 free phone minutes (one-time)</s-text>
-                        ) : k === "PAYG" ? (
-                          <s-text>
-                            €0/month • €{p.overageEURPerMin.toFixed(2)}/min • cap {formatEUR(p.usageCapEUR)}
-                          </s-text>
-                        ) : (
-                          <s-text>
-                            {formatEUR(p.recurringMonthlyEUR)}/month • {p.includedMinutes} included min • €
-                            {p.overageEURPerMin.toFixed(2)}/min after • cap {formatEUR(p.usageCapEUR)}
-                          </s-text>
-                        )}
+                      {k === "FREE" ? (
+                        <Text as="p">€0/month • 10 free phone minutes (one-time)</Text>
+                      ) : k === "PAYG" ? (
+                        <Text as="p">
+                          €0/month • €{p.overageEURPerMin.toFixed(2)}/min • cap {formatEUR(p.usageCapEUR)}
+                        </Text>
+                      ) : (
+                        <Text as="p">
+                          {formatEUR(p.recurringMonthlyEUR)}/month • {p.includedMinutes} included min • €
+                          {p.overageEURPerMin.toFixed(2)}/min after • cap {formatEUR(p.usageCapEUR)}
+                        </Text>
+                      )}
 
-                        <fetcher.Form method="post">
-                          <input type="hidden" name="intent" value="select_plan" />
-                          <input type="hidden" name="plan" value={k} />
-                          <s-button type="submit" disabled={isActive}>
-                            {isActive ? "Selected" : "Select"}
-                          </s-button>
-                        </fetcher.Form>
-                      </s-stack>
-                    </s-box>
-                  );
-                })}
-              </s-stack>
-            </s-stack>
-          </s-box>
-        </s-grid>
-      </s-section>
-    </s-page>
+                      <fetcher.Form method="post">
+                        <input type="hidden" name="intent" value="select_plan" />
+                        <input type="hidden" name="plan" value={k} />
+                        <Button submit disabled={isActive} loading={isBusy}>
+                          {isActive ? "Selected" : "Select"}
+                        </Button>
+                      </fetcher.Form>
+                    </BlockStack>
+                  </Card>
+                );
+              })}
+            </BlockStack>
+          </Card>
+        </Layout.Section>
+      </Layout>
+    </Page>
   );
 }
