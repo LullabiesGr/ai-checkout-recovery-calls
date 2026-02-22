@@ -58,7 +58,8 @@ function pickGoal(v: any): Goal {
 
 function pickOfferRule(v: any): OfferRule {
   const s = String(v ?? "").trim().toLowerCase();
-  if (s === "price_objection" || s === "after_first_objection" || s === "always" || s === "ask_only") return s as OfferRule;
+  if (s === "price_objection" || s === "after_first_objection" || s === "always" || s === "ask_only")
+    return s as OfferRule;
   return "ask_only";
 }
 
@@ -183,6 +184,38 @@ function cleanLine(s: any) {
     .trim();
 }
 
+// =========================
+// Phone normalization (E.164)
+// =========================
+function normalizePhoneE164(raw: any): string | null {
+  const input = String(raw ?? "").trim();
+  if (!input) return null;
+
+  let s = input.replace(/^tel:/i, "").trim();
+
+  if (s.startsWith("00")) s = "+" + s.slice(2);
+  if (s.startsWith("011")) s = "+" + s.slice(3);
+
+  const hasPlus = s.startsWith("+");
+  const digits = s.replace(/\D/g, "");
+  if (!digits) return null;
+
+  if (hasPlus) {
+    if (digits.length < 8 || digits.length > 15) return null;
+    return "+" + digits;
+  }
+
+  // Heuristics for common cases
+  if (digits.length === 11 && digits.startsWith("1")) return "+" + digits; // US/CA
+  if (digits.length === 10 && (digits.startsWith("69") || digits.startsWith("2"))) return "+30" + digits; // GR
+  if (digits.length === 10 && digits.startsWith("0") && (digits[1] === "6" || digits[1] === "2"))
+    return "+30" + digits.slice(1);
+
+  if (digits.length >= 11 && digits.length <= 15) return "+" + digits;
+
+  return null;
+}
+
 async function readPreviousCallMemory(params: {
   shop: string;
   checkoutId: string;
@@ -190,7 +223,6 @@ async function readPreviousCallMemory(params: {
 }): Promise<string | null> {
   const { shop, checkoutId, currentCallJobId } = params;
 
-  // Prefer vapi_call_summaries (safe minimal columns). If query fails, fallback to CallJob.
   try {
     const rows = await (db as any).$queryRaw<PrevSummaryRow[]>`
       select
@@ -218,7 +250,6 @@ async function readPreviousCallMemory(params: {
     // ignore
   }
 
-  // Fallback to CallJob fields
   const prevJob = await db.callJob.findFirst({
     where: {
       shop,
@@ -277,12 +308,7 @@ function mergeAnalysisJson(prev: string | null, patch: any) {
 
 function extractRecoveryUrlFromCheckoutRaw(raw: string | null): string | null {
   const j = safeJsonParse(raw);
-  const u =
-    j?.abandonedCheckoutUrl ||
-    j?.abandoned_checkout_url ||
-    j?.recovery_url ||
-    j?.recoveryUrl ||
-    null;
+  const u = j?.abandonedCheckoutUrl || j?.abandoned_checkout_url || j?.recovery_url || j?.recoveryUrl || null;
   const out = String(u ?? "").trim();
   return out ? out : null;
 }
@@ -307,7 +333,6 @@ function normalizePrefix(prefix: string | null) {
 function codeFragmentFromCustomerName(name: string | null | undefined) {
   let s = String(name ?? "").trim();
   if (!s) return "VIP";
-  // strip diacritics, keep letters+numbers only
   s = s.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
   s = s.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
   return s.slice(0, 10) || "VIP";
@@ -317,8 +342,7 @@ function makeUniqueCode(args: { customerName?: string | null; percent: number; p
   const nameFrag = codeFragmentFromCustomerName(args.customerName);
   const pct = Math.max(1, Math.min(99, Math.floor(Number(args.percent) || 0)));
   const pfx = normalizePrefix(args.prefix ?? "OFFER").slice(0, 8);
-  const rand = randomBytes(3).toString("hex").toUpperCase(); // 6 chars
-  // Example: OFFER-JOHNDOE-10-A1B2C3
+  const rand = randomBytes(3).toString("hex").toUpperCase();
   return `${pfx}-${nameFrag}-${pct}-${rand}`.slice(0, 45);
 }
 
@@ -340,7 +364,7 @@ function buildSmsText(args: {
 }
 
 // =========================
-// Shopify Discount Creation (Step 2)
+// Shopify Discount Creation
 // =========================
 
 const SHOPIFY_ADMIN_API_VERSION = process.env.SHOPIFY_ADMIN_API_VERSION ?? "2026-01";
@@ -418,7 +442,7 @@ async function createDiscountCodeBasic(params: {
   `;
 
   const pct = Math.max(1, Math.min(99, Math.floor(Number(params.percent) || 0)));
-  const percentage = Math.max(0.01, Math.min(0.99, pct / 100)); // e.g. 10 -> 0.1
+  const percentage = Math.max(0.01, Math.min(0.99, pct / 100));
 
   const basicCodeDiscount: any = {
     title: `${pct}% Recovery`,
@@ -426,13 +450,8 @@ async function createDiscountCodeBasic(params: {
     startsAt: params.startsAt,
     endsAt: params.endsAt,
     appliesOncePerCustomer: true,
-    customerSelection: params.customerGid
-      ? { customers: { add: [params.customerGid] } }
-      : { all: true },
-    customerGets: {
-      value: { percentage },
-      items: { all: true },
-    },
+    customerSelection: params.customerGid ? { customers: { add: [params.customerGid] } } : { all: true },
+    customerGets: { value: { percentage }, items: { all: true } },
   };
 
   const out = await shopifyGraphql(params.shop, params.accessToken, mutation, { basicCodeDiscount });
@@ -667,11 +686,7 @@ Offer context (use these exact fields):
   const merchant = (merchantPrompt ?? "").trim();
 
   if (mode === "default_only") return base;
-
-  if (mode === "replace") {
-    return merchant ? merchant : base;
-  }
-
+  if (mode === "replace") return merchant ? merchant : base;
   if (!merchant) return base;
   return `${base}\n\nMerchant instructions (must follow):\n${merchant}`.trim();
 }
@@ -728,23 +743,18 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
         })
       : null;
 
-  // =========================
-  // Checkout link
-  // =========================
   const recoveryUrl = extractRecoveryUrlFromCheckoutRaw(checkout.raw);
 
-  // =========================
-  // Create Shopify coupon code (unique) if allowed
-  // =========================
   const minOk =
     playbook.minCartValueForDiscount == null ? true : Number(checkout.value) >= Number(playbook.minCartValueForDiscount);
 
   const discountPercent = playbook.discountEnabled && minOk ? Number(playbook.maxDiscountPercent || 0) : 0;
 
-  // reuse if already created for this CallJob
   const existingOffer = safeJsonParse(job.analysisJson)?.offer ?? null;
   let offerCode: string | null = existingOffer?.offerCode ? String(existingOffer.offerCode) : null;
-  let discountNodeId: string | null = existingOffer?.shopifyDiscountNodeId ? String(existingOffer.shopifyDiscountNodeId) : null;
+  let discountNodeId: string | null = existingOffer?.shopifyDiscountNodeId
+    ? String(existingOffer.shopifyDiscountNodeId)
+    : null;
   let offerCreateError: string | null = null;
 
   if (!offerCode && discountPercent > 0) {
@@ -771,7 +781,6 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
 
         if (created.userErrors?.length) {
           const msg = created.userErrors.map((e) => String(e?.message ?? "")).join(" | ");
-          // retry only on typical collision errors
           if (msg.toLowerCase().includes("code") && msg.toLowerCase().includes("taken")) continue;
           throw new Error(msg);
         }
@@ -791,16 +800,10 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
 
   const discountLink = offerCode && recoveryUrl ? appendDiscountParam(recoveryUrl, offerCode) : recoveryUrl;
 
-  // =========================
-  // SMS tool enablement
-  // =========================
   const smsFrom = String(process.env.VAPI_SMS_FROM_NUMBER ?? "").trim(); // E.164
   const smsEnabled = Boolean(playbook.followupSmsEnabled) && Boolean(smsFrom) && Boolean(discountLink);
   const tools = smsEnabled ? [{ type: "sms", metadata: { from: smsFrom } }] : undefined;
 
-  // =========================
-  // Prompt build
-  // =========================
   const promptMode = pickPromptMode((settings as any)?.promptMode ?? "append");
   const merchantPrompt = String((settings as any)?.userPrompt ?? "");
 
@@ -811,7 +814,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     previousMemory,
     smsEnabled,
     offer: {
-      checkoutLink: discountLink ?? null, // send link with ?discount=CODE when available
+      checkoutLink: discountLink ?? null,
       offerCode: offerCode ?? null,
       discountPercent: offerCode ? discountPercent : null,
       couponValidityHours: playbook.couponValidityHours,
@@ -856,10 +859,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       discountPercent: offerCode ? discountPercent : null,
       couponValidityHours: playbook.couponValidityHours,
     });
-    messages.push({
-      role: "user",
-      content: `If you decide to send an SMS, use this exact message:\n${smsText}`,
-    });
+    messages.push({ role: "user", content: `If you decide to send an SMS, use this exact message:\n${smsText}` });
   }
 
   messages.push({
@@ -870,7 +870,6 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
         : "Start the call now. Greet the customer, mention they almost completed checkout, and ask if they want help finishing the order.",
   });
 
-  // Persist offer context (analytics + debugging)
   const nextAnalysisJson = mergeAnalysisJson(job.analysisJson ?? null, {
     offer: {
       checkoutLink: recoveryUrl,
@@ -885,6 +884,16 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       smsFrom: smsEnabled ? smsFrom : null,
     },
   });
+
+  // Enforce E.164 BEFORE calling Vapi (fixes INVALID_PHONE_NUMBER)
+  const customerNumber = normalizePhoneE164((job as any).phone);
+  if (!customerNumber) {
+    await db.callJob.update({
+      where: { id: job.id },
+      data: { status: "FAILED", outcome: `INVALID_PHONE_E164: ${String((job as any).phone ?? "")}`, analysisJson: nextAnalysisJson },
+    });
+    throw new Error(`Invalid customer phone (E.164 required): ${String((job as any).phone ?? "")}`);
+  }
 
   await db.callJob.update({
     where: { id: job.id },
@@ -905,7 +914,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       assistantId: VAPI_ASSISTANT_ID,
 
       customer: {
-        number: (job as any).phone,
+        number: customerNumber,
         name: checkout.customerName ?? undefined,
       },
 
@@ -914,11 +923,16 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
           provider: "openai",
           model: "gpt-4o-mini",
           messages,
-          tools, // ✅ sms tool available when configured
+          ...(tools ? { tools } : {}),
         },
 
         serverUrl: webhookUrl,
-        serverMessages: ["status-update", "end-of-call-report", 'transcript[transcriptType="final"]'],
+        serverMessages: [
+          "status-update",
+          "end-of-call-report",
+          'transcript[transcriptType="final"]',
+          "tool-calls",
+        ],
 
         metadata: {
           shop: params.shop,
@@ -949,7 +963,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
 
   await db.callJob.update({
     where: { id: job.id },
-    data: { providerCallId: providerCallId || null, outcome: "VAPI_CALL_CREATED", status: "CALLING" },
+      data: { providerCallId: providerCallId || null, outcome: "VAPI_CALL_CREATED", status: "CALLING" },
   });
 
   return { ok: true, providerCallId, raw: json };

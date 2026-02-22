@@ -21,6 +21,38 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, x));
 }
 
+// =========================
+// Phone normalization (E.164)
+// =========================
+function normalizePhoneE164(raw: any): string | null {
+  const input = String(raw ?? "").trim();
+  if (!input) return null;
+
+  let s = input.replace(/^tel:/i, "").trim();
+
+  if (s.startsWith("00")) s = "+" + s.slice(2);
+  if (s.startsWith("011")) s = "+" + s.slice(3);
+
+  const hasPlus = s.startsWith("+");
+  const digits = s.replace(/\D/g, "");
+  if (!digits) return null;
+
+  if (hasPlus) {
+    if (digits.length < 8 || digits.length > 15) return null;
+    return "+" + digits;
+  }
+
+  if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
+
+  if (digits.length === 10 && (digits.startsWith("69") || digits.startsWith("2"))) return "+30" + digits;
+  if (digits.length === 10 && digits.startsWith("0") && (digits[1] === "6" || digits[1] === "2"))
+    return "+30" + digits.slice(1);
+
+  if (digits.length >= 11 && digits.length <= 15) return "+" + digits;
+
+  return null;
+}
+
 /**
  * If target is inside window -> keep.
  * Else move to next window start (same day or next day).
@@ -39,19 +71,12 @@ function adjustToWindow(target: Date, startHHMM: string, endHHMM: string) {
   next.setSeconds(0, 0);
   next.setHours(Math.floor(windowStart / 60), windowStart % 60, 0, 0);
 
-  // If target is after today's end, schedule next day start
-  if (tMins > windowEnd) {
-    next.setDate(next.getDate() + 1);
-  }
+  if (tMins > windowEnd) next.setDate(next.getDate() + 1);
 
   return next;
 }
 
-export async function syncAbandonedCheckoutsFromShopify(params: {
-  admin: AdminClient;
-  shop: string;
-  limit?: number;
-}) {
+export async function syncAbandonedCheckoutsFromShopify(params: { admin: AdminClient; shop: string; limit?: number }) {
   const { admin, shop } = params;
   const limit = Math.min(Math.max(params.limit ?? 50, 1), 100);
 
@@ -123,9 +148,8 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
       const currency = String(n?.totalPriceSet?.shopMoney?.currencyCode ?? "USD");
       const completedAt = n?.completedAt ? new Date(n.completedAt) : null;
 
-      // IMPORTANT:
-      // - Keep status ABANDONED (Shopify already considers it abandoned)
-      // - Use abandonedAt = Shopify updatedAt/createdAt so delay can be enforced reliably
+      const phoneE164 = normalizePhoneE164(n?.phone);
+
       const abandonedAt = completedAt ? null : new Date(n?.updatedAt ?? n?.createdAt ?? Date.now());
 
       await db.checkout.upsert({
@@ -135,7 +159,7 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
           checkoutId,
           token: null,
           email: n?.email ?? null,
-          phone: n?.phone ?? null,
+          phone: phoneE164,
           value: Number.isFinite(amount) ? amount : 0,
           currency,
           status: completedAt ? "CONVERTED" : "ABANDONED",
@@ -146,7 +170,7 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
         },
         update: {
           email: n?.email ?? null,
-          phone: n?.phone ?? null,
+          phone: phoneE164,
           value: Number.isFinite(amount) ? amount : 0,
           currency,
           status: completedAt ? "CONVERTED" : "ABANDONED",
@@ -183,7 +207,7 @@ export async function ensureSettings(shop: string) {
         vapiAssistantId: null,
         vapiPhoneNumberId: null,
         userPrompt: "",
-        promptMode: "append", // PromptMode enum value
+        promptMode: "append",
       } as any,
     }))
   );
@@ -192,8 +216,6 @@ export async function ensureSettings(shop: string) {
 export async function markAbandonedByDelay(shop: string, delayMinutes: number) {
   const cutoff = new Date(Date.now() - delayMinutes * 60 * 1000);
 
-  // Use updatedAt so “last activity” drives abandonment timing.
-  // Also avoid re-updating abandonedAt repeatedly.
   return db.checkout.updateMany({
     where: {
       shop,
@@ -208,17 +230,6 @@ export async function markAbandonedByDelay(shop: string, delayMinutes: number) {
   });
 }
 
-/**
- * ENQUEUE (FAST + IMMEDIATE)
- *
- * - Creates CallJob immediately (so UI shows it right away), even if scheduledFor is in the future.
- * - scheduledFor still respects: abandonedAt + delayMinutes and call window.
- * - Prevents duplicates by skipping if any QUEUED/CALLING exists for that checkout.
- * - Avoids N+1: does a single batch query for all CallJobs for candidate checkoutIds.
- *
- * NOTE: If you only run this via cron, the fastest it can appear is the next cron tick.
- * For true instant enqueue, call enqueueCallJobs() from the checkout webhook route too.
- */
 export async function enqueueCallJobs(params: {
   shop: string;
   enabled: boolean;
@@ -226,8 +237,8 @@ export async function enqueueCallJobs(params: {
   callWindowStart: string;
   callWindowEnd: string;
   delayMinutes: number;
-  maxAttempts: number; // per-checkout cap
-  retryMinutes: number; // spacing between attempts
+  maxAttempts: number;
+  retryMinutes: number;
 }) {
   const { shop, enabled, minOrderValue, callWindowStart, callWindowEnd, delayMinutes, maxAttempts, retryMinutes } =
     params;
@@ -239,7 +250,6 @@ export async function enqueueCallJobs(params: {
   const retryM = Math.max(0, Number(retryMinutes ?? 180));
   const maxA = clamp(Number(maxAttempts ?? 2), 1, 10);
 
-  // Candidates must be ABANDONED with phone and abandonedAt set.
   const candidates = await db.checkout.findMany({
     where: {
       shop,
@@ -256,37 +266,22 @@ export async function enqueueCallJobs(params: {
 
   const checkoutIds = candidates.map((c) => c.checkoutId);
 
-  // Batch query all existing jobs for these checkouts (single query).
   const existingJobs = await db.callJob.findMany({
-    where: {
-      shop,
-      checkoutId: { in: checkoutIds },
-    },
-    select: {
-      checkoutId: true,
-      status: true,
-      createdAt: true,
-      scheduledFor: true,
-    },
+    where: { shop, checkoutId: { in: checkoutIds } },
+    select: { checkoutId: true, status: true, createdAt: true, scheduledFor: true },
     orderBy: { createdAt: "desc" },
     take: 5000,
   });
 
   const totalCount = new Map<string, number>();
   const hasInFlight = new Set<string>();
-  const lastJob = new Map<
-    string,
-    { status: string; createdAt: Date; scheduledFor: Date | null }
-  >();
+  const lastJob = new Map<string, { status: string; createdAt: Date; scheduledFor: Date | null }>();
 
   for (const j of existingJobs) {
     totalCount.set(j.checkoutId, (totalCount.get(j.checkoutId) ?? 0) + 1);
 
-    if (j.status === "QUEUED" || j.status === "CALLING") {
-      hasInFlight.add(j.checkoutId);
-    }
+    if (j.status === "QUEUED" || j.status === "CALLING") hasInFlight.add(j.checkoutId);
 
-    // Because we ordered by createdAt desc, first job per checkout is latest.
     if (!lastJob.has(j.checkoutId)) {
       lastJob.set(j.checkoutId, {
         status: String(j.status),
@@ -299,8 +294,8 @@ export async function enqueueCallJobs(params: {
   let enqueued = 0;
 
   for (const c of candidates) {
-    const phone = String((c as any).phone || "").trim();
-    if (!phone) continue;
+    const phoneE164 = normalizePhoneE164((c as any).phone);
+    if (!phoneE164) continue;
 
     if (hasInFlight.has(c.checkoutId)) continue;
 
@@ -309,16 +304,13 @@ export async function enqueueCallJobs(params: {
 
     const last = lastJob.get(c.checkoutId) ?? null;
 
-    // Compute next target time from SETTINGS minutes (not cron tick time)
     let target: Date;
 
     if (!last) {
       const base = new Date(c.abandonedAt as any);
       target = new Date(base.getTime() + delayM * 60 * 1000);
     } else {
-      // Next attempt only after terminal status
       if (last.status !== "FAILED" && last.status !== "COMPLETED") continue;
-
       const anchor = new Date((last.scheduledFor ?? last.createdAt) as any);
       target = new Date(anchor.getTime() + retryM * 60 * 1000);
     }
@@ -330,14 +322,13 @@ export async function enqueueCallJobs(params: {
         data: {
           shop,
           checkoutId: c.checkoutId,
-          phone,
+          phone: phoneE164,
           scheduledFor,
           status: "QUEUED",
           attempts: 0,
         },
       });
 
-      // Update local caches so we don't enqueue twice in the same run
       hasInFlight.add(c.checkoutId);
       totalCount.set(c.checkoutId, total + 1);
       lastJob.set(c.checkoutId, { status: "QUEUED", createdAt: new Date(), scheduledFor });
