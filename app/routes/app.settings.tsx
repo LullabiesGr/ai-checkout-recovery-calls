@@ -29,6 +29,7 @@ import {
 type Tone = "neutral" | "friendly" | "premium" | "urgent";
 type Goal = "complete_checkout" | "qualify_and_follow_up" | "support_only";
 type OfferRule = "ask_only" | "price_objection" | "after_first_objection" | "always";
+type PromptMode = "append" | "replace";
 
 type ExtrasRow = {
   tone: string | null;
@@ -77,6 +78,7 @@ type LoaderData = {
     followupEmailEnabled: boolean;
     followupSmsEnabled: boolean;
 
+    promptMode: PromptMode;
     userPrompt: string;
   };
 };
@@ -130,6 +132,11 @@ function pickCurrency(v: any): string {
   const s = String(v ?? "").trim().toUpperCase();
   if (s === "USD" || s === "EUR" || s === "GBP") return s;
   return "USD";
+}
+function pickPromptMode(v: any): PromptMode {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "replace" || s === "append") return s as PromptMode;
+  return "append";
 }
 
 /**
@@ -255,6 +262,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     followupEmailEnabled: Boolean(extras?.followup_email_enabled ?? true),
     followupSmsEnabled: Boolean(extras?.followup_sms_enabled ?? false),
 
+    promptMode: pickPromptMode((base as any).promptMode ?? "append"),
     userPrompt: String((base as any).userPrompt ?? ""),
   };
 
@@ -297,6 +305,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const followupEmailEnabled = toBool(fd.get("followupEmailEnabled"));
   const followupSmsEnabled = toBool(fd.get("followupSmsEnabled"));
 
+  const promptMode = pickPromptMode(fd.get("promptMode") ?? (base as any).promptMode ?? "append");
   const userPrompt = String(fd.get("userPrompt") ?? "").trim();
 
   await db.settings.update({
@@ -310,6 +319,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       currency,
       callWindowStart,
       callWindowEnd,
+      promptMode,
       userPrompt,
       vapiAssistantId: null,
       vapiPhoneNumberId: null,
@@ -372,6 +382,7 @@ export default function Settings() {
   const [followupEmailEnabled, setFollowupEmailEnabled] = React.useState(settings.followupEmailEnabled);
   const [followupSmsEnabled, setFollowupSmsEnabled] = React.useState(settings.followupSmsEnabled);
 
+  const [promptMode, setPromptMode] = React.useState<PromptMode>(settings.promptMode);
   const [userPrompt, setUserPrompt] = React.useState(settings.userPrompt ?? "");
 
   const isSaving = fetcher.state === "submitting" || fetcher.state === "loading";
@@ -397,6 +408,10 @@ export default function Settings() {
     { label: "If price objection", value: "price_objection" },
     { label: "After first objection", value: "after_first_objection" },
     { label: "Offer proactively", value: "always" },
+  ];
+  const promptModeOptions = [
+    { label: "Use default prompt + my prompt", value: "append" },
+    { label: "Use only my prompt (advanced)", value: "replace" },
   ];
 
   return (
@@ -633,15 +648,27 @@ export default function Settings() {
                     Custom merchant prompt
                   </Text>
 
-                  <TextField
-                    label="Injected into every call"
-                    name="userPrompt"
-                    value={userPrompt}
-                    onChange={setUserPrompt}
-                    multiline={10}
-                    autoComplete="off"
-                    helpText="Rules, disclaimers, language, objection handling, store-specific constraints."
-                  />
+                  <FormLayout>
+                    <FormLayout.Group>
+                      <Select
+                        label="Prompt mode"
+                        name="promptMode"
+                        options={promptModeOptions}
+                        value={promptMode}
+                        onChange={(v) => setPromptMode(v as PromptMode)}
+                      />
+                    </FormLayout.Group>
+
+                    <TextField
+                      label="Injected into every call"
+                      name="userPrompt"
+                      value={userPrompt}
+                      onChange={setUserPrompt}
+                      multiline={10}
+                      autoComplete="off"
+                      helpText="Rules, disclaimers, language, objection handling, store-specific constraints."
+                    />
+                  </FormLayout>
                 </BlockStack>
               </Card>
 

@@ -11,6 +11,14 @@ type Tone = "neutral" | "friendly" | "premium" | "urgent";
 type Goal = "complete_checkout" | "qualify_and_follow_up" | "support_only";
 type OfferRule = "ask_only" | "price_objection" | "after_first_objection" | "always";
 
+type PromptMode = "append" | "replace" | "default_only";
+
+function pickPromptMode(v: any): PromptMode {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "replace" || s === "default_only" || s === "append") return s as PromptMode;
+  return "append";
+}
+
 type ExtrasRow = {
   tone: string | null;
   goal: string | null;
@@ -253,6 +261,87 @@ async function readPreviousCallMemory(params: {
     return trunc(parts.join("\n\n"), 1400);
   }
 
+
+function buildFactsBlock(args: {
+  attemptNumber: number;
+  previousMemory?: string | null;
+  checkout: {
+    checkoutId: string;
+    customerName?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    value: number;
+    currency: string;
+    itemsJson?: string | null;
+  };
+  playbook: {
+    tone: Tone;
+    goal: Goal;
+    maxCallSeconds: number;
+    maxFollowupQuestions: number;
+    discountEnabled: boolean;
+    maxDiscountPercent: number;
+    offerRule: OfferRule;
+    minCartValueForDiscount: number | null;
+    couponPrefix: string | null;
+    couponValidityHours: number;
+    freeShippingEnabled: boolean;
+    followupEmailEnabled: boolean;
+    followupSmsEnabled: boolean;
+  };
+}) {
+  const { checkout, playbook } = args;
+
+  const items = (() => {
+    try {
+      const arr = checkout.itemsJson ? JSON.parse(checkout.itemsJson) : [];
+      if (!Array.isArray(arr)) return [];
+      return arr.slice(0, 10);
+    } catch {
+      return [];
+    }
+  })();
+
+  const cartText =
+    items.length === 0
+      ? "No cart items available."
+      : items.map((it: any) => `- ${it?.title ?? "Item"} x${Number(it?.quantity ?? 1)}`).join("\n");
+
+  const memory = String(args.previousMemory ?? "").trim();
+
+  const lines: string[] = [];
+  lines.push(`CALL FACTS`);
+  lines.push(`attempt_number: ${Number(args.attemptNumber ?? 1)}`);
+  lines.push(`checkout_id: ${checkout.checkoutId}`);
+  lines.push(`customer_name: ${checkout.customerName ?? "-"}`);
+  lines.push(`email: ${checkout.email ?? "-"}`);
+  lines.push(`phone: ${checkout.phone ?? "-"}`);
+  lines.push(`cart_total: ${checkout.value} ${checkout.currency}`);
+  lines.push(`cart_items:\n${cartText}`);
+
+  lines.push(`\nCONFIGURED SETTINGS`);
+  lines.push(`tone: ${playbook.tone}`);
+  lines.push(`goal: ${playbook.goal}`);
+  lines.push(`max_call_seconds: ${playbook.maxCallSeconds}`);
+  lines.push(`max_followup_questions: ${playbook.maxFollowupQuestions}`);
+  lines.push(`discount_enabled: ${playbook.discountEnabled}`);
+  lines.push(`max_discount_percent: ${playbook.maxDiscountPercent}`);
+  lines.push(`offer_rule: ${playbook.offerRule}`);
+  lines.push(`min_cart_value_for_discount: ${playbook.minCartValueForDiscount ?? "none"}`);
+  lines.push(`coupon_prefix: ${playbook.couponPrefix ?? "none"}`);
+  lines.push(`coupon_validity_hours: ${playbook.couponValidityHours}`);
+  lines.push(`free_shipping_enabled: ${playbook.freeShippingEnabled}`);
+  lines.push(`followup_email_enabled: ${playbook.followupEmailEnabled}`);
+  lines.push(`followup_sms_enabled: ${playbook.followupSmsEnabled}`);
+
+  if (memory) {
+    lines.push(`\nPREVIOUS CALL MEMORY`);
+    lines.push(memory);
+  }
+
+  return trunc(lines.join("\n"), 1800);
+}
+
   // Fallback to CallJob fields
   const prevJob = await db.callJob.findFirst({
     where: {
@@ -298,8 +387,9 @@ async function readPreviousCallMemory(params: {
 
 function buildSystemPrompt(args: {
   merchantPrompt?: string | null;
-  attemptNumber?: number; // 1 for first call, 2+ for follow-ups
-  previousMemory?: string | null; // output of readPreviousCallMemory(...)
+  promptMode?: PromptMode;
+  attemptNumber?: number;
+  previousMemory?: string | null;
   checkout: {
     checkoutId: string;
     customerName?: string | null;
@@ -395,9 +485,18 @@ Context:
 ${cartText}
 `.trim();
 
+  const mode = pickPromptMode(args.promptMode ?? "append");
   const merchant = (merchantPrompt ?? "").trim();
-  if (!merchant) return base;
 
+  if (mode === "default_only") return base;
+
+  if (mode === "replace") {
+    // system = only merchant prompt (fallback to base if empty so calls still work)
+    return merchant ? merchant : base;
+  }
+
+  // append (current behavior)
+  if (!merchant) return base;
   return `${base}\n\nMerchant instructions (must follow):\n${merchant}`.trim();
 }
 
@@ -450,8 +549,12 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
         })
       : null;
 
+    const promptMode = pickPromptMode((settings as any)?.promptMode ?? "append");
+  const merchantPrompt = String((settings as any)?.userPrompt ?? "");
+
   const systemPrompt = buildSystemPrompt({
-    merchantPrompt: (settings as any)?.userPrompt ?? "",
+    merchantPrompt,
+    promptMode,
     attemptNumber,
     previousMemory,
     checkout: {
@@ -466,6 +569,35 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     playbook,
   });
 
+  const factsBlock =
+    promptMode === "replace" && merchantPrompt.trim()
+      ? buildFactsBlock({
+          attemptNumber,
+          previousMemory,
+          checkout: {
+            checkoutId: String(checkout.checkoutId),
+            customerName: checkout.customerName,
+            email: checkout.email,
+            phone: checkout.phone,
+            value: checkout.value,
+            currency: checkout.currency,
+            itemsJson: checkout.itemsJson,
+          },
+          playbook,
+        })
+      : null;
+
+  const messages: Array<{ role: "system" | "user"; content: string }> = [{ role: "system", content: systemPrompt }];
+  if (factsBlock) messages.push({ role: "user", content: factsBlock });
+
+  messages.push({
+    role: "user",
+    content:
+      attemptNumber >= 2
+        ? "Follow-up call. Reference the previous memory if relevant. Keep it short and move to a concrete next step."
+        : "Start the call now. Greet the customer, mention they almost completed checkout, and ask if they want help finishing the order.",
+  });
+
   // runner already increments attempts; keep this idempotent here.
   await db.callJob.update({
     where: { id: job.id },
@@ -475,54 +607,45 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
   const webhookUrl = VAPI_SERVER_URL.replace(/\/$/, "");
 
   const res = await fetch("https://api.vapi.ai/call/phone", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${VAPI_API_KEY}`,
-      Accept: "application/json",
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${VAPI_API_KEY}`,
+    Accept: "application/json",
+  },
+  body: JSON.stringify({
+    phoneNumberId: VAPI_PHONE_NUMBER_ID,
+    assistantId: VAPI_ASSISTANT_ID,
+
+    customer: {
+      number: (job as any).phone,
+      name: checkout.customerName ?? undefined,
     },
-    body: JSON.stringify({
-      phoneNumberId: VAPI_PHONE_NUMBER_ID,
-      assistantId: VAPI_ASSISTANT_ID,
 
-      customer: {
-        number: (job as any).phone,
-        name: checkout.customerName ?? undefined,
+    assistant: {
+      model: {
+        provider: "openai",
+        model: "gpt-4o-mini",
+        messages, // ✅ use computed messages (includes factsBlock when replace)
       },
 
-      assistant: {
-        model: {
-          provider: "openai",
-          model: "gpt-4o-mini",
-          messages: [
-            { role: "system", content: systemPrompt },
-            {
-              role: "user",
-              content:
-                attemptNumber >= 2
-                  ? "Follow-up call. Use the Previous call memory block to reference what happened last time and continue from the customer's last intent/objections. Keep it short and move to a concrete next step."
-                  : "Start the call now. Greet the customer, mention they almost completed checkout, and ask if they want help finishing the order.",
-            },
-          ],
-        },
-
-        serverUrl: webhookUrl,
-        serverMessages: ["status-update", "end-of-call-report", 'transcript[transcriptType="final"]'],
-
-        metadata: {
-          shop: params.shop,
-          callJobId: job.id,
-          checkoutId: job.checkoutId,
-        },
-      },
+      serverUrl: webhookUrl,
+      serverMessages: ["status-update", "end-of-call-report", 'transcript[transcriptType="final"]'],
 
       metadata: {
         shop: params.shop,
         callJobId: job.id,
         checkoutId: job.checkoutId,
       },
-    }),
-  });
+    },
+
+    metadata: {
+      shop: params.shop,
+      callJobId: job.id,
+      checkoutId: job.checkoutId,
+    },
+  }),
+});
 
   const json = await res.json().catch(() => null);
 

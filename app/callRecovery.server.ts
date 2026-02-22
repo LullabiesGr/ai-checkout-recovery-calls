@@ -182,6 +182,7 @@ export async function ensureSettings(shop: string) {
         vapiAssistantId: null,
         vapiPhoneNumberId: null,
         userPrompt: "",
+        promptMode: "append", // ✅ NEW DEFAULT
       } as any,
     }))
   );
