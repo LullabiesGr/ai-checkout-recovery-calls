@@ -39,7 +39,7 @@ function adjustToWindow(target: Date, startHHMM: string, endHHMM: string) {
   next.setSeconds(0, 0);
   next.setHours(Math.floor(windowStart / 60), windowStart % 60, 0, 0);
 
-  // if target is after today's end, schedule next day start
+  // If target is after today's end, schedule next day start
   if (tMins > windowEnd) {
     next.setDate(next.getDate() + 1);
   }
@@ -183,7 +183,7 @@ export async function ensureSettings(shop: string) {
         vapiAssistantId: null,
         vapiPhoneNumberId: null,
         userPrompt: "",
-        promptMode: "append", // default (enum value)
+        promptMode: "append", // PromptMode enum value
       } as any,
     }))
   );
@@ -207,15 +207,15 @@ export async function markAbandonedByDelay(shop: string, delayMinutes: number) {
 }
 
 /**
- * Enqueue logic (uses minutes from Settings):
- * - 1st call time is based on abandonedAt + delayMinutes (NOT "now")
- * - Next call is based on last attempt + retryMinutes
- * - Stops at maxAttempts
+ * ENQUEUE (FAST + IMMEDIATE)
  *
- * IMPORTANT CHANGE:
- * - We enqueue CallJobs immediately (even if scheduledFor is in the future)
- *   so the UI can show upcoming calls.
- * - Spam is prevented because we never enqueue if a QUEUED/CALLING job exists.
+ * - Creates CallJob immediately (so UI shows it right away), even if scheduledFor is in the future.
+ * - scheduledFor still respects: abandonedAt + delayMinutes and call window.
+ * - Prevents duplicates by skipping if any QUEUED/CALLING exists for that checkout.
+ * - Avoids N+1: does a single batch query for all CallJobs for candidate checkoutIds.
+ *
+ * NOTE: If you only run this via cron, the fastest it can appear is the next cron tick.
+ * For true instant enqueue, call enqueueCallJobs() from the checkout webhook route too.
  */
 export async function enqueueCallJobs(params: {
   shop: string;
@@ -250,53 +250,77 @@ export async function enqueueCallJobs(params: {
     take: 200,
   });
 
+  if (!candidates.length) return { enqueued: 0 };
+
+  const checkoutIds = candidates.map((c) => c.checkoutId);
+
+  // Batch query all existing jobs for these checkouts (single query).
+  const existingJobs = await db.callJob.findMany({
+    where: {
+      shop,
+      checkoutId: { in: checkoutIds },
+    },
+    select: {
+      checkoutId: true,
+      status: true,
+      createdAt: true,
+      scheduledFor: true,
+    },
+    orderBy: { createdAt: "desc" },
+    take: 5000,
+  });
+
+  const totalCount = new Map<string, number>();
+  const hasInFlight = new Set<string>();
+  const lastJob = new Map<
+    string,
+    { status: string; createdAt: Date; scheduledFor: Date | null }
+  >();
+
+  for (const j of existingJobs) {
+    totalCount.set(j.checkoutId, (totalCount.get(j.checkoutId) ?? 0) + 1);
+
+    if (j.status === "QUEUED" || j.status === "CALLING") {
+      hasInFlight.add(j.checkoutId);
+    }
+
+    // Because we ordered by createdAt desc, first job per checkout is latest.
+    if (!lastJob.has(j.checkoutId)) {
+      lastJob.set(j.checkoutId, {
+        status: String(j.status),
+        createdAt: new Date(j.createdAt),
+        scheduledFor: (j as any).scheduledFor ? new Date((j as any).scheduledFor) : null,
+      });
+    }
+  }
+
   let enqueued = 0;
 
   for (const c of candidates) {
-    const phone = String(c.phone || "").trim();
+    const phone = String((c as any).phone || "").trim();
     if (!phone) continue;
 
-    // If there is already a queued/calling job, never create another.
-    const inFlight = await db.callJob.findFirst({
-      where: {
-        shop,
-        checkoutId: c.checkoutId,
-        status: { in: ["QUEUED", "CALLING"] },
-      },
-      select: { id: true },
-    });
-    if (inFlight) continue;
+    if (hasInFlight.has(c.checkoutId)) continue;
 
-    // Cap total call jobs per checkout
-    const totalForCheckout = await db.callJob.count({
-      where: { shop, checkoutId: c.checkoutId },
-    });
-    if (totalForCheckout >= maxA) continue;
+    const total = totalCount.get(c.checkoutId) ?? 0;
+    if (total >= maxA) continue;
 
-    // Last job (to compute the next allowed time)
-    const last = await db.callJob.findFirst({
-      where: { shop, checkoutId: c.checkoutId },
-      orderBy: { createdAt: "desc" },
-      select: { status: true, createdAt: true, scheduledFor: true },
-    });
+    const last = lastJob.get(c.checkoutId) ?? null;
 
-    // Compute target time from SETTINGS minutes (not from cron tick time)
+    // Compute next target time from SETTINGS minutes (not cron tick time)
     let target: Date;
 
     if (!last) {
-      // 1st attempt: abandonedAt + delayMinutes
       const base = new Date(c.abandonedAt as any);
       target = new Date(base.getTime() + delayM * 60 * 1000);
     } else {
       // Next attempt only after terminal status
       if (last.status !== "FAILED" && last.status !== "COMPLETED") continue;
 
-      // Anchor on last scheduledFor (preferred) or createdAt
-      const anchor = new Date((last as any).scheduledFor ?? last.createdAt);
+      const anchor = new Date((last.scheduledFor ?? last.createdAt) as any);
       target = new Date(anchor.getTime() + retryM * 60 * 1000);
     }
 
-    // Respect call window; if outside, move to next window start
     const scheduledFor = adjustToWindow(target, callWindowStart, callWindowEnd);
 
     try {
@@ -310,6 +334,11 @@ export async function enqueueCallJobs(params: {
           attempts: 0,
         },
       });
+
+      // Update local caches so we don't enqueue twice in the same run
+      hasInFlight.add(c.checkoutId);
+      totalCount.set(c.checkoutId, total + 1);
+      lastJob.set(c.checkoutId, { status: "QUEUED", createdAt: new Date(), scheduledFor });
 
       enqueued += 1;
     } catch (e: any) {
