@@ -61,6 +61,7 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
         edges {
           node {
             id
+            abandonedCheckoutUrl
             createdAt
             updatedAt
             completedAt

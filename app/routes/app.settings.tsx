@@ -47,6 +47,9 @@ type ExtrasRow = {
 
   followup_email_enabled: boolean | null;
   followup_sms_enabled: boolean | null;
+
+  sms_template_offer: string | null;
+  sms_template_no_offer: string | null;
 };
 
 type LoaderData = {
@@ -80,6 +83,9 @@ type LoaderData = {
 
     promptMode: PromptMode;
     userPrompt: string;
+
+    smsTemplateOffer: string;
+    smsTemplateNoOffer: string;
   };
 };
 
@@ -140,8 +146,7 @@ function pickPromptMode(v: any): PromptMode {
 }
 
 /**
- * FIX: merge Shopify embedded params (host/shop/embedded/etc) with target params (saved=1)
- * so the redirect stays inside the embedded app context and doesn't "kick you out".
+ * FIX: merge Shopify embedded params with target params so redirect stays embedded.
  */
 function withSearchMerged(path: string, request: Request) {
   const req = new URL(request.url);
@@ -149,10 +154,7 @@ function withSearchMerged(path: string, request: Request) {
 
   const out = new URL(target.pathname, req.origin);
 
-  // keep all params from the current request (Shopify embedded context)
   req.searchParams.forEach((v, k) => out.searchParams.set(k, v));
-
-  // then apply/override with params from target (e.g., saved=1)
   target.searchParams.forEach((v, k) => out.searchParams.set(k, v));
 
   const qs = out.searchParams.toString();
@@ -174,7 +176,9 @@ async function readSettingsExtras(shop: string): Promise<ExtrasRow | null> {
       coupon_validity_hours,
       free_shipping_enabled,
       followup_email_enabled,
-      followup_sms_enabled
+      followup_sms_enabled,
+      sms_template_offer,
+      sms_template_no_offer
     from public."Settings"
     where shop = ${shop}
     limit 1
@@ -200,6 +204,9 @@ async function writeSettingsExtras(
 
     followupEmailEnabled: boolean;
     followupSmsEnabled: boolean;
+
+    smsTemplateOffer: string | null;
+    smsTemplateNoOffer: string | null;
   }
 ) {
   await (db as any).$executeRaw`
@@ -217,7 +224,9 @@ async function writeSettingsExtras(
       coupon_validity_hours = ${data.couponValidityHours},
       free_shipping_enabled = ${data.freeShippingEnabled},
       followup_email_enabled = ${data.followupEmailEnabled},
-      followup_sms_enabled = ${data.followupSmsEnabled}
+      followup_sms_enabled = ${data.followupSmsEnabled},
+      sms_template_offer = ${data.smsTemplateOffer},
+      sms_template_no_offer = ${data.smsTemplateNoOffer}
     where shop = ${shop}
   `;
 }
@@ -235,6 +244,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const url = new URL(request.url);
   const saved = url.searchParams.get("saved") === "1";
+
+  const defaultOfferTemplate =
+    "Finish your checkout: {{discount_link}}\nOffer: {{percent}}% off\nCode: {{offer_code}}\nValid: {{validity_hours}}h";
+  const defaultNoOfferTemplate = "Finish your checkout: {{checkout_link}}";
 
   const settings: LoaderData["settings"] = {
     enabled: Boolean(base.enabled),
@@ -254,7 +267,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     discountEnabled: Boolean(extras?.discount_enabled ?? false),
     maxDiscountPercent: clamp(Number(extras?.max_discount_percent ?? 10), 0, 50),
     offerRule: pickOfferRule(extras?.offer_rule ?? "ask_only"),
-    minCartValueForDiscount: extras?.min_cart_value_for_discount == null ? null : Number(extras.min_cart_value_for_discount),
+    minCartValueForDiscount:
+      extras?.min_cart_value_for_discount == null ? null : Number(extras.min_cart_value_for_discount),
     couponPrefix: String(extras?.coupon_prefix ?? "").trim() ? String(extras?.coupon_prefix).trim() : null,
     couponValidityHours: clamp(Number(extras?.coupon_validity_hours ?? 24), 1, 168),
     freeShippingEnabled: Boolean(extras?.free_shipping_enabled ?? false),
@@ -264,6 +278,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     promptMode: pickPromptMode((base as any).promptMode ?? "append"),
     userPrompt: String((base as any).userPrompt ?? ""),
+
+    smsTemplateOffer: String(extras?.sms_template_offer ?? "").trim() ? String(extras?.sms_template_offer) : defaultOfferTemplate,
+    smsTemplateNoOffer: String(extras?.sms_template_no_offer ?? "").trim()
+      ? String(extras?.sms_template_no_offer)
+      : defaultNoOfferTemplate,
   };
 
   return { shop, saved, settings } satisfies LoaderData;
@@ -291,7 +310,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const tone = pickTone(fd.get("tone") ?? extras?.tone ?? "neutral");
   const goal = pickGoal(fd.get("goal") ?? extras?.goal ?? "complete_checkout");
   const maxCallSeconds = clamp(toInt(fd.get("maxCallSeconds"), Number(extras?.max_call_seconds ?? 120)), 45, 300);
-  const maxFollowupQuestions = clamp(toInt(fd.get("maxFollowupQuestions"), Number(extras?.max_followup_questions ?? 1)), 0, 3);
+  const maxFollowupQuestions = clamp(
+    toInt(fd.get("maxFollowupQuestions"), Number(extras?.max_followup_questions ?? 1)),
+    0,
+    3
+  );
 
   const discountEnabled = toBool(fd.get("discountEnabled"));
   const maxDiscountPercent = clamp(toInt(fd.get("maxDiscountPercent"), Number(extras?.max_discount_percent ?? 10)), 0, 50);
@@ -307,6 +330,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const promptMode = pickPromptMode(fd.get("promptMode") ?? (base as any).promptMode ?? "append");
   const userPrompt = String(fd.get("userPrompt") ?? "").trim();
+
+  const smsTemplateOfferRaw = String(fd.get("smsTemplateOffer") ?? "").trim();
+  const smsTemplateNoOfferRaw = String(fd.get("smsTemplateNoOffer") ?? "").trim();
+  const smsTemplateOffer = smsTemplateOfferRaw ? smsTemplateOfferRaw : null;
+  const smsTemplateNoOffer = smsTemplateNoOfferRaw ? smsTemplateNoOfferRaw : null;
 
   await db.settings.update({
     where: { shop },
@@ -340,6 +368,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     freeShippingEnabled,
     followupEmailEnabled,
     followupSmsEnabled,
+    smsTemplateOffer,
+    smsTemplateNoOffer,
   });
 
   return new Response(null, {
@@ -385,6 +415,9 @@ export default function Settings() {
   const [promptMode, setPromptMode] = React.useState<PromptMode>(settings.promptMode);
   const [userPrompt, setUserPrompt] = React.useState(settings.userPrompt ?? "");
 
+  const [smsTemplateOffer, setSmsTemplateOffer] = React.useState(settings.smsTemplateOffer ?? "");
+  const [smsTemplateNoOffer, setSmsTemplateNoOffer] = React.useState(settings.smsTemplateNoOffer ?? "");
+
   const isSaving = fetcher.state === "submitting" || fetcher.state === "loading";
 
   const goalOptions = [
@@ -414,6 +447,9 @@ export default function Settings() {
     { label: "Use only my prompt (advanced)", value: "replace" },
   ];
 
+  const smsVarsHelp =
+    "Available variables: {{shop}}, {{shop_name}}, {{customer_name}}, {{checkout_id}}, {{checkout_link}}, {{discount_link}}, {{offer_code}}, {{percent}}, {{validity_hours}}";
+
   return (
     <Page
       title="Settings"
@@ -441,7 +477,6 @@ export default function Settings() {
                     </Text>
                     <Checkbox label="Enabled" checked={enabled} onChange={setEnabled} />
                   </InlineStack>
-
                   <input type="hidden" name="enabled" value={enabled ? "on" : ""} />
                 </BlockStack>
               </Card>
@@ -454,55 +489,19 @@ export default function Settings() {
 
                   <FormLayout>
                     <FormLayout.Group>
-                      <TextField
-                        label="Delay minutes"
-                        name="delayMinutes"
-                        value={delayMinutes}
-                        onChange={setDelayMinutes}
-                        autoComplete="off"
-                      />
-                      <TextField
-                        label="Max attempts"
-                        name="maxAttempts"
-                        value={maxAttempts}
-                        onChange={setMaxAttempts}
-                        autoComplete="off"
-                      />
-                      <TextField
-                        label="Retry minutes"
-                        name="retryMinutes"
-                        value={retryMinutes}
-                        onChange={setRetryMinutes}
-                        autoComplete="off"
-                      />
+                      <TextField label="Delay minutes" name="delayMinutes" value={delayMinutes} onChange={setDelayMinutes} autoComplete="off" />
+                      <TextField label="Max attempts" name="maxAttempts" value={maxAttempts} onChange={setMaxAttempts} autoComplete="off" />
+                      <TextField label="Retry minutes" name="retryMinutes" value={retryMinutes} onChange={setRetryMinutes} autoComplete="off" />
                     </FormLayout.Group>
 
                     <FormLayout.Group>
-                      <TextField
-                        label="Min order value"
-                        name="minOrderValue"
-                        value={minOrderValue}
-                        onChange={setMinOrderValue}
-                        autoComplete="off"
-                      />
+                      <TextField label="Min order value" name="minOrderValue" value={minOrderValue} onChange={setMinOrderValue} autoComplete="off" />
                       <Select label="Currency" name="currency" options={currencyOptions} value={currency} onChange={setCurrency} />
                     </FormLayout.Group>
 
                     <FormLayout.Group>
-                      <TextField
-                        label="Call window start (HH:MM)"
-                        name="callWindowStart"
-                        value={callWindowStart}
-                        onChange={setCallWindowStart}
-                        autoComplete="off"
-                      />
-                      <TextField
-                        label="Call window end (HH:MM)"
-                        name="callWindowEnd"
-                        value={callWindowEnd}
-                        onChange={setCallWindowEnd}
-                        autoComplete="off"
-                      />
+                      <TextField label="Call window start (HH:MM)" name="callWindowStart" value={callWindowStart} onChange={setCallWindowStart} autoComplete="off" />
+                      <TextField label="Call window end (HH:MM)" name="callWindowEnd" value={callWindowEnd} onChange={setCallWindowEnd} autoComplete="off" />
                     </FormLayout.Group>
                   </FormLayout>
                 </BlockStack>
@@ -521,22 +520,8 @@ export default function Settings() {
                     </FormLayout.Group>
 
                     <FormLayout.Group>
-                      <TextField
-                        label="Max call length (seconds)"
-                        name="maxCallSeconds"
-                        type="number"
-                        value={maxCallSeconds}
-                        onChange={setMaxCallSeconds}
-                        autoComplete="off"
-                      />
-                      <TextField
-                        label="Max follow-up questions"
-                        name="maxFollowupQuestions"
-                        type="number"
-                        value={maxFollowupQuestions}
-                        onChange={setMaxFollowupQuestions}
-                        autoComplete="off"
-                      />
+                      <TextField label="Max call length (seconds)" name="maxCallSeconds" type="number" value={maxCallSeconds} onChange={setMaxCallSeconds} autoComplete="off" />
+                      <TextField label="Max follow-up questions" name="maxFollowupQuestions" type="number" value={maxFollowupQuestions} onChange={setMaxFollowupQuestions} autoComplete="off" />
                     </FormLayout.Group>
                   </FormLayout>
                 </BlockStack>
@@ -557,61 +542,18 @@ export default function Settings() {
 
                   <FormLayout>
                     <FormLayout.Group>
-                      <TextField
-                        label="Max discount %"
-                        name="maxDiscountPercent"
-                        type="number"
-                        value={maxDiscountPercent}
-                        onChange={setMaxDiscountPercent}
-                        disabled={!discountEnabled}
-                        autoComplete="off"
-                      />
-                      <Select
-                        label="When to offer"
-                        name="offerRule"
-                        options={offerOptions}
-                        value={offerRule}
-                        onChange={(v) => setOfferRule(v as OfferRule)}
-                        disabled={!discountEnabled}
-                      />
+                      <TextField label="Max discount %" name="maxDiscountPercent" type="number" value={maxDiscountPercent} onChange={setMaxDiscountPercent} disabled={!discountEnabled} autoComplete="off" />
+                      <Select label="When to offer" name="offerRule" options={offerOptions} value={offerRule} onChange={(v) => setOfferRule(v as OfferRule)} disabled={!discountEnabled} />
                     </FormLayout.Group>
 
                     <FormLayout.Group>
-                      <TextField
-                        label="Min cart value to allow discount (optional)"
-                        name="minCartValueForDiscount"
-                        type="number"
-                        value={minCartValueForDiscount}
-                        onChange={setMinCartValueForDiscount}
-                        disabled={!discountEnabled}
-                        autoComplete="off"
-                      />
-                      <TextField
-                        label="Coupon validity (hours)"
-                        name="couponValidityHours"
-                        type="number"
-                        value={couponValidityHours}
-                        onChange={setCouponValidityHours}
-                        disabled={!discountEnabled}
-                        autoComplete="off"
-                      />
+                      <TextField label="Min cart value to allow discount (optional)" name="minCartValueForDiscount" type="number" value={minCartValueForDiscount} onChange={setMinCartValueForDiscount} disabled={!discountEnabled} autoComplete="off" />
+                      <TextField label="Coupon validity (hours)" name="couponValidityHours" type="number" value={couponValidityHours} onChange={setCouponValidityHours} disabled={!discountEnabled} autoComplete="off" />
                     </FormLayout.Group>
 
                     <FormLayout.Group>
-                      <TextField
-                        label="Coupon prefix (optional)"
-                        name="couponPrefix"
-                        value={couponPrefix}
-                        onChange={setCouponPrefix}
-                        disabled={!discountEnabled}
-                        autoComplete="off"
-                      />
-                      <Checkbox
-                        label="Allow free shipping alternative"
-                        checked={freeShippingEnabled}
-                        onChange={setFreeShippingEnabled}
-                        disabled={!discountEnabled}
-                      />
+                      <TextField label="Coupon prefix (optional)" name="couponPrefix" value={couponPrefix} onChange={setCouponPrefix} disabled={!discountEnabled} autoComplete="off" />
+                      <Checkbox label="Allow free shipping alternative" checked={freeShippingEnabled} onChange={setFreeShippingEnabled} disabled={!discountEnabled} />
                       <input type="hidden" name="freeShippingEnabled" value={freeShippingEnabled ? "on" : ""} />
                     </FormLayout.Group>
                   </FormLayout>
@@ -625,20 +567,46 @@ export default function Settings() {
                   </Text>
 
                   <InlineStack gap="600">
-                    <Checkbox
-                      label="Allow follow-up email suggestion"
-                      checked={followupEmailEnabled}
-                      onChange={setFollowupEmailEnabled}
-                    />
-                    <Checkbox
-                      label="Allow follow-up SMS suggestion"
-                      checked={followupSmsEnabled}
-                      onChange={setFollowupSmsEnabled}
-                    />
+                    <Checkbox label="Allow follow-up email suggestion" checked={followupEmailEnabled} onChange={setFollowupEmailEnabled} />
+                    <Checkbox label="Allow follow-up SMS suggestion" checked={followupSmsEnabled} onChange={setFollowupSmsEnabled} />
                   </InlineStack>
 
                   <input type="hidden" name="followupEmailEnabled" value={followupEmailEnabled ? "on" : ""} />
                   <input type="hidden" name="followupSmsEnabled" value={followupSmsEnabled ? "on" : ""} />
+                </BlockStack>
+              </Card>
+
+              <Card>
+                <BlockStack gap="300">
+                  <Text as="h2" variant="headingMd">
+                    SMS message templates
+                  </Text>
+
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    {smsVarsHelp}
+                  </Text>
+
+                  <FormLayout>
+                    <TextField
+                      label="SMS template (with offer code)"
+                      name="smsTemplateOffer"
+                      value={smsTemplateOffer}
+                      onChange={setSmsTemplateOffer}
+                      multiline={6}
+                      autoComplete="off"
+                      helpText="Used when an offer code exists. Use {{discount_link}} so the discount applies automatically."
+                    />
+
+                    <TextField
+                      label="SMS template (no offer)"
+                      name="smsTemplateNoOffer"
+                      value={smsTemplateNoOffer}
+                      onChange={setSmsTemplateNoOffer}
+                      multiline={4}
+                      autoComplete="off"
+                      helpText="Used when no offer code exists. Use {{checkout_link}}."
+                    />
+                  </FormLayout>
                 </BlockStack>
               </Card>
 
@@ -650,13 +618,7 @@ export default function Settings() {
 
                   <FormLayout>
                     <FormLayout.Group>
-                      <Select
-                        label="Prompt mode"
-                        name="promptMode"
-                        options={promptModeOptions}
-                        value={promptMode}
-                        onChange={(v) => setPromptMode(v as PromptMode)}
-                      />
+                      <Select label="Prompt mode" name="promptMode" options={promptModeOptions} value={promptMode} onChange={(v) => setPromptMode(v as PromptMode)} />
                     </FormLayout.Group>
 
                     <TextField
@@ -672,7 +634,6 @@ export default function Settings() {
                 </BlockStack>
               </Card>
 
-              {/* fallback submit button for browsers without Page primaryAction submit */}
               <div style={{ display: "none" }}>
                 <Button submit>Save</Button>
               </div>

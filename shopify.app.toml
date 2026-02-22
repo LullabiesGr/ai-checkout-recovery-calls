@@ -34,7 +34,7 @@ api_version = "2026-04"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_orders,write_products,read_checkouts"
+scopes = "read_orders,write_products,read_checkouts,read_discounts,write_discounts,read_customers"
 
 [auth]
 redirect_urls = [ "https://checkout-call-recovery-ai.onrender.com/auth/callback" ]

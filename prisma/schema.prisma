@@ -1,4 +1,3 @@
-// prisma/schema.prisma
 generator client {
   provider = "prisma-client-js"
 }
@@ -26,7 +25,6 @@ model Checkout {
   customerName String?
   itemsJson    String?
 
-  // ✅ recovered attribution (order after call)
   recoveredAt      DateTime?
   recoveredOrderId String?
   recoveredAmount  Float?
@@ -74,7 +72,6 @@ model CallJob {
   followUp       String?
   analysisJson   String?
 
-  // ✅ earned attribution per call job
   attributedAt      DateTime?
   attributedOrderId String?
   attributedAmount  Float?
@@ -103,25 +100,25 @@ model Settings {
   promptMode     PromptMode @default(append)
   merchantPrompt String     @default("")
 
-  // NEW (match DB columns you already use in raw SQL)
   tone                   String  @default("neutral")
   goal                   String  @default("complete_checkout")
   max_call_seconds       Int     @default(120)
   max_followup_questions Int     @default(2)
 
-  discount_enabled             Boolean @default(false)
-  max_discount_percent         Int     @default(10)
-  offer_rule                   String  @default("ask_only")
-
-  // IMPORTANT: allow NULLs because your code writes null when empty.
-  min_cart_value_for_discount  Float?
-  coupon_prefix                String?
-
-  coupon_validity_hours        Int     @default(24)
-  free_shipping_enabled        Boolean @default(false)
+  discount_enabled            Boolean @default(false)
+  max_discount_percent        Int     @default(10)
+  offer_rule                  String  @default("ask_only")
+  min_cart_value_for_discount Float?
+  coupon_prefix               String?
+  coupon_validity_hours       Int     @default(24)
+  free_shipping_enabled       Boolean @default(false)
 
   followup_email_enabled Boolean @default(true)
   followup_sms_enabled   Boolean @default(true)
+
+  // SMS templates (new)
+  sms_template_offer    String?
+  sms_template_no_offer String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
