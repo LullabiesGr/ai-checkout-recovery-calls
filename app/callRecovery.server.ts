@@ -39,8 +39,8 @@ function adjustToWindow(target: Date, startHHMM: string, endHHMM: string) {
   next.setSeconds(0, 0);
   next.setHours(Math.floor(windowStart / 60), windowStart % 60, 0, 0);
 
-  // if target time is after today's end OR after start (but outside window), schedule next day window start
-  if (tMins > windowEnd || tMins > windowStart) {
+  // if target is after today's end, schedule next day start
+  if (tMins > windowEnd) {
     next.setDate(next.getDate() + 1);
   }
 
@@ -124,8 +124,8 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
       const completedAt = n?.completedAt ? new Date(n.completedAt) : null;
 
       // IMPORTANT:
-      // - Keep status ABANDONED (Shopify already considers it abandoned),
-      // - Use abandonedAt = Shopify updatedAt/createdAt so delay can be enforced reliably.
+      // - Keep status ABANDONED (Shopify already considers it abandoned)
+      // - Use abandonedAt = Shopify updatedAt/createdAt so delay can be enforced reliably
       const abandonedAt = completedAt ? null : new Date(n?.updatedAt ?? n?.createdAt ?? Date.now());
 
       await db.checkout.upsert({
@@ -183,15 +183,14 @@ export async function ensureSettings(shop: string) {
         vapiAssistantId: null,
         vapiPhoneNumberId: null,
         userPrompt: "",
-        promptMode: "append", // ✅ NEW DEFAULT
+        promptMode: "append", // default (enum value)
       } as any,
     }))
   );
 }
 
 export async function markAbandonedByDelay(shop: string, delayMinutes: number) {
-  // Legacy path (kept). Your pipeline uses status=ABANDONED directly from sync,
-  // so this typically does nothing, but it’s harmless.
+  // Legacy path (kept). Your pipeline uses status=ABANDONED directly from sync.
   const cutoff = new Date(Date.now() - delayMinutes * 60 * 1000);
 
   return db.checkout.updateMany({
@@ -213,7 +212,10 @@ export async function markAbandonedByDelay(shop: string, delayMinutes: number) {
  * - Next call is based on last attempt + retryMinutes
  * - Stops at maxAttempts
  *
- * Also prevents spam by not enqueueing if the computed target time is still in the future.
+ * IMPORTANT CHANGE:
+ * - We enqueue CallJobs immediately (even if scheduledFor is in the future)
+ *   so the UI can show upcoming calls.
+ * - Spam is prevented because we never enqueue if a QUEUED/CALLING job exists.
  */
 export async function enqueueCallJobs(params: {
   shop: string;
@@ -225,20 +227,10 @@ export async function enqueueCallJobs(params: {
   maxAttempts: number; // per-checkout cap
   retryMinutes: number; // spacing between attempts
 }) {
-  const {
-    shop,
-    enabled,
-    minOrderValue,
-    callWindowStart,
-    callWindowEnd,
-    delayMinutes,
-    maxAttempts,
-    retryMinutes,
-  } = params;
+  const { shop, enabled, minOrderValue, callWindowStart, callWindowEnd, delayMinutes, maxAttempts, retryMinutes } =
+    params;
 
   if (!enabled) return { enqueued: 0 };
-
-  const now = new Date();
 
   const minValue = Number(minOrderValue ?? 0);
   const delayM = Math.max(0, Number(delayMinutes ?? 30));
@@ -304,9 +296,6 @@ export async function enqueueCallJobs(params: {
       target = new Date(anchor.getTime() + retryM * 60 * 1000);
     }
 
-    // Not due yet -> do not enqueue now (prevents “spam inserts every cron tick”)
-    if (target > now) continue;
-
     // Respect call window; if outside, move to next window start
     const scheduledFor = adjustToWindow(target, callWindowStart, callWindowEnd);
 
@@ -324,7 +313,6 @@ export async function enqueueCallJobs(params: {
 
       enqueued += 1;
     } catch (e: any) {
-      // If you add a DB unique partial index (recommended), ignore unique conflicts here.
       const msg = String(e?.message ?? "").toLowerCase();
       if (msg.includes("unique")) continue;
       throw e;

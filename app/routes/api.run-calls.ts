@@ -4,6 +4,37 @@ import db from "../db.server";
 import { ensureSettings } from "../callRecovery.server";
 import { startVapiCallForJob } from "../callProvider.server";
 
+function parseHHMM(hhmm: string): number | null {
+  const m = /^(\d{2}):(\d{2})$/.exec((hhmm || "").trim());
+  if (!m) return null;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+  return hh * 60 + mm;
+}
+
+function adjustToWindow(target: Date, startHHMM: string, endHHMM: string) {
+  const start = parseHHMM(startHHMM) ?? 9 * 60;
+  const end = parseHHMM(endHHMM) ?? 19 * 60;
+
+  const windowStart = Math.min(start, end);
+  const windowEnd = Math.max(start, end);
+
+  const tMins = target.getHours() * 60 + target.getMinutes();
+  if (tMins >= windowStart && tMins <= windowEnd) return target;
+
+  const next = new Date(target);
+  next.setSeconds(0, 0);
+  next.setHours(Math.floor(windowStart / 60), windowStart % 60, 0, 0);
+
+  if (tMins > windowEnd) {
+    next.setDate(next.getDate() + 1);
+  }
+
+  return next;
+}
+
 // POST /api/run-calls
 export async function action({ request }: ActionFunctionArgs) {
   const want = process.env.RUN_CALLS_SECRET || "";
@@ -14,7 +45,6 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const now = new Date();
 
-  // DO NOT use grace window. It causes “early” calls and can look like spam loops.
   const jobs = await db.callJob.findMany({
     where: {
       status: "QUEUED",
@@ -40,11 +70,10 @@ export async function action({ request }: ActionFunctionArgs) {
     });
 
     if (locked.count === 0) continue;
-
     processed += 1;
 
     const settings = await ensureSettings(job.shop);
-    const maxAttempts = settings.maxAttempts ?? 1;
+    const maxAttempts = Number((settings as any).maxAttempts ?? 1);
 
     try {
       const res = await startVapiCallForJob({
@@ -52,8 +81,7 @@ export async function action({ request }: ActionFunctionArgs) {
         callJobId: job.id,
       });
 
-      // IMPORTANT:
-      // keep status CALLING until webhook ends the call.
+      // Keep status CALLING until webhook ends the call.
       await db.callJob.update({
         where: { id: job.id },
         data: {
@@ -82,8 +110,13 @@ export async function action({ request }: ActionFunctionArgs) {
         });
         failed += 1;
       } else {
-        const retryMinutes = settings.retryMinutes ?? 180;
-        const next = new Date(Date.now() + retryMinutes * 60 * 1000);
+        const retryMinutes = Number((settings as any).retryMinutes ?? 180);
+        const nextTarget = new Date(Date.now() + retryMinutes * 60 * 1000);
+
+        const startHHMM = String((settings as any).callWindowStart ?? "09:00");
+        const endHHMM = String((settings as any).callWindowEnd ?? "19:00");
+
+        const next = adjustToWindow(nextTarget, startHHMM, endHHMM);
 
         await db.callJob.update({
           where: { id: job.id },
