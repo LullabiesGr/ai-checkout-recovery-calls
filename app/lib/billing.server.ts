@@ -60,35 +60,25 @@ export async function syncBillingFromShopify(args: { shop: string; admin: AdminL
   const { shop, admin } = args;
 
   const q = `#graphql
-  query BillingState {
-    currentAppInstallation {
-      activeSubscriptions {
+query BillingState {
+  currentAppInstallation {
+    activeSubscriptions {
+      id
+      name
+      status
+      lineItems {
         id
-        name
-        status
-        currentPeriodStart
-        currentPeriodEnd
-        lineItems {
-          id
-          plan {
-            pricingDetails {
-              __typename
-              ... on AppRecurringPricing {
-                interval
-                price { amount currencyCode }
-              }
-              ... on AppUsagePricing {
-                interval
-                terms
-                cappedAmount { amount currencyCode }
-                balanceUsed { amount currencyCode }
-              }
-            }
+        plan {
+          pricingDetails {
+            __typename
+            ... on AppUsagePricing { cappedAmount { amount currencyCode } balanceUsed { amount currencyCode } }
+            ... on AppRecurringPricing { interval price { amount currencyCode } }
           }
         }
       }
     }
-  }`;
+  }
+}`;
 
   const json = await graphqlShop(shop, q, {}, admin);
   const subs = json?.data?.currentAppInstallation?.activeSubscriptions ?? [];
@@ -130,8 +120,7 @@ export async function syncBillingFromShopify(args: { shop: string; admin: AdminL
       subscriptionId: ours.id,
       usageLineItemId: usageLine?.id ?? null,
       recurringLineItemId: recurLine?.id ?? null,
-      currentPeriodStart: ours.currentPeriodStart ? new Date(ours.currentPeriodStart) : null,
-      currentPeriodEnd: ours.currentPeriodEnd ? new Date(ours.currentPeriodEnd) : null,
+      
     },
   });
 
@@ -428,8 +417,7 @@ export async function applyBillingForCall(args: {
               subscriptionId: ours.id,
               usageLineItemId: usageLine?.id ?? null,
               recurringLineItemId: recurLine?.id ?? null,
-              currentPeriodStart: ours.currentPeriodStart ? new Date(ours.currentPeriodStart) : null,
-              currentPeriodEnd: ours.currentPeriodEnd ? new Date(ours.currentPeriodEnd) : null,
+              
             },
           });
         }

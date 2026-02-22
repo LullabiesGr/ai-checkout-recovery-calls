@@ -548,30 +548,22 @@ async function shopifyGraphql(shop: string, accessToken: string, query: string, 
     body: JSON.stringify({ query, variables }),
   });
 
-  const json = await res.json().catch(() => null);
+  const text = await res.text();
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`Shopify GraphQL non-JSON response HTTP ${res.status}: ${text.slice(0, 800)}`);
+  }
+
   if (!res.ok) throw new Error(`Shopify GraphQL HTTP ${res.status}: ${JSON.stringify(json)}`);
+
+  // CRITICAL: handle top-level GraphQL errors
+  if (Array.isArray(json?.errors) && json.errors.length) {
+    throw new Error(`Shopify GraphQL errors: ${JSON.stringify(json.errors)}`);
+  }
+
   return json;
-}
-
-async function findCustomerGidByEmail(shop: string, accessToken: string, email: string | null): Promise<string | null> {
-  const e = String(email ?? "").trim();
-  if (!e) return null;
-
-  const q = `
-    query FindCustomer($query: String!) {
-      customers(first: 1, query: $query) {
-        nodes { id email }
-      }
-    }
-  `;
-  const data = await shopifyGraphql(shop, accessToken, q, { query: `email:${e}` });
-  const id = data?.data?.customers?.nodes?.[0]?.id;
-  return id ? String(id) : null;
-}
-
-function hoursFromNowIso(hours: number) {
-  const h = Math.max(1, Math.min(168, Math.floor(Number(hours) || 24)));
-  return new Date(Date.now() + h * 60 * 60 * 1000).toISOString();
 }
 
 async function createDiscountCodeBasic(params: {
@@ -615,15 +607,28 @@ async function createDiscountCodeBasic(params: {
 
   const out = await shopifyGraphql(params.shop, params.accessToken, mutation, { basicCodeDiscount });
 
-  const errs = out?.data?.discountCodeBasicCreate?.userErrors ?? [];
-  const nodeId = out?.data?.discountCodeBasicCreate?.codeDiscountNode?.id ?? null;
-  const createdCode =
-    out?.data?.discountCodeBasicCreate?.codeDiscountNode?.codeDiscount?.codes?.nodes?.[0]?.code ?? null;
+  const payload = out?.data?.discountCodeBasicCreate;
+  if (!payload) {
+    throw new Error(`discountCodeBasicCreate returned null payload: ${JSON.stringify(out)}`);
+  }
+
+  const errs = payload?.userErrors ?? [];
+  if (errs.length) {
+    throw new Error(errs.map((e: any) => String(e?.message ?? "")).filter(Boolean).join(" | "));
+  }
+
+  const nodeId = payload?.codeDiscountNode?.id ?? null;
+  const createdCode = payload?.codeDiscountNode?.codeDiscount?.codes?.nodes?.[0]?.code ?? null;
+
+  // CRITICAL: if nodeId is missing, treat as failure (no phantom success)
+  if (!nodeId) {
+    throw new Error(`discountCodeBasicCreate returned no codeDiscountNode: ${JSON.stringify(payload)}`);
+  }
 
   return {
-    nodeId: nodeId ? String(nodeId) : null,
+    nodeId: String(nodeId),
     createdCode: createdCode ? String(createdCode) : null,
-    userErrors: errs as Array<{ field?: string[]; message: string }>,
+    userErrors: [] as Array<{ field?: string[]; message: string }>,
   };
 }
 
