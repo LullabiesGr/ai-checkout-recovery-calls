@@ -1011,7 +1011,23 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
   const smsFrom = String(process.env.VAPI_SMS_FROM_NUMBER ?? "").trim(); // E.164
   const smsEnabled =
     Boolean(playbook.followupSmsEnabled) && Boolean(smsFrom) && Boolean(discountLink) && Boolean(customerNumber);
-  const tools = smsEnabled ? [{ type: "sms", metadata: { from: smsFrom } }] : undefined;
+  const tools = smsEnabled
+  ? [
+      {
+        type: "function",
+        function: {
+          name: "send_checkout_sms",
+          description:
+            "Send the checkout link + discount code to the customer via SMS. Do NOT include phone numbers; the server will pick the recipient.",
+          parameters: {
+            type: "object",
+            properties: {},
+            required: [],
+          },
+        },
+      },
+    ]
+  : undefined;
 
   const promptMode = pickPromptMode((settings as any)?.promptMode ?? "append");
   const merchantPrompt = String((settings as any)?.userPrompt ?? "");
