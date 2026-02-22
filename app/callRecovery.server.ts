@@ -190,14 +190,16 @@ export async function ensureSettings(shop: string) {
 }
 
 export async function markAbandonedByDelay(shop: string, delayMinutes: number) {
-  // Legacy path (kept). Your pipeline uses status=ABANDONED directly from sync.
   const cutoff = new Date(Date.now() - delayMinutes * 60 * 1000);
 
+  // Use updatedAt so “last activity” drives abandonment timing.
+  // Also avoid re-updating abandonedAt repeatedly.
   return db.checkout.updateMany({
     where: {
       shop,
       status: "OPEN",
-      createdAt: { lte: cutoff },
+      updatedAt: { lte: cutoff },
+      abandonedAt: null,
     },
     data: {
       status: "ABANDONED",
