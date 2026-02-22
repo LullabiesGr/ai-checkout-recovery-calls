@@ -58,8 +58,7 @@ function pickGoal(v: any): Goal {
 
 function pickOfferRule(v: any): OfferRule {
   const s = String(v ?? "").trim().toLowerCase();
-  if (s === "price_objection" || s === "after_first_objection" || s === "always" || s === "ask_only")
-    return s as OfferRule;
+  if (s === "price_objection" || s === "after_first_objection" || s === "always" || s === "ask_only") return s as OfferRule;
   return "ask_only";
 }
 
@@ -223,6 +222,7 @@ async function readPreviousCallMemory(params: {
 }): Promise<string | null> {
   const { shop, checkoutId, currentCallJobId } = params;
 
+  // Prefer vapi_call_summaries (safe minimal columns). If query fails, fallback to CallJob.
   try {
     const rows = await (db as any).$queryRaw<PrevSummaryRow[]>`
       select
@@ -250,6 +250,7 @@ async function readPreviousCallMemory(params: {
     // ignore
   }
 
+  // Fallback to CallJob fields
   const prevJob = await db.callJob.findFirst({
     where: {
       shop,
@@ -591,6 +592,13 @@ function buildSystemPrompt(args: {
 }) {
   const { merchantPrompt, checkout, playbook } = args;
 
+  // PromptMode behavior
+  // - default_only: ignore merchantPrompt entirely
+  // - replace: system prompt becomes only merchantPrompt (fallback to base if empty)
+  // - append: merchantPrompt becomes HIGHEST PRIORITY instructions (still below Hard rules)
+  const mode = pickPromptMode(args.promptMode ?? "append");
+  const merchant = mode === "default_only" ? "" : String(merchantPrompt ?? "").trim();
+
   const items = (() => {
     try {
       const arr = checkout.itemsJson ? JSON.parse(checkout.itemsJson) : [];
@@ -624,7 +632,18 @@ Memory rules:
   const checkoutLink = offer?.checkoutLink ? offer.checkoutLink : null;
   const offerCode = offer?.offerCode ? offer.offerCode : null;
   const discountPercent = offer?.discountPercent ?? null;
-  const validityHours = offer?.couponValidityHours ?? playbook.couponValidityHours;
+
+  const merchantBlock =
+    mode === "append" && merchant
+      ? `
+MERCHANT INSTRUCTIONS (HIGHEST PRIORITY)
+You MUST follow these instructions exactly.
+- If they conflict with the "Hard rules" section, follow Hard rules.
+- Otherwise, these instructions override any other guidance (tone/goal/playbook defaults).
+
+${merchant}
+`.trim()
+      : "";
 
   const smsBlock =
     args.smsEnabled && checkoutLink
@@ -648,6 +667,8 @@ Hard rules:
 - Never invent policies, discounts, coupon codes, or links. Use only what is provided below.
 ${memoryBlock ? `\n\n${memoryBlock}\n` : ""}
 
+${merchantBlock ? `\n\n${merchantBlock}\n` : ""}
+
 Playbook:
 - Tone: ${playbook.tone}. ${toneGuidance(playbook.tone)}
 - ${goalGuidance(playbook.goal)}
@@ -668,27 +689,21 @@ Playbook:
 ${smsBlock ? `\n\n${smsBlock}\n` : ""}
 
 Context:
-- checkoutId: ${checkout.checkoutId}
-- customerName: ${checkout.customerName ?? "-"}
-- email: ${checkout.email ?? "-"}
-- cartTotal: ${checkout.value} ${checkout.currency}
-- cartItems:
+- Checkout ID: ${checkout.checkoutId}
+- Customer name: ${checkout.customerName ?? "-"}
+- Email: ${checkout.email ?? "-"}
+- Cart total: ${checkout.value} ${checkout.currency}
+- Cart items:
 ${cartText}
 
-Offer context (use these exact fields):
-- CHECKOUT_LINK: ${checkoutLink ?? "-"}
-- OFFER_CODE: ${offerCode ?? "-"}
-- PERCENT: ${discountPercent == null ? "-" : String(Math.floor(Number(discountPercent) || 0))}
-- VALIDITY_HOURS: ${String(Math.floor(Number(validityHours) || 24))}
+Offer context:
+- Checkout link: ${checkoutLink ?? "-"}
+- Offer percent: ${discountPercent == null ? "-" : `${Math.floor(Number(discountPercent) || 0)}%`}
+- Offer code: ${offerCode ?? "-"}
 `.trim();
 
-  const mode = pickPromptMode(args.promptMode ?? "append");
-  const merchant = (merchantPrompt ?? "").trim();
-
-  if (mode === "default_only") return base;
   if (mode === "replace") return merchant ? merchant : base;
-  if (!merchant) return base;
-  return `${base}\n\nMerchant instructions (must follow):\n${merchant}`.trim();
+  return base;
 }
 
 // =========================
@@ -963,7 +978,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
 
   await db.callJob.update({
     where: { id: job.id },
-      data: { providerCallId: providerCallId || null, outcome: "VAPI_CALL_CREATED", status: "CALLING" },
+    data: { providerCallId: providerCallId || null, outcome: "VAPI_CALL_CREATED", status: "CALLING" },
   });
 
   return { ok: true, providerCallId, raw: json };
