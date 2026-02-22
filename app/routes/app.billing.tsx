@@ -8,7 +8,7 @@ import db from "../db.server";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { Redirect } from "@shopify/app-bridge/actions";
 
-import { PLANS, isPlanKey, type PlanKey } from "../lib/billingPlans.server";
+import { PLANS, isPlanKey, type PlanKey } from "../lib/billingPlans.shared";
 import {
   ensureBillingRow,
   syncBillingFromShopify,
