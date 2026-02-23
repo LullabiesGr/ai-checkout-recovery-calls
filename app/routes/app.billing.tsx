@@ -18,6 +18,9 @@ import {
   Banner,
 } from "@shopify/polaris";
 
+import { useAppBridge } from "@shopify/app-bridge-react";
+import { Redirect } from "@shopify/app-bridge/actions";
+
 import { PLANS, isPlanKey, type PlanKey } from "../lib/billingPlans.shared";
 import {
   ensureBillingRow,
@@ -44,8 +47,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   await ensureBillingRow(shop);
 
-  // Το sync μπορεί να αποτύχει προσωρινά/λόγω Shopify constraints.
-  // Δεν ρίχνουμε όλο το page.
   let usage: any | null = null;
   try {
     const sync = await syncBillingFromShopify({ shop, admin });
@@ -55,7 +56,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 
   const billing = await db.shopBilling.findUnique({ where: { shop } });
-
   return { shop, billing, usage } satisfies LoaderData;
 }
 
@@ -72,13 +72,13 @@ export async function action({ request }: ActionFunctionArgs) {
       if (!isPlanKey(plan)) throw new Error("Invalid plan");
 
       const reqUrl = new URL(request.url);
-const host = reqUrl.searchParams.get("host") ?? "";
-const shopParam = reqUrl.searchParams.get("shop") ?? shop;
+      const host = reqUrl.searchParams.get("host") ?? "";
+      const shopParam = reqUrl.searchParams.get("shop") ?? shop;
 
-// Shopify limit: returnUrl <= 255 chars
-const returnUrl = `${reqUrl.origin}/app/billing?embedded=1&host=${encodeURIComponent(host)}&shop=${encodeURIComponent(
-  shopParam
-)}`;
+      // Shopify limit: returnUrl <= 255 chars
+      const returnUrl = `${reqUrl.origin}/app/billing?embedded=1&host=${encodeURIComponent(
+        host
+      )}&shop=${encodeURIComponent(shopParam)}`;
 
       if (plan === "FREE") {
         await cancelActiveSubscription({ shop, admin, prorate: false });
@@ -97,7 +97,7 @@ const returnUrl = `${reqUrl.origin}/app/billing?embedded=1&host=${encodeURICompo
         test: true,
       });
 
-      return { confirmationUrl };
+      return { ok: true, confirmationUrl };
     }
 
     if (intent === "increase_cap") {
@@ -105,7 +105,7 @@ const returnUrl = `${reqUrl.origin}/app/billing?embedded=1&host=${encodeURICompo
       if (!Number.isFinite(newCapEUR) || newCapEUR <= 0) throw new Error("Invalid cap");
 
       const { confirmationUrl } = await requestCapIncrease({ shop, admin, newCapEUR });
-      return { confirmationUrl };
+      return { ok: true, confirmationUrl };
     }
 
     if (intent === "cancel") {
@@ -116,17 +116,6 @@ const returnUrl = `${reqUrl.origin}/app/billing?embedded=1&host=${encodeURICompo
     throw new Error("Unknown intent");
   } catch (e: any) {
     const msg = safeMsg(e);
-
-    // Shopify limitation message → κάνε το explicit στο UI
-    if (msg.toLowerCase().includes("public distribution") && msg.toLowerCase().includes("billing api")) {
-      return {
-        ok: false,
-        error:
-          "Billing API blocked by Shopify: enable Public distribution (Partners → App → Distribution → Shopify App Store).",
-        raw: msg,
-      };
-    }
-
     return { ok: false, error: msg };
   }
 }
@@ -143,25 +132,19 @@ function badgeToneFromStatus(status: string) {
   return "info" as const;
 }
 
-function topRedirect(url: string) {
-  if (typeof window === "undefined") return;
-  try {
-    if (window.top) window.top.location.assign(url);
-    else window.location.assign(url);
-  } catch {
-    window.location.assign(url);
-  }
-}
-
 export default function BillingRoute() {
   const { shop, billing, usage } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<any>();
 
+  const app = useAppBridge();
+
   React.useEffect(() => {
     const url = fetcher.data?.confirmationUrl;
     if (!url) return;
-    topRedirect(url);
-  }, [fetcher.data]);
+
+    // MUST be remote redirect (top-level), otherwise Shopify blocks in iframe.
+    Redirect.create(app).dispatch(Redirect.Action.REMOTE, url);
+  }, [fetcher.data, app]);
 
   const activePlanKey = String(billing?.plan || "FREE") as PlanKey;
   const status = String(billing?.status || "NONE");
@@ -180,7 +163,6 @@ export default function BillingRoute() {
 
   const isBusy = fetcher.state === "submitting" || fetcher.state === "loading";
   const err = fetcher.data?.error ? String(fetcher.data.error) : "";
-  const raw = fetcher.data?.raw ? String(fetcher.data.raw) : "";
 
   return (
     <Page title="Billing" subtitle={shop}>
@@ -189,7 +171,6 @@ export default function BillingRoute() {
           {err ? (
             <Banner tone="critical" title="Billing error">
               <p>{err}</p>
-              {raw ? <p style={{ opacity: 0.7 }}>{raw}</p> : null}
             </Banner>
           ) : null}
 

@@ -30,6 +30,7 @@
     "@react-router/fs-routes": "7.13.0",
     "@react-router/node": "7.13.0",
     "@react-router/serve": "7.13.0",
+    "@shopify/app-bridge": "^3.7.11",
     "@shopify/app-bridge-react": "^4.2.10",
     "@shopify/polaris": "^12.27.0",
     "@shopify/polaris-icons": "^9.3.1",
