@@ -15,6 +15,7 @@ import {
   Badge,
   Button,
   Divider,
+  Banner,
 } from "@shopify/polaris";
 
 import { PLANS, isPlanKey, type PlanKey } from "../lib/billingPlans.shared";
@@ -32,19 +33,30 @@ type LoaderData = {
   usage: any | null;
 };
 
+function safeMsg(e: any, max = 600) {
+  const s = String(e?.message ?? e ?? "");
+  return s.length > max ? s.slice(0, max) : s;
+}
+
 export async function loader({ request }: LoaderFunctionArgs) {
   const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
 
   await ensureBillingRow(shop);
-  const sync = await syncBillingFromShopify({ shop, admin });
+
+  // Το sync μπορεί να αποτύχει προσωρινά/λόγω Shopify constraints.
+  // Δεν ρίχνουμε όλο το page.
+  let usage: any | null = null;
+  try {
+    const sync = await syncBillingFromShopify({ shop, admin });
+    usage = sync?.usage ?? null;
+  } catch {
+    usage = null;
+  }
+
   const billing = await db.shopBilling.findUnique({ where: { shop } });
 
-  return {
-    shop,
-    billing,
-    usage: sync?.usage ?? null,
-  } satisfies LoaderData;
+  return { shop, billing, usage } satisfies LoaderData;
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -54,48 +66,64 @@ export async function action({ request }: ActionFunctionArgs) {
   const form = await request.formData();
   const intent = String(form.get("intent") || "");
 
-  if (intent === "select_plan") {
-    const plan = String(form.get("plan") || "").toUpperCase();
-    if (!isPlanKey(plan)) throw new Error("Invalid plan");
+  try {
+    if (intent === "select_plan") {
+      const plan = String(form.get("plan") || "").toUpperCase();
+      if (!isPlanKey(plan)) throw new Error("Invalid plan");
 
-    const u = new URL(request.url);
-    u.pathname = "/app/billing";
-    const returnUrl = u.toString();
+      const u = new URL(request.url);
+      u.pathname = "/app/billing";
+      const returnUrl = u.toString();
 
-    if (plan === "FREE") {
-      await cancelActiveSubscription({ shop, admin, prorate: false });
-      await db.shopBilling.update({
-        where: { shop },
-        data: { plan: "FREE", status: "NONE", pendingPlan: null },
+      if (plan === "FREE") {
+        await cancelActiveSubscription({ shop, admin, prorate: false });
+        await db.shopBilling.update({
+          where: { shop },
+          data: { plan: "FREE", status: "NONE", pendingPlan: null },
+        });
+        return { ok: true };
+      }
+
+      const { confirmationUrl } = await createSubscriptionForPlan({
+        shop,
+        admin,
+        plan: plan as PlanKey,
+        returnUrl,
+        test: true,
       });
+
+      return { confirmationUrl };
+    }
+
+    if (intent === "increase_cap") {
+      const newCapEUR = Number(form.get("newCapEUR"));
+      if (!Number.isFinite(newCapEUR) || newCapEUR <= 0) throw new Error("Invalid cap");
+
+      const { confirmationUrl } = await requestCapIncrease({ shop, admin, newCapEUR });
+      return { confirmationUrl };
+    }
+
+    if (intent === "cancel") {
+      await cancelActiveSubscription({ shop, admin, prorate: false });
       return { ok: true };
     }
 
-    const { confirmationUrl } = await createSubscriptionForPlan({
-      shop,
-      admin,
-      plan: plan as PlanKey,
-      returnUrl,
-      test: true,
-    });
+    throw new Error("Unknown intent");
+  } catch (e: any) {
+    const msg = safeMsg(e);
 
-    return { confirmationUrl };
+    // Shopify limitation message → κάνε το explicit στο UI
+    if (msg.toLowerCase().includes("public distribution") && msg.toLowerCase().includes("billing api")) {
+      return {
+        ok: false,
+        error:
+          "Billing API blocked by Shopify: enable Public distribution (Partners → App → Distribution → Shopify App Store).",
+        raw: msg,
+      };
+    }
+
+    return { ok: false, error: msg };
   }
-
-  if (intent === "increase_cap") {
-    const newCapEUR = Number(form.get("newCapEUR"));
-    if (!Number.isFinite(newCapEUR) || newCapEUR <= 0) throw new Error("Invalid cap");
-
-    const { confirmationUrl } = await requestCapIncrease({ shop, admin, newCapEUR });
-    return { confirmationUrl };
-  }
-
-  if (intent === "cancel") {
-    await cancelActiveSubscription({ shop, admin, prorate: false });
-    return { ok: true };
-  }
-
-  throw new Error("Unknown intent");
 }
 
 function formatEUR(amount: number) {
@@ -146,11 +174,20 @@ export default function BillingRoute() {
   const capAmount = usage?.cappedAmount ? Number(usage.cappedAmount.amount) : null;
 
   const isBusy = fetcher.state === "submitting" || fetcher.state === "loading";
+  const err = fetcher.data?.error ? String(fetcher.data.error) : "";
+  const raw = fetcher.data?.raw ? String(fetcher.data.raw) : "";
 
   return (
     <Page title="Billing" subtitle={shop}>
       <Layout>
         <Layout.Section>
+          {err ? (
+            <Banner tone="critical" title="Billing error">
+              <p>{err}</p>
+              {raw ? <p style={{ opacity: 0.7 }}>{raw}</p> : null}
+            </Banner>
+          ) : null}
+
           <Card>
             <BlockStack gap="300">
               <InlineStack align="space-between">
