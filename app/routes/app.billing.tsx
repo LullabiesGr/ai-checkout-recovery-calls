@@ -1,12 +1,9 @@
 // app/routes/app.billing.tsx
 import * as React from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData } from "react-router";
+import { Form, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-
-import { useAppBridge } from "@shopify/app-bridge-react";
-import { Redirect } from "@shopify/app-bridge/actions";
 
 import {
   Page,
@@ -34,7 +31,40 @@ type LoaderData = {
   shop: string;
   billing: any;
   usage: any | null;
+  error: string | null;
 };
+
+function safeErr(v: any, max = 220) {
+  const s = typeof v === "string" ? v : v == null ? "" : String(v);
+  return s.length > max ? s.slice(0, max) : s;
+}
+
+/** keep embedded params (shop/host/embedded/...) when redirecting back */
+function withSearchMerged(path: string, request: Request) {
+  const req = new URL(request.url);
+  const target = new URL(path, req.origin);
+  const out = new URL(target.pathname, req.origin);
+
+  req.searchParams.forEach((v, k) => out.searchParams.set(k, v));
+  target.searchParams.forEach((v, k) => out.searchParams.set(k, v));
+
+  const qs = out.searchParams.toString();
+  return qs ? `${out.pathname}?${qs}` : out.pathname;
+}
+
+function shortReturnUrl(request: Request, shop: string) {
+  const u = new URL(request.url);
+  const host = u.searchParams.get("host") ?? "";
+  const base = `${u.origin}/app/billing?shop=${encodeURIComponent(shop)}&host=${encodeURIComponent(
+    host
+  )}&embedded=1`;
+
+  // Shopify Billing API validates returnUrl length (<=255 chars)
+  if (base.length <= 255) return base;
+
+  // absolute fallback (still valid)
+  return `${u.origin}/app/billing?shop=${encodeURIComponent(shop)}`;
+}
 
 function formatEUR(amount: number) {
   return new Intl.NumberFormat("el-GR", { style: "currency", currency: "EUR" }).format(amount);
@@ -48,40 +78,36 @@ function badgeToneFromStatus(status: string) {
   return "info" as const;
 }
 
-function buildShortReturnUrl(request: Request, shop: string) {
-  const url = new URL(request.url);
-  const host = url.searchParams.get("host") ?? "";
-  const origin = url.origin; // https://checkout-call-recovery-ai.onrender.com
-
-  // ΜΟΝΟ αυτά. Τίποτα άλλο.
-  const qs = new URLSearchParams({
-    embedded: "1",
-    shop,
-    host,
-  });
-
-  const out = `${origin}/app/billing?${qs.toString()}`;
-  return out.slice(0, 255); // hard safety
-}
-
 export async function loader({ request }: LoaderFunctionArgs) {
   const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
 
   await ensureBillingRow(shop);
-  const sync = await syncBillingFromShopify({ shop, admin });
+
+  // always best-effort sync; never crash the page
+  try {
+    await syncBillingFromShopify({ shop, admin });
+  } catch (e: any) {
+    // ignore; show UI anyway from DB
+  }
 
   const billing = await db.shopBilling.findUnique({ where: { shop } });
+
+  const url = new URL(request.url);
+  const error = url.searchParams.get("billing_error")
+    ? safeErr(url.searchParams.get("billing_error"))
+    : null;
 
   return {
     shop,
     billing,
-    usage: sync?.usage ?? null,
+    usage: null,
+    error,
   } satisfies LoaderData;
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  const { admin, session } = await authenticate.admin(request);
+  const { admin, session, redirect: shopifyRedirect } = await authenticate.admin(request);
   const shop = session.shop;
 
   const form = await request.formData();
@@ -90,9 +116,10 @@ export async function action({ request }: ActionFunctionArgs) {
   try {
     if (intent === "select_plan") {
       const plan = String(form.get("plan") || "").toUpperCase();
-      if (!isPlanKey(plan)) return { ok: false, error: "Invalid plan" };
+      if (!isPlanKey(plan)) throw new Error("Invalid plan");
 
-      const returnUrl = buildShortReturnUrl(request, shop);
+      // SHORT returnUrl (no id_token/session/hmac)
+      const returnUrl = shortReturnUrl(request, shop);
 
       if (plan === "FREE") {
         await cancelActiveSubscription({ shop, admin, prorate: false });
@@ -100,7 +127,11 @@ export async function action({ request }: ActionFunctionArgs) {
           where: { shop },
           data: { plan: "FREE", status: "NONE", pendingPlan: null },
         });
-        return { ok: true };
+
+        return new Response(null, {
+          status: 303,
+          headers: { Location: withSearchMerged("/app/billing", request) },
+        });
       }
 
       const { confirmationUrl } = await createSubscriptionForPlan({
@@ -111,67 +142,59 @@ export async function action({ request }: ActionFunctionArgs) {
         test: true, // dev stores only
       });
 
-      return { confirmationUrl };
+      // TOP-LEVEL redirect (no iframe)
+      return shopifyRedirect(confirmationUrl, { target: "_top" });
     }
 
     if (intent === "increase_cap") {
       const newCapEUR = Number(form.get("newCapEUR"));
-      if (!Number.isFinite(newCapEUR) || newCapEUR <= 0) return { ok: false, error: "Invalid cap" };
+      if (!Number.isFinite(newCapEUR) || newCapEUR <= 0) throw new Error("Invalid cap");
 
       const { confirmationUrl } = await requestCapIncrease({ shop, admin, newCapEUR });
-      return { confirmationUrl };
+      return shopifyRedirect(confirmationUrl, { target: "_top" });
     }
 
     if (intent === "cancel") {
       await cancelActiveSubscription({ shop, admin, prorate: false });
-      return { ok: true };
+
+      return new Response(null, {
+        status: 303,
+        headers: { Location: withSearchMerged("/app/billing", request) },
+      });
     }
 
-    return { ok: false, error: "Unknown intent" };
+    throw new Error("Unknown intent");
   } catch (e: any) {
-    const msg = String(e?.message ?? e ?? "Billing error");
-    return { ok: false, error: msg.slice(0, 500) };
+    const msg = safeErr(e?.message ?? String(e));
+    return new Response(null, {
+      status: 303,
+      headers: { Location: withSearchMerged(`/app/billing?billing_error=${encodeURIComponent(msg)}`, request) },
+    });
   }
 }
 
 export default function BillingRoute() {
-  const { shop, billing, usage } = useLoaderData<typeof loader>();
-  const fetcher = useFetcher<any>();
-  const app = useAppBridge();
-
-  React.useEffect(() => {
-    const url = fetcher.data?.confirmationUrl;
-    if (!url) return;
-
-    // Top-level redirect μέσω App Bridge (σωστό για confirmationUrl).
-    Redirect.create(app).dispatch(Redirect.Action.REMOTE, url);
-  }, [fetcher.data, app]);
+  const { shop, billing, error } = useLoaderData<typeof loader>();
 
   const activePlanKey = String(billing?.plan || "FREE") as PlanKey;
   const status = String(billing?.status || "NONE");
 
-  const plan = PLANS[activePlanKey] ?? PLANS.FREE;
-
   const freeRemainingSec = Math.max(0, 10 * 60 - Number(billing?.freeSecondsUsed || 0));
   const freeRemainingMin = Math.floor(freeRemainingSec / 60);
+
+  const plan = PLANS[activePlanKey] ?? PLANS.FREE;
 
   const includedUsedSec = Number(billing?.includedSecondsUsed || 0);
   const includedTotalSec = plan.includedMinutes * 60;
   const includedRemainingMin = Math.max(0, Math.floor((includedTotalSec - includedUsedSec) / 60));
 
-  const balanceUsed = usage?.balanceUsed ? Number(usage.balanceUsed.amount) : null;
-  const capAmount = usage?.cappedAmount ? Number(usage.cappedAmount.amount) : null;
-
-  const isBusy = fetcher.state === "submitting" || fetcher.state === "loading";
-  const err = fetcher.data?.error ? String(fetcher.data.error) : "";
-
   return (
     <Page title="Billing" subtitle={shop}>
       <Layout>
         <Layout.Section>
-          {err ? (
+          {error ? (
             <Banner tone="critical" title="Billing error">
-              <p>{err}</p>
+              <p>{error}</p>
             </Banner>
           ) : null}
 
@@ -193,38 +216,29 @@ export default function BillingRoute() {
                   Free minutes remaining: <b>{freeRemainingMin} min</b>
                 </Text>
               ) : (
-                <>
-                  <Text as="p">
-                    Included minutes remaining (this cycle): <b>{includedRemainingMin} min</b>
-                  </Text>
-                  {balanceUsed != null && capAmount != null ? (
-                    <Text as="p">
-                      Usage spend (this cycle): <b>{formatEUR(balanceUsed)}</b> / cap <b>{formatEUR(capAmount)}</b>
-                    </Text>
-                  ) : null}
-                </>
+                <Text as="p">
+                  Included minutes remaining (this cycle): <b>{includedRemainingMin} min</b>
+                </Text>
               )}
 
               <Divider />
 
               <InlineStack gap="200">
                 {activePlanKey !== "FREE" ? (
-                  <fetcher.Form method="post">
+                  <Form method="post">
                     <input type="hidden" name="intent" value="cancel" />
-                    <Button tone="critical" submit loading={isBusy}>
+                    <Button tone="critical" submit>
                       Cancel subscription
                     </Button>
-                  </fetcher.Form>
+                  </Form>
                 ) : null}
 
                 {activePlanKey !== "FREE" ? (
-                  <fetcher.Form method="post">
+                  <Form method="post">
                     <input type="hidden" name="intent" value="increase_cap" />
-                    <input type="hidden" name="newCapEUR" value={String((capAmount ?? plan.usageCapEUR) + 50)} />
-                    <Button submit loading={isBusy}>
-                      Increase cap +€50
-                    </Button>
-                  </fetcher.Form>
+                    <input type="hidden" name="newCapEUR" value={String((plan.usageCapEUR ?? 0) + 50)} />
+                    <Button submit>Increase cap +€50</Button>
+                  </Form>
                 ) : null}
               </InlineStack>
             </BlockStack>
@@ -265,13 +279,13 @@ export default function BillingRoute() {
                         </Text>
                       )}
 
-                      <fetcher.Form method="post">
+                      <Form method="post">
                         <input type="hidden" name="intent" value="select_plan" />
                         <input type="hidden" name="plan" value={k} />
-                        <Button submit disabled={isActive} loading={isBusy}>
+                        <Button submit disabled={isActive}>
                           {isActive ? "Selected" : "Select"}
                         </Button>
-                      </fetcher.Form>
+                      </Form>
                     </BlockStack>
                   </Card>
                 );

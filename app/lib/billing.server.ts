@@ -72,8 +72,14 @@ query BillingState {
         plan {
           pricingDetails {
             __typename
-            ... on AppUsagePricing { cappedAmount { amount currencyCode } balanceUsed { amount currencyCode } }
-            ... on AppRecurringPricing { interval price { amount currencyCode } }
+            ... on AppUsagePricing {
+              cappedAmount { amount currencyCode }
+              balanceUsed { amount currencyCode }
+            }
+            ... on AppRecurringPricing {
+              interval
+              price { amount currencyCode }
+            }
           }
         }
       }
@@ -93,15 +99,13 @@ query BillingState {
         subscriptionId: null,
         usageLineItemId: null,
         recurringLineItemId: null,
-        currentPeriodStart: null,
-        currentPeriodEnd: null,
         pendingPlan: null,
       },
     });
     return { active: false, usage: null as any };
   }
 
-  const planKey = String(ours.name).replace("AI Checkout Calls - ", "").trim().toUpperCase() as PlanKey;
+  const planKey = (String(ours.name).replace("AI Checkout Calls - ", "").trim().toUpperCase()) as PlanKey;
   const normalizedPlan: PlanKey = isPlanKey(planKey) ? planKey : "STARTER";
 
   const usageLine = (ours.lineItems ?? []).find(
@@ -205,8 +209,12 @@ mutation AppSubscriptionCreate(
   };
 
   const json = await graphqlShop(shop, m, vars, admin);
-  const payload = json?.data?.appSubscriptionCreate;
 
+  // hard GraphQL errors (ex: billing not allowed)
+  const hardErr = json?.errors?.[0]?.message ? String(json.errors[0].message) : null;
+  if (hardErr) throw new Error(hardErr);
+
+  const payload = json?.data?.appSubscriptionCreate;
   const errs = payload?.userErrors ?? [];
   if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
 
@@ -250,6 +258,9 @@ mutation CancelSub($id: ID!, $prorate: Boolean) {
 }`;
 
   const json = await graphqlShop(shop, m, { id: billing.subscriptionId, prorate: !!prorate }, admin);
+  const hardErr = json?.errors?.[0]?.message ? String(json.errors[0].message) : null;
+  if (hardErr) throw new Error(hardErr);
+
   const payload = json?.data?.appSubscriptionCancel;
   const errs = payload?.userErrors ?? [];
   if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
@@ -261,8 +272,6 @@ mutation CancelSub($id: ID!, $prorate: Boolean) {
       subscriptionId: null,
       usageLineItemId: null,
       recurringLineItemId: null,
-      currentPeriodStart: null,
-      currentPeriodEnd: null,
       pendingPlan: null,
     },
   });
@@ -292,6 +301,9 @@ mutation UpdateCap($id: ID!, $cappedAmount: MoneyInput!) {
     admin
   );
 
+  const hardErr = json?.errors?.[0]?.message ? String(json.errors[0].message) : null;
+  if (hardErr) throw new Error(hardErr);
+
   const payload = json?.data?.appSubscriptionLineItemUpdate;
   const errs = payload?.userErrors ?? [];
   if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
@@ -313,7 +325,6 @@ export async function applyBillingForCall(args: {
   const answered = !!args.answered;
   const voicemail = !!args.voicemail;
 
-  // charge only if answered, not voicemail, and >= 15s
   if (!answered || voicemail || rawSeconds < 15) {
     await db.callCharge.upsert({
       where: { callJobId },
@@ -331,7 +342,6 @@ export async function applyBillingForCall(args: {
     return;
   }
 
-  // ROUND UP: 70s => 2 minutes, and consumes 2 minutes from included/free
   const billableMinutes = Math.max(1, ceilMinutesFromSeconds(rawSeconds));
   const billableSeconds = billableMinutes * 60;
 
@@ -345,7 +355,6 @@ export async function applyBillingForCall(args: {
       create: { shop },
     });
 
-    // FREE: 10 one-time minutes (consume rounded minutes)
     if (billing.plan === "FREE") {
       const freeTotal = 10 * 60;
       const freeUsed = billing.freeSecondsUsed || 0;
@@ -425,7 +434,6 @@ query BillingState {
       if (!billing.usageLineItemId) throw new Error("No usage line item after sync");
     }
 
-    // INCLUDED: consume rounded minutes
     const includedTotal = (p.includedMinutes || 0) * 60;
     const includedUsed = billing.includedSecondsUsed || 0;
     const includedRemaining = Math.max(0, includedTotal - includedUsed);
@@ -446,7 +454,12 @@ query BillingState {
 
     if (amountCents > 0) {
       const m = `#graphql
-mutation UsageCharge($description: String!, $price: MoneyInput!, $subscriptionLineItemId: ID!, $idempotencyKey: String) {
+mutation UsageCharge(
+  $description: String!
+  $price: MoneyInput!
+  $subscriptionLineItemId: ID!
+  $idempotencyKey: String
+) {
   appUsageRecordCreate(
     description: $description
     price: $price
@@ -471,6 +484,9 @@ mutation UsageCharge($description: String!, $price: MoneyInput!, $subscriptionLi
         },
         admin
       );
+
+      const hardErr = json?.errors?.[0]?.message ? String(json.errors[0].message) : null;
+      if (hardErr) throw new Error(hardErr);
 
       const payload = json?.data?.appUsageRecordCreate;
       const errs = payload?.userErrors ?? [];
