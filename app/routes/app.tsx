@@ -1,3 +1,4 @@
+// app/routes/app.tsx
 import type { LoaderFunctionArgs } from "react-router";
 import {
   Outlet,
@@ -19,9 +20,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const shop = url.searchParams.get("shop");
   const host = url.searchParams.get("host");
 
-  if (!shop || !host) {
-    return redirect("/auth/login");
-  }
+  if (!shop || !host) return redirect("/auth/login");
 
   try {
     await authenticate.admin(request);
@@ -29,11 +28,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return redirect("/auth/login");
   }
 
-  return { shop, host };
+  const apiKey = process.env.SHOPIFY_API_KEY ?? "";
+  if (!apiKey) return redirect("/auth/login");
+
+  return { shop, host, apiKey };
 };
 
 export default function AppLayout() {
-  const { shop, host } = useLoaderData<typeof loader>();
+  const { shop, host, apiKey } = useLoaderData<typeof loader>();
 
   const qs = new URLSearchParams({
     shop,
@@ -44,7 +46,7 @@ export default function AppLayout() {
   const link = (path: string) => `${path}?${qs.toString()}`;
 
   return (
-    <AppProvider embedded>
+    <AppProvider embedded apiKey={apiKey}>
       <NavMenu>
         <a href={link("/app")}>Dashboard</a>
         <a href={link("/app/checkouts")}>Checkouts</a>
@@ -66,15 +68,11 @@ export function ErrorBoundary() {
   const error = useRouteError();
 
   let message = "Unexpected error";
-
-  if (isRouteErrorResponse(error)) {
-    message = `${error.status} ${error.statusText}`;
-  } else if (error instanceof Error) {
-    message = error.message;
-  }
+  if (isRouteErrorResponse(error)) message = `${error.status} ${error.statusText}`;
+  else if (error instanceof Error) message = error.message;
 
   return (
-    <AppProvider embedded>
+    <AppProvider embedded apiKey={process.env.SHOPIFY_API_KEY ?? ""}>
       <Page>
         <Banner tone="critical" title="Application error">
           <p>{message}</p>

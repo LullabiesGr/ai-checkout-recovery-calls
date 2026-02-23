@@ -5,6 +5,9 @@ import { useFetcher, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
+import { useAppBridge } from "@shopify/app-bridge-react";
+import { Redirect } from "@shopify/app-bridge/actions";
+
 import {
   Page,
   Layout,
@@ -17,9 +20,6 @@ import {
   Divider,
   Banner,
 } from "@shopify/polaris";
-
-import { useAppBridge } from "@shopify/app-bridge-react";
-import { Redirect } from "@shopify/app-bridge/actions";
 
 import { PLANS, isPlanKey, type PlanKey } from "../lib/billingPlans.shared";
 import {
@@ -36,9 +36,32 @@ type LoaderData = {
   usage: any | null;
 };
 
-function safeMsg(e: any, max = 600) {
-  const s = String(e?.message ?? e ?? "");
-  return s.length > max ? s.slice(0, max) : s;
+function formatEUR(amount: number) {
+  return new Intl.NumberFormat("el-GR", { style: "currency", currency: "EUR" }).format(amount);
+}
+
+function badgeToneFromStatus(status: string) {
+  const s = String(status || "").toUpperCase();
+  if (s === "ACTIVE") return "success" as const;
+  if (s === "PENDING") return "warning" as const;
+  if (s === "CANCELLED") return "critical" as const;
+  return "info" as const;
+}
+
+function buildShortReturnUrl(request: Request, shop: string) {
+  const url = new URL(request.url);
+  const host = url.searchParams.get("host") ?? "";
+  const origin = url.origin; // https://checkout-call-recovery-ai.onrender.com
+
+  // ΜΟΝΟ αυτά. Τίποτα άλλο.
+  const qs = new URLSearchParams({
+    embedded: "1",
+    shop,
+    host,
+  });
+
+  const out = `${origin}/app/billing?${qs.toString()}`;
+  return out.slice(0, 255); // hard safety
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -46,17 +69,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const shop = session.shop;
 
   await ensureBillingRow(shop);
-
-  let usage: any | null = null;
-  try {
-    const sync = await syncBillingFromShopify({ shop, admin });
-    usage = sync?.usage ?? null;
-  } catch {
-    usage = null;
-  }
+  const sync = await syncBillingFromShopify({ shop, admin });
 
   const billing = await db.shopBilling.findUnique({ where: { shop } });
-  return { shop, billing, usage } satisfies LoaderData;
+
+  return {
+    shop,
+    billing,
+    usage: sync?.usage ?? null,
+  } satisfies LoaderData;
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -69,16 +90,9 @@ export async function action({ request }: ActionFunctionArgs) {
   try {
     if (intent === "select_plan") {
       const plan = String(form.get("plan") || "").toUpperCase();
-      if (!isPlanKey(plan)) throw new Error("Invalid plan");
+      if (!isPlanKey(plan)) return { ok: false, error: "Invalid plan" };
 
-      const reqUrl = new URL(request.url);
-      const host = reqUrl.searchParams.get("host") ?? "";
-      const shopParam = reqUrl.searchParams.get("shop") ?? shop;
-
-      // Shopify limit: returnUrl <= 255 chars
-      const returnUrl = `${reqUrl.origin}/app/billing?embedded=1&host=${encodeURIComponent(
-        host
-      )}&shop=${encodeURIComponent(shopParam)}`;
+      const returnUrl = buildShortReturnUrl(request, shop);
 
       if (plan === "FREE") {
         await cancelActiveSubscription({ shop, admin, prorate: false });
@@ -94,18 +108,18 @@ export async function action({ request }: ActionFunctionArgs) {
         admin,
         plan: plan as PlanKey,
         returnUrl,
-        test: true,
+        test: true, // dev stores only
       });
 
-      return { ok: true, confirmationUrl };
+      return { confirmationUrl };
     }
 
     if (intent === "increase_cap") {
       const newCapEUR = Number(form.get("newCapEUR"));
-      if (!Number.isFinite(newCapEUR) || newCapEUR <= 0) throw new Error("Invalid cap");
+      if (!Number.isFinite(newCapEUR) || newCapEUR <= 0) return { ok: false, error: "Invalid cap" };
 
       const { confirmationUrl } = await requestCapIncrease({ shop, admin, newCapEUR });
-      return { ok: true, confirmationUrl };
+      return { confirmationUrl };
     }
 
     if (intent === "cancel") {
@@ -113,46 +127,33 @@ export async function action({ request }: ActionFunctionArgs) {
       return { ok: true };
     }
 
-    throw new Error("Unknown intent");
+    return { ok: false, error: "Unknown intent" };
   } catch (e: any) {
-    const msg = safeMsg(e);
-    return { ok: false, error: msg };
+    const msg = String(e?.message ?? e ?? "Billing error");
+    return { ok: false, error: msg.slice(0, 500) };
   }
-}
-
-function formatEUR(amount: number) {
-  return new Intl.NumberFormat("el-GR", { style: "currency", currency: "EUR" }).format(amount);
-}
-
-function badgeToneFromStatus(status: string) {
-  const s = String(status || "").toUpperCase();
-  if (s === "ACTIVE") return "success" as const;
-  if (s === "PENDING") return "warning" as const;
-  if (s === "CANCELLED") return "critical" as const;
-  return "info" as const;
 }
 
 export default function BillingRoute() {
   const { shop, billing, usage } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<any>();
-
   const app = useAppBridge();
 
   React.useEffect(() => {
     const url = fetcher.data?.confirmationUrl;
     if (!url) return;
 
-    // MUST be remote redirect (top-level), otherwise Shopify blocks in iframe.
+    // Top-level redirect μέσω App Bridge (σωστό για confirmationUrl).
     Redirect.create(app).dispatch(Redirect.Action.REMOTE, url);
   }, [fetcher.data, app]);
 
   const activePlanKey = String(billing?.plan || "FREE") as PlanKey;
   const status = String(billing?.status || "NONE");
 
+  const plan = PLANS[activePlanKey] ?? PLANS.FREE;
+
   const freeRemainingSec = Math.max(0, 10 * 60 - Number(billing?.freeSecondsUsed || 0));
   const freeRemainingMin = Math.floor(freeRemainingSec / 60);
-
-  const plan = PLANS[activePlanKey] ?? PLANS.FREE;
 
   const includedUsedSec = Number(billing?.includedSecondsUsed || 0);
   const includedTotalSec = plan.includedMinutes * 60;
