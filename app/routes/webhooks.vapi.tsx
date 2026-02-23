@@ -1,6 +1,5 @@
 // app/routes/webhooks.vapi.ts
 import type { ActionFunctionArgs } from "react-router";
-import { Buffer } from "node:buffer";
 import db from "../db.server";
 import { applyBillingForCall } from "../lib/billing.server";
 
@@ -95,7 +94,11 @@ function secondsBetweenIso(start?: any, end?: any) {
 
 function extractConnectedSeconds(msg: any, call: any, artifact: any) {
   const durationSeconds = Number(
-    msg?.durationSeconds ?? msg?.duration_seconds ?? call?.durationSeconds ?? call?.duration_seconds ?? NaN
+    msg?.durationSeconds ??
+      msg?.duration_seconds ??
+      call?.durationSeconds ??
+      call?.duration_seconds ??
+      NaN
   );
 
   if (Number.isFinite(durationSeconds) && durationSeconds > 0) {
@@ -103,10 +106,22 @@ function extractConnectedSeconds(msg: any, call: any, artifact: any) {
   }
 
   const startedAt =
-    msg?.startedAt ?? msg?.startAt ?? call?.startedAt ?? call?.startAt ?? artifact?.startedAt ?? artifact?.startAt ?? null;
+    msg?.startedAt ??
+    msg?.startAt ??
+    call?.startedAt ??
+    call?.startAt ??
+    artifact?.startedAt ??
+    artifact?.startAt ??
+    null;
 
   const endedAt =
-    msg?.endedAt ?? msg?.endAt ?? call?.endedAt ?? call?.endAt ?? artifact?.endedAt ?? artifact?.endAt ?? null;
+    msg?.endedAt ??
+    msg?.endAt ??
+    call?.endedAt ??
+    call?.endAt ??
+    artifact?.endedAt ??
+    artifact?.endAt ??
+    null;
 
   return secondsBetweenIso(startedAt, endedAt);
 }
@@ -120,36 +135,190 @@ function detectVoicemail(endedReason: string, msg: any, call: any, artifact: any
   return false;
 }
 
-function safeJsonParse(s: any): any | null {
-  try {
-    if (!s) return null;
-    return JSON.parse(String(s));
-  } catch {
-    return null;
-  }
+/* =========================================================
+   NEW: deterministic Vapi tool-calls -> Twilio SMS (server-side)
+   - Ignore any LLM "to". Always use message.call.customer.number.
+   - Must return {"results":[{name, toolCallId, result|error}]} for tool-calls.
+   ========================================================= */
+
+function jsonResponse(body: any, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
 
-function mergeAnalysisJson(prev: string | null, patch: any) {
-  const base = safeJsonParse(prev) || {};
-  const next = { ...(base && typeof base === "object" ? base : {}), ...(patch && typeof patch === "object" ? patch : {}) };
-  return JSON.stringify(next);
+function toBase64Utf8(s: string) {
+  // Node
+  // eslint-disable-next-line no-undef
+  if (typeof Buffer !== "undefined") return Buffer.from(s, "utf8").toString("base64");
+  // Web
+  // @ts-ignore
+  if (typeof btoa === "function") return btoa(s);
+  throw new Error("No base64 encoder available");
 }
 
-function buildSmsText(args: {
-  checkoutLink: string | null;
-  offerCode: string | null;
-  discountPercent: number | null;
-  couponValidityHours: number;
-}) {
-  const link = args.checkoutLink ? String(args.checkoutLink) : "";
-  const code = args.offerCode ? String(args.offerCode) : "";
-  const pct = args.discountPercent == null ? "" : `${Math.floor(Number(args.discountPercent) || 0)}%`;
-  const validity = Math.max(1, Math.min(168, Math.floor(Number(args.couponValidityHours || 24))));
+async function twilioSendSms(args: { to: string; body: string }) {
+  const accountSid = requiredEnv("TWILIO_ACCOUNT_SID");
+  const authToken = requiredEnv("TWILIO_AUTH_TOKEN");
+  const from = requiredEnv("TWILIO_SMS_FROM"); // e.g. +1912...
 
-  if (link && code && pct) {
-    return `Finish your checkout: ${link}\nOffer: ${pct} off\nCode: ${code}\nValid: ${validity}h`;
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
+  const params = new URLSearchParams();
+  params.set("To", args.to);
+  params.set("From", from);
+  params.set("Body", args.body);
+
+  const auth = toBase64Utf8(`${accountSid}:${authToken}`);
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: params.toString(),
+  });
+
+  const data = await r.json().catch(() => null);
+
+  if (!r.ok) {
+    const msg = safeStr(data?.message ?? data?.error_message ?? r.statusText, 500);
+    throw new Error(`Twilio SMS failed (${r.status}): ${msg}`);
   }
-  return link ? `Finish your checkout: ${link}` : `Finish your checkout using the link from the call.`;
+
+  return {
+    sid: safeStr(data?.sid ?? "", 80),
+    status: safeStr(data?.status ?? "", 40),
+  };
+}
+
+function extractFromRawCheckout(raw: any): string | null {
+  const obj = typeof raw === "string" ? tryParseJsonObject(raw) ?? null : raw;
+  if (!obj || typeof obj !== "object") return null;
+
+  const candidates = [
+    obj?.abandoned_checkout_url,
+    obj?.abandonedCheckoutUrl,
+    obj?.recovery_url,
+    obj?.recoveryUrl,
+    obj?.checkout_url,
+    obj?.checkoutUrl,
+    obj?.web_url,
+    obj?.webUrl,
+  ];
+
+  for (const c of candidates) {
+    const s = typeof c === "string" ? c.trim() : "";
+    if (s.startsWith("http")) return s;
+  }
+
+  return null;
+}
+
+function extractCheckoutLinkFromAssistantConfig(payload: any): string | null {
+  // Fallback: scrape link from assistant prompt/messages (works even if DB lacks URL)
+  const blobs: string[] = [];
+
+  const msg = pickMessage(payload);
+  const call = msg?.call ?? payload?.call ?? null;
+
+  const sources = [
+    payload?.assistant?.model?.messages,
+    call?.assistant?.model?.messages,
+    msg?.assistant?.model?.messages,
+    msg?.messages,
+    msg?.messagesOpenAIFormatted,
+  ];
+
+  for (const src of sources) {
+    if (!Array.isArray(src)) continue;
+    for (const m of src) {
+      const t = safeStr(m?.content ?? m?.message ?? "", 20000).trim();
+      if (t) blobs.push(t);
+    }
+  }
+
+  const joined = blobs.join("\n");
+
+  // Strong patterns first
+  const m1 = joined.match(/CHECKOUT_LINK:\s*(https?:\/\/\S+)/i);
+  if (m1?.[1]) return m1[1].trim();
+
+  const m2 = joined.match(/Finish your checkout:\s*(https?:\/\/\S+)/i);
+  if (m2?.[1]) return m2[1].trim();
+
+  // Generic URL scan (prefer /recover links)
+  const urls = joined.match(/https?:\/\/[^\s"')]+/g) ?? [];
+  const recover = urls.find((u) => u.includes("/recover")) ?? null;
+  return recover ?? urls[0] ?? null;
+}
+
+function extractOfferCodeFromAssistantConfig(payload: any): string | null {
+  const msg = pickMessage(payload);
+  const call = msg?.call ?? payload?.call ?? null;
+
+  const blobs: string[] = [];
+  const sources = [payload?.assistant?.model?.messages, call?.assistant?.model?.messages, msg?.assistant?.model?.messages];
+  for (const src of sources) {
+    if (!Array.isArray(src)) continue;
+    for (const m of src) {
+      const t = safeStr(m?.content ?? m?.message ?? "", 20000).trim();
+      if (t) blobs.push(t);
+    }
+  }
+  const joined = blobs.join("\n");
+
+  const m = joined.match(/OFFER_CODE:\s*([A-Za-z0-9_-]+)/i);
+  if (!m?.[1]) return null;
+
+  const code = m[1].trim();
+  if (!code || code === "-" || code.toLowerCase() === "null") return null;
+  return code;
+}
+
+function buildCheckoutSmsBody(args: { checkoutLink: string | null; offerCode: string | null }) {
+  const parts: string[] = [];
+
+  if (args.checkoutLink) parts.push(`Finish your checkout: ${args.checkoutLink}`);
+  else parts.push(`Finish your checkout from the store link.`);
+
+  if (args.offerCode) parts.push(`Discount code: ${args.offerCode}`);
+
+  const out = parts.join("\n").trim();
+  return out.length > 1200 ? out.slice(0, 1200) : out;
+}
+
+function normalizeToolCalls(msg: any) {
+  // Vapi docs: toolCallList OR toolWithToolCallList[].toolCall 
+  const list: Array<{ id: string; name: string; parameters?: any }> = [];
+
+  if (Array.isArray(msg?.toolCallList)) {
+    for (const tc of msg.toolCallList) {
+      if (!tc) continue;
+      list.push({
+        id: safeStr(tc?.id ?? "", 120),
+        name: safeStr(tc?.name ?? "", 120),
+        parameters: tc?.parameters ?? {},
+      });
+    }
+    return list.filter((x) => x.id && x.name);
+  }
+
+  if (Array.isArray(msg?.toolWithToolCallList)) {
+    for (const tw of msg.toolWithToolCallList) {
+      const tc = tw?.toolCall ?? null;
+      if (!tc) continue;
+      list.push({
+        id: safeStr(tc?.id ?? "", 120),
+        name: safeStr(tw?.name ?? tc?.name ?? "", 120),
+        parameters: tc?.parameters ?? {},
+      });
+    }
+    return list.filter((x) => x.id && x.name);
+  }
+
+  return list;
 }
 
 async function analyzeCallWithOpenAI(args: {
@@ -161,6 +330,7 @@ async function analyzeCallWithOpenAI(args: {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
 
+  // UPGRADE: still JSON, same flow, just richer keys
   const input = `
 You are analyzing a phone call between a merchant AI agent and a customer who abandoned checkout.
 
@@ -196,6 +366,7 @@ Transcript:
 ${args.transcript}
 `.trim();
 
+  // OpenAI Responses API (unchanged)
   const r = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -224,10 +395,12 @@ ${args.transcript}
   const raw = safeStr(text, 8000).trim();
   if (!raw) return null;
 
+  // Robust parse
   const parsed = tryParseJsonObject(raw);
   if (!parsed) return { raw };
 
-  const cleaned = {
+  // Normalize + clamp without changing callers
+  const cleaned: any = {
     answered: Boolean((parsed as any).answered),
     sentiment: String((parsed as any).sentiment ?? "neutral").toLowerCase(),
     disposition: normalizeDisposition((parsed as any).disposition),
@@ -241,72 +414,12 @@ ${args.transcript}
     confidence: clamp01((parsed as any).confidence),
   };
 
+  // fallback sentiment to allowed set
   if (cleaned.sentiment !== "positive" && cleaned.sentiment !== "neutral" && cleaned.sentiment !== "negative") {
     cleaned.sentiment = "neutral";
   }
 
   return cleaned;
-}
-
-// =========================
-// TOOL-CALLS (deterministic SMS via server)
-// =========================
-
-function extractToolCallList(msg: any): any[] {
-  if (Array.isArray(msg?.toolCallList)) return msg.toolCallList;
-  if (Array.isArray(msg?.toolWithToolCallList)) {
-    return msg.toolWithToolCallList.map((x: any) => x?.toolCall).filter(Boolean);
-  }
-  if (Array.isArray(msg?.toolCalls)) return msg.toolCalls;
-  return [];
-}
-
-async function sendTwilioSms(args: {
-  to: string;
-  from?: string;
-  body: string;
-  messagingServiceSid?: string;
-}) {
-  const sid = requiredEnv("TWILIO_ACCOUNT_SID");
-  const token = requiredEnv("TWILIO_AUTH_TOKEN");
-
-  const form = new URLSearchParams();
-  form.set("To", args.to);
-  form.set("Body", args.body);
-
-  if (args.messagingServiceSid) {
-    form.set("MessagingServiceSid", args.messagingServiceSid);
-  } else {
-    const from = String(args.from ?? "").trim();
-    if (!from) throw new Error("Missing SMS sender. Set VAPI_SMS_FROM_NUMBER or TWILIO_MESSAGING_SERVICE_SID.");
-    form.set("From", from);
-  }
-
-  const url = `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`;
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString("base64")}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: form.toString(),
-  });
-
-  const text = await res.text();
-  let json: any = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    // keep raw
-  }
-
-  if (!res.ok) {
-    const msg = json?.message || text || `Twilio HTTP ${res.status}`;
-    throw new Error(msg);
-  }
-
-  return { sid: json?.sid ?? null, raw: json ?? text };
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -331,6 +444,101 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (!shop || !callJobId) {
     return new Response("OK", { status: 200 });
+  }
+
+  /* =========================
+     NEW: tool-calls handler
+     ========================= */
+  if (messageType === "tool-calls") {
+    const toolCalls = normalizeToolCalls(msg);
+
+    // deterministic "to": ALWAYS from call.customer.number (ignore model args)
+    const to =
+      String(call?.customer?.number ?? "").trim() ||
+      String(msg?.customer?.number ?? "").trim() ||
+      String(payload?.customer?.number ?? "").trim() ||
+      "";
+
+    const results: any[] = [];
+
+    for (const tc of toolCalls) {
+      const name = tc.name;
+      const toolCallId = tc.id;
+
+      if (name !== "send_checkout_sms") {
+        results.push({
+          name,
+          toolCallId,
+          result: JSON.stringify({ ok: true, skipped: true }),
+        });
+        continue;
+      }
+
+      try {
+        if (!to) throw new Error("Missing customer number (call.customer.number).");
+
+        // Prefer DB extraction, fallback to assistant prompt scrape
+        let checkoutLink: string | null = null;
+        let offerCode: string | null = null;
+
+        // DB: callJob -> checkout -> raw url
+        const job = await db.callJob.findFirst({
+          where: { id: callJobId, shop },
+          select: { checkoutId: true },
+        });
+
+        const checkoutId = String(job?.checkoutId ?? checkoutIdMeta ?? "").trim();
+
+        if (checkoutId) {
+          const co = await db.checkout.findFirst({
+            where: { shop, checkoutId },
+            select: { raw: true },
+          });
+
+          checkoutLink = extractFromRawCheckout((co as any)?.raw) ?? null;
+        }
+
+        // Fallback: parse from assistant config/messages
+        if (!checkoutLink) checkoutLink = extractCheckoutLinkFromAssistantConfig(payload);
+        offerCode = extractOfferCodeFromAssistantConfig(payload);
+
+        const body = buildCheckoutSmsBody({ checkoutLink, offerCode });
+
+        const tw = await twilioSendSms({ to, body });
+
+        await db.callJob.updateMany({
+          where: { id: callJobId, shop },
+          data: {
+            outcome: safeStr(`SMS_SENT sid=${tw.sid} to=${to}`, 2000),
+          },
+        });
+
+        results.push({
+          name,
+          toolCallId,
+          result: JSON.stringify({
+            ok: true,
+            sid: tw.sid,
+            to,
+          }),
+        });
+      } catch (e: any) {
+        const err = safeStr(e?.message ?? String(e), 800);
+        await db.callJob.updateMany({
+          where: { id: callJobId, shop },
+          data: { outcome: safeStr(`SMS_ERROR: ${err}`, 2000) },
+        });
+
+        results.push({
+          name,
+          toolCallId,
+          error: err,
+        });
+      }
+    }
+
+    // This exact shape is REQUIRED by Vapi for tool-calls responses :contentReference[oaicite:2]{index=2}
+    return jsonResponse({ results });
   }
 
   // status updates (optional)
@@ -374,92 +582,6 @@ export async function action({ request }: ActionFunctionArgs) {
     return new Response("OK", { status: 200 });
   }
 
-  // tool-calls (server-side tools)
-  if (messageType === "tool-calls") {
-    const toolCalls = extractToolCallList(msg);
-
-    const callObj = msg?.call ?? call ?? payload?.call ?? null;
-    const to = String(callObj?.customer?.number ?? "").trim(); // deterministic recipient
-
-    const job = await db.callJob.findFirst({
-      where: { id: callJobId, shop },
-      select: { analysisJson: true },
-    });
-
-    const parsed = safeJsonParse(job?.analysisJson) || {};
-    const offer = parsed?.offer ?? null;
-
-    const checkoutLink: string | null = offer?.discountLink ?? offer?.checkoutLink ?? null;
-    const offerCode: string | null = offer?.offerCode ?? null;
-    const discountPercent: number | null = offer?.discountPercent ?? null;
-    const couponValidityHours: number = Number(offer?.couponValidityHours ?? 24);
-
-    const body = buildSmsText({
-      checkoutLink,
-      offerCode,
-      discountPercent,
-      couponValidityHours,
-    });
-
-    const from = String(process.env.VAPI_SMS_FROM_NUMBER ?? "").trim(); // optional if using MessagingServiceSid
-    const messagingServiceSid = String(process.env.TWILIO_MESSAGING_SERVICE_SID ?? "").trim() || undefined;
-
-    const results: Array<{ toolCallId: string; result: any }> = [];
-
-    for (const tc of toolCalls) {
-      const toolCallId = String(tc?.id ?? "").trim();
-      const name = String(tc?.name ?? tc?.function?.name ?? "").trim();
-
-      if (!toolCallId) continue;
-
-      // Accept only your deterministic tool name
-      if (name !== "send_checkout_sms") {
-        results.push({ toolCallId, result: { success: false, errorCode: "UNKNOWN_TOOL" } });
-        continue;
-      }
-
-      if (!to) {
-        results.push({ toolCallId, result: { success: false, errorCode: "MISSING_TO", message: "Missing call customer number" } });
-        continue;
-      }
-
-      try {
-        const sent = await sendTwilioSms({
-          to,
-          from,
-          body,
-          messagingServiceSid,
-        });
-
-        const nextJson = mergeAnalysisJson(job?.analysisJson ?? null, {
-          sms: { to, from: messagingServiceSid ? null : from, messagingServiceSid: messagingServiceSid ?? null, sid: sent.sid, sentAt: new Date().toISOString() },
-        });
-
-        await db.callJob.updateMany({
-          where: { id: callJobId, shop },
-          data: {
-            outcome: safeStr(`SMS_SENT: to=${to} sid=${String(sent.sid ?? "-")}`, 2000),
-            analysisJson: safeStr(nextJson, 8000),
-          },
-        });
-
-        results.push({ toolCallId, result: { success: true, sid: sent.sid } });
-      } catch (e: any) {
-        const msgErr = String(e?.message ?? e);
-        await db.callJob.updateMany({
-          where: { id: callJobId, shop },
-          data: { outcome: safeStr(`SMS_ERROR: ${msgErr}`, 2000) },
-        });
-        results.push({ toolCallId, result: { success: false, errorCode: "TWILIO_API_ERROR", message: msgErr } });
-      }
-    }
-
-    return new Response(JSON.stringify({ results }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  }
-
   // end-of-call-report (main value)
   if (messageType === "end-of-call-report") {
     const endedReason = safeStr(msg?.endedReason ?? "", 200);
@@ -495,6 +617,7 @@ export async function action({ request }: ActionFunctionArgs) {
       const sentiment = safeStr((analysis as any)?.sentiment ?? "", 30) || null;
       const tagsCsv = csvFromTags((analysis as any)?.tags) ?? null;
 
+      // keep your old fields, plus richer JSON inside analysisJson
       const reason = safeStr((analysis as any)?.reason ?? (analysis as any)?.raw ?? "", 2000) || null;
       const nextAction = safeStr((analysis as any)?.nextAction ?? "", 500) || null;
       const followUp = safeStr((analysis as any)?.followUp ?? "", 1200) || null;
@@ -506,13 +629,6 @@ export async function action({ request }: ActionFunctionArgs) {
 
       answeredForBilling = answered === true;
 
-      const existing = await db.callJob.findFirst({
-        where: { id: callJobId, shop },
-        select: { analysisJson: true },
-      });
-
-      const nextJson = mergeAnalysisJson(existing?.analysisJson ?? null, analysis);
-
       await db.callJob.updateMany({
         where: { id: callJobId, shop },
         data: {
@@ -521,7 +637,7 @@ export async function action({ request }: ActionFunctionArgs) {
           reason,
           nextAction,
           followUp,
-          analysisJson: safeStr(nextJson, 8000),
+          analysisJson: safeStr(JSON.stringify(analysis), 8000),
           outcome: safeStr(
             `${sentiment ?? "unknown"} | ${tagsCsv ?? "-"} | ${shortSummary || reason || "no-reason"} | ${
               answered === true ? "answered" : answered === false ? "no_answer" : "unknown"
@@ -545,6 +661,7 @@ export async function action({ request }: ActionFunctionArgs) {
         voicemail,
       });
     } catch (e: any) {
+      // swallow: never fail webhook
       await db.callJob.updateMany({
         where: { id: callJobId, shop },
         data: { outcome: safeStr(`BILLING_ERROR: ${e?.message ?? String(e)}`, 2000) },

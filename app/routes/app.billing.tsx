@@ -71,9 +71,14 @@ export async function action({ request }: ActionFunctionArgs) {
       const plan = String(form.get("plan") || "").toUpperCase();
       if (!isPlanKey(plan)) throw new Error("Invalid plan");
 
-      const u = new URL(request.url);
-      u.pathname = "/app/billing";
-      const returnUrl = u.toString();
+      const reqUrl = new URL(request.url);
+const host = reqUrl.searchParams.get("host") ?? "";
+const shopParam = reqUrl.searchParams.get("shop") ?? shop;
+
+// Shopify limit: returnUrl <= 255 chars
+const returnUrl = `${reqUrl.origin}/app/billing?embedded=1&host=${encodeURIComponent(host)}&shop=${encodeURIComponent(
+  shopParam
+)}`;
 
       if (plan === "FREE") {
         await cancelActiveSubscription({ shop, admin, prorate: false });
