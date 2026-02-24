@@ -9,11 +9,16 @@ import {
 } from "react-router";
 
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { AppProvider } from "@shopify/shopify-app-react-router/react";
+import { Provider as AppBridgeProvider, NavMenu } from "@shopify/app-bridge-react";
 import { Page, Banner } from "@shopify/polaris";
-import { NavMenu } from "@shopify/app-bridge-react";
 
 import { authenticate } from "../shopify.server";
+
+type LoaderData = {
+  shop: string;
+  host: string;
+  apiKey: string;
+};
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
@@ -29,24 +34,25 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   const apiKey = process.env.SHOPIFY_API_KEY ?? "";
-  if (!apiKey) return redirect("/auth/login");
+  if (!apiKey) throw new Error("Missing SHOPIFY_API_KEY");
 
-  return { shop, host, apiKey };
+  return { shop, host, apiKey } satisfies LoaderData;
 };
 
 export default function AppLayout() {
   const { shop, host, apiKey } = useLoaderData<typeof loader>();
 
-  const qs = new URLSearchParams({
-    shop,
-    host,
-    embedded: "1",
-  });
-
+  const qs = new URLSearchParams({ shop, host, embedded: "1" });
   const link = (path: string) => `${path}?${qs.toString()}`;
 
   return (
-    <AppProvider embedded apiKey={apiKey}>
+    <AppBridgeProvider
+      config={{
+        apiKey,
+        host,
+        forceRedirect: true,
+      }}
+    >
       <NavMenu>
         <a href={link("/app")}>Dashboard</a>
         <a href={link("/app/checkouts")}>Checkouts</a>
@@ -58,7 +64,7 @@ export default function AppLayout() {
       <Page fullWidth>
         <Outlet />
       </Page>
-    </AppProvider>
+    </AppBridgeProvider>
   );
 }
 
@@ -72,12 +78,10 @@ export function ErrorBoundary() {
   else if (error instanceof Error) message = error.message;
 
   return (
-    <AppProvider embedded apiKey={process.env.SHOPIFY_API_KEY ?? ""}>
-      <Page>
-        <Banner tone="critical" title="Application error">
-          <p>{message}</p>
-        </Banner>
-      </Page>
-    </AppProvider>
+    <Page>
+      <Banner tone="critical" title="Application error">
+        <p>{message}</p>
+      </Banner>
+    </Page>
   );
 }

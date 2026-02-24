@@ -7,6 +7,7 @@ type AdminLike = {
   graphql: (query: string, options?: any) => Promise<Response>;
 };
 
+// keep in sync with your Shopify app config (logs showed 2025-07)
 const API_VERSION = process.env.SHOPIFY_API_VERSION ?? "2025-07";
 
 function moneyInputFromCents(cents: number) {
@@ -28,8 +29,13 @@ function idempotencyKeyForCall(callJobId: string) {
 
 async function graphqlShop(shop: string, query: string, variables: any, admin?: AdminLike) {
   if (admin) {
+    // shopify-api client might throw GraphqlQueryError before returning Response
     const resp = await admin.graphql(query, { variables });
-    return resp.json();
+    const json = await resp.json().catch(() => ({}));
+    if ((json as any)?.errors?.length) {
+      throw new Error((json as any).errors.map((e: any) => e.message).join(" | "));
+    }
+    return json;
   }
 
   const sessionId = `offline_${shop}`;
@@ -46,7 +52,11 @@ async function graphqlShop(shop: string, query: string, variables: any, admin?: 
     },
     body: JSON.stringify({ query, variables }),
   });
-  return resp.json();
+  const json = await resp.json().catch(() => ({}));
+  if ((json as any)?.errors?.length) {
+    throw new Error((json as any).errors.map((e: any) => e.message).join(" | "));
+  }
+  return json;
 }
 
 export async function ensureBillingRow(shop: string) {
@@ -88,7 +98,7 @@ query BillingState {
 }`;
 
   const json = await graphqlShop(shop, q, {}, admin);
-  const subs = json?.data?.currentAppInstallation?.activeSubscriptions ?? [];
+  const subs = (json as any)?.data?.currentAppInstallation?.activeSubscriptions ?? [];
 
   const ours = subs.find((s: any) => String(s?.name ?? "").startsWith("AI Checkout Calls - "));
   if (!ours) {
@@ -105,8 +115,8 @@ query BillingState {
     return { active: false, usage: null as any };
   }
 
-  const planKey = (String(ours.name).replace("AI Checkout Calls - ", "").trim().toUpperCase()) as PlanKey;
-  const normalizedPlan: PlanKey = isPlanKey(planKey) ? planKey : "STARTER";
+  const planKeyRaw = String(ours.name).replace("AI Checkout Calls - ", "").trim().toUpperCase();
+  const normalizedPlan: PlanKey = isPlanKey(planKeyRaw) ? (planKeyRaw as PlanKey) : "STARTER";
 
   const usageLine = (ours.lineItems ?? []).find(
     (li: any) => li?.plan?.pricingDetails?.__typename === "AppUsagePricing"
@@ -209,12 +219,8 @@ mutation AppSubscriptionCreate(
   };
 
   const json = await graphqlShop(shop, m, vars, admin);
+  const payload = (json as any)?.data?.appSubscriptionCreate;
 
-  // hard GraphQL errors (ex: billing not allowed)
-  const hardErr = json?.errors?.[0]?.message ? String(json.errors[0].message) : null;
-  if (hardErr) throw new Error(hardErr);
-
-  const payload = json?.data?.appSubscriptionCreate;
   const errs = payload?.userErrors ?? [];
   if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
 
@@ -258,10 +264,7 @@ mutation CancelSub($id: ID!, $prorate: Boolean) {
 }`;
 
   const json = await graphqlShop(shop, m, { id: billing.subscriptionId, prorate: !!prorate }, admin);
-  const hardErr = json?.errors?.[0]?.message ? String(json.errors[0].message) : null;
-  if (hardErr) throw new Error(hardErr);
-
-  const payload = json?.data?.appSubscriptionCancel;
+  const payload = (json as any)?.data?.appSubscriptionCancel;
   const errs = payload?.userErrors ?? [];
   if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
 
@@ -294,17 +297,11 @@ mutation UpdateCap($id: ID!, $cappedAmount: MoneyInput!) {
   const json = await graphqlShop(
     shop,
     m,
-    {
-      id: billing.usageLineItemId,
-      cappedAmount: { amount: newCapEUR, currencyCode: BILLING_CURRENCY },
-    },
+    { id: billing.usageLineItemId, cappedAmount: { amount: newCapEUR, currencyCode: BILLING_CURRENCY } },
     admin
   );
 
-  const hardErr = json?.errors?.[0]?.message ? String(json.errors[0].message) : null;
-  if (hardErr) throw new Error(hardErr);
-
-  const payload = json?.data?.appSubscriptionLineItemUpdate;
+  const payload = (json as any)?.data?.appSubscriptionLineItemUpdate;
   const errs = payload?.userErrors ?? [];
   if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
 
@@ -325,6 +322,7 @@ export async function applyBillingForCall(args: {
   const answered = !!args.answered;
   const voicemail = !!args.voicemail;
 
+  // charge only if answered, not voicemail, and >= 15s
   if (!answered || voicemail || rawSeconds < 15) {
     await db.callCharge.upsert({
       where: { callJobId },
@@ -355,6 +353,7 @@ export async function applyBillingForCall(args: {
       create: { shop },
     });
 
+    // FREE: 10 one-time minutes (consume rounded minutes)
     if (billing.plan === "FREE") {
       const freeTotal = 10 * 60;
       const freeUsed = billing.freeSecondsUsed || 0;
@@ -388,6 +387,7 @@ export async function applyBillingForCall(args: {
       if (admin) {
         await syncBillingFromShopify({ shop, admin });
       } else {
+        // minimal sync (no invalid fields)
         const q = `#graphql
 query BillingState {
   currentAppInstallation {
@@ -409,7 +409,7 @@ query BillingState {
   }
 }`;
         const j = await graphqlShop(shop, q, {}, undefined);
-        const subs = j?.data?.currentAppInstallation?.activeSubscriptions ?? [];
+        const subs = (j as any)?.data?.currentAppInstallation?.activeSubscriptions ?? [];
         const ours = subs.find((s: any) => String(s?.name ?? "").startsWith("AI Checkout Calls - "));
         if (ours) {
           const usageLine = (ours.lineItems ?? []).find(
@@ -418,7 +418,7 @@ query BillingState {
           const recurLine = (ours.lineItems ?? []).find(
             (li: any) => li?.plan?.pricingDetails?.__typename === "AppRecurringPricing"
           );
-          await db.shopBilling.update({
+          await tx.shopBilling.update({
             where: { shop },
             data: {
               status: "ACTIVE",
@@ -485,10 +485,7 @@ mutation UsageCharge(
         admin
       );
 
-      const hardErr = json?.errors?.[0]?.message ? String(json.errors[0].message) : null;
-      if (hardErr) throw new Error(hardErr);
-
-      const payload = json?.data?.appUsageRecordCreate;
+      const payload = (json as any)?.data?.appUsageRecordCreate;
       const errs = payload?.userErrors ?? [];
       if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
       usageRecordId = payload?.appUsageRecord?.id ?? null;

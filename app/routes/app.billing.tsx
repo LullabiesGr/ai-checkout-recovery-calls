@@ -1,7 +1,7 @@
 // app/routes/app.billing.tsx
 import * as React from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { Form, useLoaderData } from "react-router";
+import { useFetcher, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
@@ -18,6 +18,9 @@ import {
   Banner,
 } from "@shopify/polaris";
 
+import { useAppBridge } from "@shopify/app-bridge-react";
+import { Redirect } from "@shopify/app-bridge/actions";
+
 import { PLANS, isPlanKey, type PlanKey } from "../lib/billingPlans.shared";
 import {
   ensureBillingRow,
@@ -31,44 +34,7 @@ type LoaderData = {
   shop: string;
   billing: any;
   usage: any | null;
-  error: string | null;
 };
-
-function safeErr(v: any, max = 220) {
-  const s = typeof v === "string" ? v : v == null ? "" : String(v);
-  return s.length > max ? s.slice(0, max) : s;
-}
-
-/** keep embedded params (shop/host/embedded/...) when redirecting back */
-function withSearchMerged(path: string, request: Request) {
-  const req = new URL(request.url);
-  const target = new URL(path, req.origin);
-  const out = new URL(target.pathname, req.origin);
-
-  req.searchParams.forEach((v, k) => out.searchParams.set(k, v));
-  target.searchParams.forEach((v, k) => out.searchParams.set(k, v));
-
-  const qs = out.searchParams.toString();
-  return qs ? `${out.pathname}?${qs}` : out.pathname;
-}
-
-function shortReturnUrl(request: Request, shop: string) {
-  const u = new URL(request.url);
-  const host = u.searchParams.get("host") ?? "";
-  const base = `${u.origin}/app/billing?shop=${encodeURIComponent(shop)}&host=${encodeURIComponent(
-    host
-  )}&embedded=1`;
-
-  // Shopify Billing API validates returnUrl length (<=255 chars)
-  if (base.length <= 255) return base;
-
-  // absolute fallback (still valid)
-  return `${u.origin}/app/billing?shop=${encodeURIComponent(shop)}`;
-}
-
-function formatEUR(amount: number) {
-  return new Intl.NumberFormat("el-GR", { style: "currency", currency: "EUR" }).format(amount);
-}
 
 function badgeToneFromStatus(status: string) {
   const s = String(status || "").toUpperCase();
@@ -78,36 +44,34 @@ function badgeToneFromStatus(status: string) {
   return "info" as const;
 }
 
+function formatEUR(amount: number) {
+  return new Intl.NumberFormat("el-GR", { style: "currency", currency: "EUR" }).format(amount);
+}
+
+function shortReturnUrl(request: Request, shop: string) {
+  const u = new URL(request.url);
+  const host = u.searchParams.get("host") ?? "";
+  // keep it under 255 chars – only what Shopify actually needs
+  const out = new URL("/app/billing", u.origin);
+  out.searchParams.set("shop", shop);
+  if (host) out.searchParams.set("host", host);
+  out.searchParams.set("embedded", "1");
+  return out.toString();
+}
+
 export async function loader({ request }: LoaderFunctionArgs) {
   const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
 
   await ensureBillingRow(shop);
-
-  // always best-effort sync; never crash the page
-  try {
-    await syncBillingFromShopify({ shop, admin });
-  } catch (e: any) {
-    // ignore; show UI anyway from DB
-  }
-
+  const sync = await syncBillingFromShopify({ shop, admin });
   const billing = await db.shopBilling.findUnique({ where: { shop } });
 
-  const url = new URL(request.url);
-  const error = url.searchParams.get("billing_error")
-    ? safeErr(url.searchParams.get("billing_error"))
-    : null;
-
-  return {
-    shop,
-    billing,
-    usage: null,
-    error,
-  } satisfies LoaderData;
+  return { shop, billing, usage: sync?.usage ?? null } satisfies LoaderData;
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  const { admin, session, redirect: shopifyRedirect } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
 
   const form = await request.formData();
@@ -116,9 +80,8 @@ export async function action({ request }: ActionFunctionArgs) {
   try {
     if (intent === "select_plan") {
       const plan = String(form.get("plan") || "").toUpperCase();
-      if (!isPlanKey(plan)) throw new Error("Invalid plan");
+      if (!isPlanKey(plan)) return { ok: false, error: "Invalid plan" };
 
-      // SHORT returnUrl (no id_token/session/hmac)
       const returnUrl = shortReturnUrl(request, shop);
 
       if (plan === "FREE") {
@@ -127,11 +90,7 @@ export async function action({ request }: ActionFunctionArgs) {
           where: { shop },
           data: { plan: "FREE", status: "NONE", pendingPlan: null },
         });
-
-        return new Response(null, {
-          status: 303,
-          headers: { Location: withSearchMerged("/app/billing", request) },
-        });
+        return { ok: true };
       }
 
       const { confirmationUrl } = await createSubscriptionForPlan({
@@ -139,42 +98,44 @@ export async function action({ request }: ActionFunctionArgs) {
         admin,
         plan: plan as PlanKey,
         returnUrl,
-        test: true, // dev stores only
+        test: true,
       });
 
-      // TOP-LEVEL redirect (no iframe)
-      return shopifyRedirect(confirmationUrl, { target: "_top" });
+      return { ok: true, confirmationUrl };
     }
 
     if (intent === "increase_cap") {
       const newCapEUR = Number(form.get("newCapEUR"));
-      if (!Number.isFinite(newCapEUR) || newCapEUR <= 0) throw new Error("Invalid cap");
+      if (!Number.isFinite(newCapEUR) || newCapEUR <= 0) return { ok: false, error: "Invalid cap" };
 
       const { confirmationUrl } = await requestCapIncrease({ shop, admin, newCapEUR });
-      return shopifyRedirect(confirmationUrl, { target: "_top" });
+      return { ok: true, confirmationUrl };
     }
 
     if (intent === "cancel") {
       await cancelActiveSubscription({ shop, admin, prorate: false });
-
-      return new Response(null, {
-        status: 303,
-        headers: { Location: withSearchMerged("/app/billing", request) },
-      });
+      return { ok: true };
     }
 
-    throw new Error("Unknown intent");
+    return { ok: false, error: "Unknown intent" };
   } catch (e: any) {
-    const msg = safeErr(e?.message ?? String(e));
-    return new Response(null, {
-      status: 303,
-      headers: { Location: withSearchMerged(`/app/billing?billing_error=${encodeURIComponent(msg)}`, request) },
-    });
+    const msg = String(e?.message || e || "Billing error");
+    return { ok: false, error: msg };
   }
 }
 
 export default function BillingRoute() {
-  const { shop, billing, error } = useLoaderData<typeof loader>();
+  const { shop, billing, usage } = useLoaderData<typeof loader>();
+  const fetcher = useFetcher<any>();
+  const app = useAppBridge();
+
+  const actionError = fetcher.data?.ok === false ? String(fetcher.data?.error || "Billing error") : "";
+
+  React.useEffect(() => {
+    const url = fetcher.data?.confirmationUrl;
+    if (!url) return;
+    Redirect.create(app).dispatch(Redirect.Action.REMOTE, url);
+  }, [fetcher.data, app]);
 
   const activePlanKey = String(billing?.plan || "FREE") as PlanKey;
   const status = String(billing?.status || "NONE");
@@ -183,18 +144,22 @@ export default function BillingRoute() {
   const freeRemainingMin = Math.floor(freeRemainingSec / 60);
 
   const plan = PLANS[activePlanKey] ?? PLANS.FREE;
-
   const includedUsedSec = Number(billing?.includedSecondsUsed || 0);
   const includedTotalSec = plan.includedMinutes * 60;
   const includedRemainingMin = Math.max(0, Math.floor((includedTotalSec - includedUsedSec) / 60));
+
+  const balanceUsed = usage?.balanceUsed ? Number(usage.balanceUsed.amount) : null;
+  const capAmount = usage?.cappedAmount ? Number(usage.cappedAmount.amount) : null;
+
+  const isBusy = fetcher.state === "submitting" || fetcher.state === "loading";
 
   return (
     <Page title="Billing" subtitle={shop}>
       <Layout>
         <Layout.Section>
-          {error ? (
+          {actionError ? (
             <Banner tone="critical" title="Billing error">
-              <p>{error}</p>
+              <p>{actionError}</p>
             </Banner>
           ) : null}
 
@@ -216,29 +181,38 @@ export default function BillingRoute() {
                   Free minutes remaining: <b>{freeRemainingMin} min</b>
                 </Text>
               ) : (
-                <Text as="p">
-                  Included minutes remaining (this cycle): <b>{includedRemainingMin} min</b>
-                </Text>
+                <>
+                  <Text as="p">
+                    Included minutes remaining (this cycle): <b>{includedRemainingMin} min</b>
+                  </Text>
+                  {balanceUsed != null && capAmount != null ? (
+                    <Text as="p">
+                      Usage spend (this cycle): <b>{formatEUR(balanceUsed)}</b> / cap <b>{formatEUR(capAmount)}</b>
+                    </Text>
+                  ) : null}
+                </>
               )}
 
               <Divider />
 
               <InlineStack gap="200">
                 {activePlanKey !== "FREE" ? (
-                  <Form method="post">
+                  <fetcher.Form method="post">
                     <input type="hidden" name="intent" value="cancel" />
-                    <Button tone="critical" submit>
+                    <Button tone="critical" submit loading={isBusy}>
                       Cancel subscription
                     </Button>
-                  </Form>
+                  </fetcher.Form>
                 ) : null}
 
                 {activePlanKey !== "FREE" ? (
-                  <Form method="post">
+                  <fetcher.Form method="post">
                     <input type="hidden" name="intent" value="increase_cap" />
-                    <input type="hidden" name="newCapEUR" value={String((plan.usageCapEUR ?? 0) + 50)} />
-                    <Button submit>Increase cap +€50</Button>
-                  </Form>
+                    <input type="hidden" name="newCapEUR" value={String((capAmount ?? plan.usageCapEUR) + 50)} />
+                    <Button submit loading={isBusy}>
+                      Increase cap +€50
+                    </Button>
+                  </fetcher.Form>
                 ) : null}
               </InlineStack>
             </BlockStack>
@@ -279,13 +253,13 @@ export default function BillingRoute() {
                         </Text>
                       )}
 
-                      <Form method="post">
+                      <fetcher.Form method="post">
                         <input type="hidden" name="intent" value="select_plan" />
                         <input type="hidden" name="plan" value={k} />
-                        <Button submit disabled={isActive}>
+                        <Button submit disabled={isActive} loading={isBusy}>
                           {isActive ? "Selected" : "Select"}
                         </Button>
-                      </Form>
+                      </fetcher.Form>
                     </BlockStack>
                   </Card>
                 );
