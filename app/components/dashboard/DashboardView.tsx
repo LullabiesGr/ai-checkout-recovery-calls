@@ -87,6 +87,7 @@ export type DashboardViewProps = {
     status: string;
     tone: BadgeTone;
     whenText: string;
+    statusHint?: string; // clarifies "call outcome" vs "verified order"
     recordingUrl?: string;
     logUrl?: string;
   }>;
@@ -164,13 +165,11 @@ function metricTile(props: {
 function shouldHideSettingRowLabel(label: string) {
   const s = (label || "").toLowerCase().trim();
 
-  // hide provider-internal identifiers from UI
   if (s.includes("assistant id")) return true;
   if (s.includes("phone number id")) return true;
   if (s.includes("phone_number_id")) return true;
   if (s.includes("assistant_id")) return true;
 
-  // hide explicit provider-name labels if any
   if (s.includes("vapi")) return true;
 
   return false;
@@ -180,6 +179,24 @@ export function DashboardView(props: DashboardViewProps) {
   const settingsRows = React.useMemo(() => {
     return (props.settings.rows || []).filter((r) => !shouldHideSettingRowLabel(r.label));
   }, [props.settings.rows]);
+
+  const banner = React.useMemo(() => {
+    if (!props.settings.enabled) return null;
+
+    if (props.settings.criticalMissing || !props.settings.vapiReady) {
+      return (
+        <s-banner tone="warning" heading="Automation enabled, calls not ready">
+          <s-text>Open Settings and complete the missing call provider configuration.</s-text>
+        </s-banner>
+      );
+    }
+
+    return (
+      <s-banner tone="success" heading="AI agents are ready to call">
+        <s-text>Open Settings to configure scripts, timing, and rules.</s-text>
+      </s-banner>
+    );
+  }, [props.settings.enabled, props.settings.criticalMissing, props.settings.vapiReady]);
 
   return (
     <s-page heading="Dashboard">
@@ -226,26 +243,22 @@ export function DashboardView(props: DashboardViewProps) {
                 </s-button-group>
               </s-stack>
 
-              {props.settings.enabled ? (
-                <s-banner tone="success" heading="AI agents are ready to call">
-                  <s-text>Open Settings to configure scripts, timing, and rules.</s-text>
-                </s-banner>
-              ) : null}
+              {banner}
             </s-stack>
           </s-box>
         </s-section>
 
-        {/* HERO recovered callout */}
+        {/* HERO verified recovered callout */}
         {props.hero.show ? (
           <s-section>
             <s-box border="base" borderRadius="base" padding="base" background="subdued">
               <s-stack direction="block" gap="tight">
-                <s-heading>You recovered {props.hero.recoveredRevenueText}</s-heading>
+                <s-heading>Verified recovered revenue: {props.hero.recoveredRevenueText}</s-heading>
                 <s-text tone="subdued">
                   from {props.hero.recoveredCount} recovered checkouts • Win rate {props.hero.winRate}%
                 </s-text>
                 <s-stack direction="inline" gap="tight">
-                  <s-badge tone="success">RECOVERED</s-badge>
+                  <s-badge tone="success">VERIFIED</s-badge>
                   <s-badge tone="info">{props.range.label}</s-badge>
                 </s-stack>
                 <s-button href={props.hero.href} variant="primary">
@@ -256,7 +269,7 @@ export function DashboardView(props: DashboardViewProps) {
           </s-section>
         ) : null}
 
-        {/* Metrics tiles row (merchant-value first) */}
+        {/* Metrics tiles row */}
         <s-section>
           <s-stack direction="block" gap="tight">
             <s-heading size="small">Key metrics</s-heading>
@@ -325,7 +338,10 @@ export function DashboardView(props: DashboardViewProps) {
                         <s-table-row key={r.key}>
                           <s-table-cell>{r.event}</s-table-cell>
                           <s-table-cell>
-                            <s-badge tone={toneBadge(r.tone)}>{r.status}</s-badge>
+                            <s-stack direction="block" gap="tight">
+                              <s-badge tone={toneBadge(r.tone)}>{r.status}</s-badge>
+                              {r.statusHint ? <s-text tone="subdued">{r.statusHint}</s-text> : null}
+                            </s-stack>
                           </s-table-cell>
                           <s-table-cell>
                             <s-text tone="subdued">{r.whenText}</s-text>
@@ -346,7 +362,7 @@ export function DashboardView(props: DashboardViewProps) {
           </s-grid>
         </s-query-container>
 
-        {/* Today’s priorities (full width) */}
+        {/* Today’s priorities */}
         <s-section heading="Today’s priorities">
           <s-box border="base" borderRadius="base" background="base">
             <s-table>
