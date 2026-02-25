@@ -1,9 +1,11 @@
 // app/routes/app.billing.tsx
 import * as React from "react";
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData } from "react-router";
-import { authenticate } from "../shopify.server";
+import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { Form, useLoaderData, useNavigation, useRouteError } from "react-router";
+import { boundary } from "@shopify/shopify-app-react-router/server";
+
 import db from "../db.server";
+import { authenticate } from "../shopify.server";
 
 import {
   Page,
@@ -18,9 +20,6 @@ import {
   Banner,
 } from "@shopify/polaris";
 
-import { useAppBridge } from "@shopify/app-bridge-react";
-import { Redirect } from "@shopify/app-bridge/actions";
-
 import { PLANS, isPlanKey, type PlanKey } from "../lib/billingPlans.shared";
 import {
   ensureBillingRow,
@@ -34,12 +33,97 @@ type LoaderData = {
   shop: string;
   billing: any;
   usage: any | null;
+  billingError: string | null;
 };
+
+function requiredEnv(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env: ${name}`);
+  return v;
+}
+
+function asErrorMessage(e: unknown) {
+  if (!e) return "Unknown error";
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+
+  const anyE: any = e;
+  if (anyE?.message && typeof anyE.message === "string") return anyE.message;
+
+  // Shopify GraphQL style
+  if (Array.isArray(anyE?.graphQLErrors) && anyE.graphQLErrors.length) {
+    try {
+      return JSON.stringify(anyE.graphQLErrors);
+    } catch {
+      return "GraphQL error";
+    }
+  }
+  if (anyE?.response?.errors) {
+    try {
+      return JSON.stringify(anyE.response.errors);
+    } catch {
+      return "Response error";
+    }
+  }
+
+  try {
+    const s = JSON.stringify(e);
+    return s === "{}" ? "Request failed (empty error object)" : s;
+  } catch {
+    return String(e);
+  }
+}
+
+/**
+ * Keep ONLY embedded params (shop/host/embedded/locale). Drop id_token/hmac/session/etc.
+ */
+function embeddedPath(pathname: string, request: Request, extra?: Record<string, string>) {
+  const req = new URL(request.url);
+  const out = new URL(pathname, req.origin);
+
+  for (const k of ["shop", "host", "embedded", "locale"]) {
+    const v = req.searchParams.get(k);
+    if (v) out.searchParams.set(k, v);
+  }
+  if (extra) {
+    for (const [k, v] of Object.entries(extra)) {
+      if (v != null && String(v).length) out.searchParams.set(k, String(v));
+    }
+  }
+
+  const qs = out.searchParams.toString();
+  return qs ? `${out.pathname}?${qs}` : out.pathname;
+}
+
+/**
+ * Admin embedded URL (Shopify will iframe your app).
+ * Use for "go back" redirects when action ran in _top.
+ */
+function billingAdminUrl(shop: string, extra?: Record<string, string>) {
+  const apiKey = requiredEnv("SHOPIFY_API_KEY");
+  const u = new URL(`https://${shop}/admin/apps/${apiKey}/app/billing`);
+  if (extra) {
+    for (const [k, v] of Object.entries(extra)) {
+      if (v != null && String(v).length) u.searchParams.set(k, String(v));
+    }
+  }
+  return u.toString();
+}
+
+/**
+ * Return URL for Billing confirmation (MUST be on your app domain).
+ * Keep it short to avoid the 255-char limit.
+ */
+function billingReturnUrlOnApp(request: Request, shop: string) {
+  const base =
+    (process.env.SHOPIFY_APP_URL ?? process.env.APP_URL ?? new URL(request.url).origin).replace(/\/+$/, "");
+  return `${base}/app/billing/confirm?shop=${encodeURIComponent(shop)}`;
+}
 
 function badgeToneFromStatus(status: string) {
   const s = String(status || "").toUpperCase();
   if (s === "ACTIVE") return "success" as const;
-  if (s === "PENDING") return "warning" as const;
+  if (s === "PENDING") return "attention" as const;
   if (s === "CANCELLED") return "critical" as const;
   return "info" as const;
 }
@@ -48,94 +132,129 @@ function formatEUR(amount: number) {
   return new Intl.NumberFormat("el-GR", { style: "currency", currency: "EUR" }).format(amount);
 }
 
-function shortReturnUrl(request: Request, shop: string) {
-  const u = new URL(request.url);
-  const host = u.searchParams.get("host") ?? "";
-  // keep it under 255 chars – only what Shopify actually needs
-  const out = new URL("/app/billing", u.origin);
-  out.searchParams.set("shop", shop);
-  if (host) out.searchParams.set("host", host);
-  out.searchParams.set("embedded", "1");
-  return out.toString();
-}
-
 export async function loader({ request }: LoaderFunctionArgs) {
-  const { admin, session } = await authenticate.admin(request);
+  const auth: any = await authenticate.admin(request);
+  const { admin, session } = auth;
   const shop = session.shop;
 
+  const url = new URL(request.url);
+  const billingErrorFromUrl = url.searchParams.get("billing_error");
+
   await ensureBillingRow(shop);
-  const sync = await syncBillingFromShopify({ shop, admin });
+
+  let usage: any | null = null;
+  let syncErr: string | null = null;
+
+  try {
+    const sync = await syncBillingFromShopify({ shop, admin });
+    usage = sync?.usage ?? null;
+  } catch (e) {
+    syncErr = asErrorMessage(e);
+  }
+
   const billing = await db.shopBilling.findUnique({ where: { shop } });
 
-  return { shop, billing, usage: sync?.usage ?? null } satisfies LoaderData;
+  return {
+    shop,
+    billing,
+    usage,
+    billingError: billingErrorFromUrl ?? syncErr,
+  } satisfies LoaderData;
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  const { admin, session } = await authenticate.admin(request);
+  const auth: any = await authenticate.admin(request);
+  const { admin, session } = auth;
   const shop = session.shop;
 
-  const form = await request.formData();
-  const intent = String(form.get("intent") || "");
+  const fd = await request.formData();
+  const intent = String(fd.get("intent") || "");
+  const wantsTop = String(fd.get("top") || "") === "1";
+
+  const backToBilling = (extra?: Record<string, string>) => {
+    const location = wantsTop
+      ? billingAdminUrl(shop, extra)
+      : embeddedPath("/app/billing", request, extra);
+
+    return new Response(null, { status: 303, headers: { Location: location } });
+  };
+
+  const fail = (msg: string) => backToBilling({ billing_error: msg });
+
+  // If a non-_top submit ever hits this, still try to bust out safely.
+  const redirectTopHtml = (url: string) => {
+    const html = `<!doctype html><html><head><meta charset="utf-8" /></head>
+<body><script>window.top.location.href=${JSON.stringify(url)};</script></body></html>`;
+    return new Response(html, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+  };
 
   try {
     if (intent === "select_plan") {
-      const plan = String(form.get("plan") || "").toUpperCase();
-      if (!isPlanKey(plan)) return { ok: false, error: "Invalid plan" };
+      const planRaw = String(fd.get("plan") || "").toUpperCase();
+      if (!isPlanKey(planRaw)) return fail("Invalid plan");
 
-      const returnUrl = shortReturnUrl(request, shop);
-
-      if (plan === "FREE") {
+      if (planRaw === "FREE") {
         await cancelActiveSubscription({ shop, admin, prorate: false });
         await db.shopBilling.update({
           where: { shop },
           data: { plan: "FREE", status: "NONE", pendingPlan: null },
         });
-        return { ok: true };
+        return backToBilling({ ok: "1" });
       }
+
+      const returnUrl = billingReturnUrlOnApp(request, shop);
+
+      const test =
+        process.env.SHOPIFY_BILLING_TEST === "true" ||
+        (process.env.NODE_ENV !== "production" && process.env.SHOPIFY_BILLING_TEST !== "false");
 
       const { confirmationUrl } = await createSubscriptionForPlan({
         shop,
         admin,
-        plan: plan as PlanKey,
+        plan: planRaw as PlanKey,
         returnUrl,
-        test: true,
+        test,
       });
 
-      return { ok: true, confirmationUrl };
+      // This request is submitted with target="_top", so a normal redirect works.
+      if (wantsTop) {
+        return new Response(null, { status: 303, headers: { Location: confirmationUrl } });
+      }
+
+      return redirectTopHtml(confirmationUrl);
     }
 
     if (intent === "increase_cap") {
-      const newCapEUR = Number(form.get("newCapEUR"));
-      if (!Number.isFinite(newCapEUR) || newCapEUR <= 0) return { ok: false, error: "Invalid cap" };
+      const newCapEUR = Number(fd.get("newCapEUR"));
+      if (!Number.isFinite(newCapEUR) || newCapEUR <= 0) return fail("Invalid cap amount");
 
       const { confirmationUrl } = await requestCapIncrease({ shop, admin, newCapEUR });
-      return { ok: true, confirmationUrl };
+
+      if (wantsTop) {
+        return new Response(null, { status: 303, headers: { Location: confirmationUrl } });
+      }
+
+      return redirectTopHtml(confirmationUrl);
     }
 
     if (intent === "cancel") {
       await cancelActiveSubscription({ shop, admin, prorate: false });
-      return { ok: true };
+      return backToBilling({ ok: "1" });
     }
 
-    return { ok: false, error: "Unknown intent" };
-  } catch (e: any) {
-    const msg = String(e?.message || e || "Billing error");
-    return { ok: false, error: msg };
+    return fail("Unknown intent");
+  } catch (e) {
+    return fail(asErrorMessage(e));
   }
 }
 
 export default function BillingRoute() {
-  const { shop, billing, usage } = useLoaderData<typeof loader>();
-  const fetcher = useFetcher<any>();
-  const app = useAppBridge();
+  const { shop, billing, usage, billingError } = useLoaderData<typeof loader>();
+  const navigation = useNavigation();
 
-  const actionError = fetcher.data?.ok === false ? String(fetcher.data?.error || "Billing error") : "";
-
-  React.useEffect(() => {
-    const url = fetcher.data?.confirmationUrl;
-    if (!url) return;
-    Redirect.create(app).dispatch(Redirect.Action.REMOTE, url);
-  }, [fetcher.data, app]);
+  const isBusy = navigation.state === "submitting" || navigation.state === "loading";
+  const activeIntent = navigation.formData?.get("intent")?.toString() ?? "";
+  const activePlan = navigation.formData?.get("plan")?.toString() ?? "";
 
   const activePlanKey = String(billing?.plan || "FREE") as PlanKey;
   const status = String(billing?.status || "NONE");
@@ -151,15 +270,13 @@ export default function BillingRoute() {
   const balanceUsed = usage?.balanceUsed ? Number(usage.balanceUsed.amount) : null;
   const capAmount = usage?.cappedAmount ? Number(usage.cappedAmount.amount) : null;
 
-  const isBusy = fetcher.state === "submitting" || fetcher.state === "loading";
-
   return (
     <Page title="Billing" subtitle={shop}>
       <Layout>
         <Layout.Section>
-          {actionError ? (
+          {billingError ? (
             <Banner tone="critical" title="Billing error">
-              <p>{actionError}</p>
+              <p>{billingError}</p>
             </Banner>
           ) : null}
 
@@ -197,22 +314,27 @@ export default function BillingRoute() {
 
               <InlineStack gap="200">
                 {activePlanKey !== "FREE" ? (
-                  <fetcher.Form method="post">
+                  <Form method="post">
                     <input type="hidden" name="intent" value="cancel" />
-                    <Button tone="critical" submit loading={isBusy}>
+                    <Button tone="critical" submit loading={isBusy && activeIntent === "cancel"}>
                       Cancel subscription
                     </Button>
-                  </fetcher.Form>
+                  </Form>
                 ) : null}
 
                 {activePlanKey !== "FREE" ? (
-                  <fetcher.Form method="post">
+                  <Form method="post" reloadDocument target="_top">
                     <input type="hidden" name="intent" value="increase_cap" />
-                    <input type="hidden" name="newCapEUR" value={String((capAmount ?? plan.usageCapEUR) + 50)} />
-                    <Button submit loading={isBusy}>
+                    <input type="hidden" name="top" value="1" />
+                    <input
+                      type="hidden"
+                      name="newCapEUR"
+                      value={String((capAmount ?? plan.usageCapEUR) + 50)}
+                    />
+                    <Button submit loading={isBusy && activeIntent === "increase_cap"}>
                       Increase cap +€50
                     </Button>
-                  </fetcher.Form>
+                  </Form>
                 ) : null}
               </InlineStack>
             </BlockStack>
@@ -229,6 +351,12 @@ export default function BillingRoute() {
               {(["FREE", "STARTER", "PRO", "SCALE", "PAYG"] as PlanKey[]).map((k) => {
                 const p = PLANS[k];
                 const isActive = k === activePlanKey;
+                const isThisSubmitting = isBusy && activeIntent === "select_plan" && activePlan === k;
+
+                const needsConfirmation = k !== "FREE"; // anything non-free must open Shopify confirmation
+                const formProps: any = needsConfirmation
+                  ? { reloadDocument: true, target: "_top" }
+                  : {};
 
                 return (
                   <Card key={k} sectioned>
@@ -253,13 +381,14 @@ export default function BillingRoute() {
                         </Text>
                       )}
 
-                      <fetcher.Form method="post">
+                      <Form method="post" {...formProps}>
                         <input type="hidden" name="intent" value="select_plan" />
                         <input type="hidden" name="plan" value={k} />
-                        <Button submit disabled={isActive} loading={isBusy}>
+                        {needsConfirmation ? <input type="hidden" name="top" value="1" /> : null}
+                        <Button submit disabled={isActive} loading={isThisSubmitting}>
                           {isActive ? "Selected" : "Select"}
                         </Button>
-                      </fetcher.Form>
+                      </Form>
                     </BlockStack>
                   </Card>
                 );
@@ -271,3 +400,9 @@ export default function BillingRoute() {
     </Page>
   );
 }
+
+export function ErrorBoundary() {
+  return boundary.error(useRouteError());
+}
+
+export const headers: HeadersFunction = (args) => boundary.headers(args);

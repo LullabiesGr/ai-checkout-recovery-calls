@@ -4,10 +4,9 @@ import { sessionStorage } from "../shopify.server";
 import { BILLING_CURRENCY, PLANS, type PlanKey, isPlanKey } from "./billingPlans.server";
 
 type AdminLike = {
-  graphql: (query: string, options?: any) => Promise<Response>;
+  graphql: (query: string, options?: any) => Promise<any>; // Response in current templates
 };
 
-// keep in sync with your Shopify app config (logs showed 2025-07)
 const API_VERSION = process.env.SHOPIFY_API_VERSION ?? "2025-07";
 
 function moneyInputFromCents(cents: number) {
@@ -27,15 +26,22 @@ function idempotencyKeyForCall(callJobId: string) {
   return (`call_${callJobId}`).slice(0, 255);
 }
 
+function asErrorMessage(e: unknown) {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
+}
+
 async function graphqlShop(shop: string, query: string, variables: any, admin?: AdminLike) {
   if (admin) {
-    // shopify-api client might throw GraphqlQueryError before returning Response
     const resp = await admin.graphql(query, { variables });
-    const json = await resp.json().catch(() => ({}));
-    if ((json as any)?.errors?.length) {
-      throw new Error((json as any).errors.map((e: any) => e.message).join(" | "));
-    }
-    return json;
+    // Current Shopify templates return a Response, so parse it. If not, just return as-is.
+    if (resp && typeof resp.json === "function") return await resp.json();
+    return resp;
   }
 
   const sessionId = `offline_${shop}`;
@@ -52,11 +58,8 @@ async function graphqlShop(shop: string, query: string, variables: any, admin?: 
     },
     body: JSON.stringify({ query, variables }),
   });
-  const json = await resp.json().catch(() => ({}));
-  if ((json as any)?.errors?.length) {
-    throw new Error((json as any).errors.map((e: any) => e.message).join(" | "));
-  }
-  return json;
+
+  return await resp.json();
 }
 
 export async function ensureBillingRow(shop: string) {
@@ -98,9 +101,11 @@ query BillingState {
 }`;
 
   const json = await graphqlShop(shop, q, {}, admin);
-  const subs = (json as any)?.data?.currentAppInstallation?.activeSubscriptions ?? [];
+  if (json?.errors?.length) throw new Error(json.errors.map((e: any) => e.message).join(" | "));
 
+  const subs = json?.data?.currentAppInstallation?.activeSubscriptions ?? [];
   const ours = subs.find((s: any) => String(s?.name ?? "").startsWith("AI Checkout Calls - "));
+
   if (!ours) {
     await db.shopBilling.update({
       where: { shop },
@@ -115,8 +120,8 @@ query BillingState {
     return { active: false, usage: null as any };
   }
 
-  const planKeyRaw = String(ours.name).replace("AI Checkout Calls - ", "").trim().toUpperCase();
-  const normalizedPlan: PlanKey = isPlanKey(planKeyRaw) ? (planKeyRaw as PlanKey) : "STARTER";
+  const planKey = (String(ours.name).replace("AI Checkout Calls - ", "").trim().toUpperCase()) as PlanKey;
+  const normalizedPlan: PlanKey = isPlanKey(planKey) ? planKey : "STARTER";
 
   const usageLine = (ours.lineItems ?? []).find(
     (li: any) => li?.plan?.pricingDetails?.__typename === "AppUsagePricing"
@@ -219,8 +224,9 @@ mutation AppSubscriptionCreate(
   };
 
   const json = await graphqlShop(shop, m, vars, admin);
-  const payload = (json as any)?.data?.appSubscriptionCreate;
+  if (json?.errors?.length) throw new Error(json.errors.map((e: any) => e.message).join(" | "));
 
+  const payload = json?.data?.appSubscriptionCreate;
   const errs = payload?.userErrors ?? [];
   if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
 
@@ -243,7 +249,9 @@ mutation AppSubscriptionCreate(
     },
   });
 
-  return { confirmationUrl: payload?.confirmationUrl as string };
+  const confirmationUrl = payload?.confirmationUrl as string | undefined;
+  if (!confirmationUrl) throw new Error("Missing confirmationUrl");
+  return { confirmationUrl };
 }
 
 export async function cancelActiveSubscription(args: { shop: string; admin: AdminLike; prorate?: boolean }) {
@@ -264,7 +272,9 @@ mutation CancelSub($id: ID!, $prorate: Boolean) {
 }`;
 
   const json = await graphqlShop(shop, m, { id: billing.subscriptionId, prorate: !!prorate }, admin);
-  const payload = (json as any)?.data?.appSubscriptionCancel;
+  if (json?.errors?.length) throw new Error(json.errors.map((e: any) => e.message).join(" | "));
+
+  const payload = json?.data?.appSubscriptionCancel;
   const errs = payload?.userErrors ?? [];
   if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
 
@@ -300,12 +310,15 @@ mutation UpdateCap($id: ID!, $cappedAmount: MoneyInput!) {
     { id: billing.usageLineItemId, cappedAmount: { amount: newCapEUR, currencyCode: BILLING_CURRENCY } },
     admin
   );
+  if (json?.errors?.length) throw new Error(json.errors.map((e: any) => e.message).join(" | "));
 
-  const payload = (json as any)?.data?.appSubscriptionLineItemUpdate;
+  const payload = json?.data?.appSubscriptionLineItemUpdate;
   const errs = payload?.userErrors ?? [];
   if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
 
-  return { confirmationUrl: payload?.confirmationUrl as string };
+  const confirmationUrl = payload?.confirmationUrl as string | undefined;
+  if (!confirmationUrl) throw new Error("Missing confirmationUrl");
+  return { confirmationUrl };
 }
 
 export async function applyBillingForCall(args: {
@@ -319,11 +332,10 @@ export async function applyBillingForCall(args: {
   const { shop, admin, callJobId } = args;
 
   const rawSeconds = Math.max(0, Math.floor(Number(args.connectedSeconds) || 0));
-  const answered = !!args.answered;
-  const voicemail = !!args.voicemail;
+  const wasAnswered = !!args.answered;
+  const wasVoicemail = !!args.voicemail;
 
-  // charge only if answered, not voicemail, and >= 15s
-  if (!answered || voicemail || rawSeconds < 15) {
+  if (!wasAnswered || wasVoicemail || rawSeconds < 15) {
     await db.callCharge.upsert({
       where: { callJobId },
       update: {},
@@ -353,12 +365,11 @@ export async function applyBillingForCall(args: {
       create: { shop },
     });
 
-    // FREE: 10 one-time minutes (consume rounded minutes)
+    // FREE: 10 one-time minutes
     if (billing.plan === "FREE") {
       const freeTotal = 10 * 60;
       const freeUsed = billing.freeSecondsUsed || 0;
       const freeRemaining = Math.max(0, freeTotal - freeUsed);
-
       const consumeFree = Math.min(billableSeconds, freeRemaining);
 
       await tx.shopBilling.update({
@@ -384,50 +395,55 @@ export async function applyBillingForCall(args: {
     const p = PLANS[planKey];
 
     if (!billing.usageLineItemId) {
-      if (admin) {
-        await syncBillingFromShopify({ shop, admin });
-      } else {
-        // minimal sync (no invalid fields)
-        const q = `#graphql
-query BillingState {
-  currentAppInstallation {
-    activeSubscriptions {
-      id
-      name
-      status
-      lineItems {
-        id
-        plan {
-          pricingDetails {
-            __typename
-            ... on AppUsagePricing { cappedAmount { amount currencyCode } balanceUsed { amount currencyCode } }
-            ... on AppRecurringPricing { interval price { amount currencyCode } }
+      try {
+        if (admin) {
+          await syncBillingFromShopify({ shop, admin });
+        } else {
+          const q = `#graphql
+          query BillingState {
+            currentAppInstallation {
+              activeSubscriptions {
+                id
+                name
+                status
+                lineItems {
+                  id
+                  plan {
+                    pricingDetails {
+                      __typename
+                      ... on AppUsagePricing { cappedAmount { amount currencyCode } balanceUsed { amount currencyCode } }
+                      ... on AppRecurringPricing { interval price { amount currencyCode } }
+                    }
+                  }
+                }
+              }
+            }
+          }`;
+          const j = await graphqlShop(shop, q, {}, undefined);
+          if (j?.errors?.length) throw new Error(j.errors.map((e: any) => e.message).join(" | "));
+
+          const subs = j?.data?.currentAppInstallation?.activeSubscriptions ?? [];
+          const ours = subs.find((s: any) => String(s?.name ?? "").startsWith("AI Checkout Calls - "));
+          if (ours) {
+            const usageLine = (ours.lineItems ?? []).find(
+              (li: any) => li?.plan?.pricingDetails?.__typename === "AppUsagePricing"
+            );
+            const recurLine = (ours.lineItems ?? []).find(
+              (li: any) => li?.plan?.pricingDetails?.__typename === "AppRecurringPricing"
+            );
+            await tx.shopBilling.update({
+              where: { shop },
+              data: {
+                status: "ACTIVE",
+                subscriptionId: ours.id,
+                usageLineItemId: usageLine?.id ?? null,
+                recurringLineItemId: recurLine?.id ?? null,
+              },
+            });
           }
         }
-      }
-    }
-  }
-}`;
-        const j = await graphqlShop(shop, q, {}, undefined);
-        const subs = (j as any)?.data?.currentAppInstallation?.activeSubscriptions ?? [];
-        const ours = subs.find((s: any) => String(s?.name ?? "").startsWith("AI Checkout Calls - "));
-        if (ours) {
-          const usageLine = (ours.lineItems ?? []).find(
-            (li: any) => li?.plan?.pricingDetails?.__typename === "AppUsagePricing"
-          );
-          const recurLine = (ours.lineItems ?? []).find(
-            (li: any) => li?.plan?.pricingDetails?.__typename === "AppRecurringPricing"
-          );
-          await tx.shopBilling.update({
-            where: { shop },
-            data: {
-              status: "ACTIVE",
-              subscriptionId: ours.id,
-              usageLineItemId: usageLine?.id ?? null,
-              recurringLineItemId: recurLine?.id ?? null,
-            },
-          });
-        }
+      } catch (e) {
+        throw new Error(`Billing sync failed: ${asErrorMessage(e)}`);
       }
 
       billing = await tx.shopBilling.findUniqueOrThrow({ where: { shop } });
@@ -454,22 +470,22 @@ query BillingState {
 
     if (amountCents > 0) {
       const m = `#graphql
-mutation UsageCharge(
-  $description: String!
-  $price: MoneyInput!
-  $subscriptionLineItemId: ID!
-  $idempotencyKey: String
-) {
-  appUsageRecordCreate(
-    description: $description
-    price: $price
-    subscriptionLineItemId: $subscriptionLineItemId
-    idempotencyKey: $idempotencyKey
-  ) {
-    userErrors { field message }
-    appUsageRecord { id }
-  }
-}`;
+      mutation UsageCharge(
+        $description: String!
+        $price: MoneyInput!
+        $subscriptionLineItemId: ID!
+        $idempotencyKey: String
+      ) {
+        appUsageRecordCreate(
+          description: $description
+          price: $price
+          subscriptionLineItemId: $subscriptionLineItemId
+          idempotencyKey: $idempotencyKey
+        ) {
+          userErrors { field message }
+          appUsageRecord { id }
+        }
+      }`;
 
       const idempotencyKey = idempotencyKeyForCall(callJobId);
 
@@ -485,7 +501,9 @@ mutation UsageCharge(
         admin
       );
 
-      const payload = (json as any)?.data?.appUsageRecordCreate;
+      if (json?.errors?.length) throw new Error(json.errors.map((e: any) => e.message).join(" | "));
+
+      const payload = json?.data?.appUsageRecordCreate;
       const errs = payload?.userErrors ?? [];
       if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
       usageRecordId = payload?.appUsageRecord?.id ?? null;
