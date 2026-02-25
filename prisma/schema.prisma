@@ -4,8 +4,8 @@ generator client {
 
 datasource db {
   provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  url       = env("DATABASE_URL")  // runtime (μπορεί να είναι pooler)
+  directUrl = env("DIRECT_URL")    // ΠΑΝΤΑ direct για migrations
 }
 
 model Checkout {
@@ -179,7 +179,11 @@ model ShopBilling {
   includedSecondsUsed Int          @default(0)
   freeSecondsUsed     Int          @default(0)
 
-  pendingPlan        BillingPlan?
+  pendingPlan         BillingPlan?
+
+  pendingCouponCode   String?
+  pendingCouponId     String? @db.Uuid
+  appliedCouponCode   String?
 
   createdAt          DateTime      @default(now())
   updatedAt          DateTime      @updatedAt
@@ -226,4 +230,53 @@ enum CallJobStatus {
   COMPLETED
   FAILED
   CANCELED
+}
+
+enum CouponDiscountType {
+  PERCENT
+  AMOUNT
+}
+
+model BillingCoupon {
+  id                       String   @id @default(uuid()) @db.Uuid
+  code                   String   @unique
+  active                 Boolean  @default(true)
+
+  type                   CouponDiscountType
+  // For PERCENT: decimal fraction (0.20 = 20% off)
+  percentage             Float?
+  // For AMOUNT: fixed amount off the monthly subscription fee (in EUR)
+  amountOffEUR           Float?
+
+  // If set, Shopify applies the discount for N billing intervals (e.g. 1 = first month only)
+  durationLimitInIntervals Int?
+
+  // Optional: JSON array of plan keys, e.g. ["STARTER","PRO"]. Null/empty = all.
+  appliesToPlans         Json?
+
+  // Optional: global max redemptions
+  maxRedemptions         Int?
+  redeemedCount          Int      @default(0)
+
+  startsAt               DateTime?
+  endsAt                 DateTime?
+
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  redemptions            BillingCouponRedemption[]
+}
+
+model BillingCouponRedemption {
+  id             String   @id @default(uuid()) @db.Uuid
+  couponId       String
+  shop           String
+  subscriptionId String?
+  redeemedAt     DateTime @default(now())
+
+  coupon         BillingCoupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
+
+  @@unique([couponId, shop])
+  @@index([shop])
+  @@index([couponId])
 }

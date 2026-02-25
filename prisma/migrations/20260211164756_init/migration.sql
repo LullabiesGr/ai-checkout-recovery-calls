@@ -79,7 +79,7 @@ CREATE TABLE "Settings" (
 );
 
 -- CreateTable
-CREATE TABLE "Session" (
+CREATE TABLE IF NOT EXISTS "Session" (
     "id" TEXT NOT NULL,
     "shop" TEXT NOT NULL,
     "state" TEXT NOT NULL,
@@ -102,22 +102,22 @@ CREATE TABLE "Session" (
 );
 
 -- CreateIndex
-CREATE INDEX "Checkout_shop_status_createdAt_idx" ON "Checkout"("shop", "status", "createdAt");
+CREATE INDEX IF NOT EXISTS "Checkout_shop_status_createdAt_idx" ON "Checkout"("shop", "status", "createdAt");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Checkout_shop_checkoutId_key" ON "Checkout"("shop", "checkoutId");
 
 -- CreateIndex
-CREATE INDEX "Order_shop_createdAt_idx" ON "Order"("shop", "createdAt");
+CREATE INDEX IF NOT EXISTS "Order_shop_createdAt_idx" ON "Order"("shop", "createdAt");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Order_shop_orderId_key" ON "Order"("shop", "orderId");
 
 -- CreateIndex
-CREATE INDEX "CallJob_shop_status_scheduledFor_idx" ON "CallJob"("shop", "status", "scheduledFor");
+CREATE INDEX IF NOT EXISTS "CallJob_shop_status_scheduledFor_idx" ON "CallJob"("shop", "status", "scheduledFor");
 
 -- CreateIndex
-CREATE INDEX "CallJob_shop_checkoutId_idx" ON "CallJob"("shop", "checkoutId");
+CREATE INDEX IF NOT EXISTS "CallJob_shop_checkoutId_idx" ON "CallJob"("shop", "checkoutId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Settings_shop_key" ON "Settings"("shop");

@@ -1,6 +1,5 @@
--- AlterTable 
-ALTER TABLE "Session" ADD COLUMN "refreshToken" TEXT,
-ADD COLUMN "refreshTokenExpires" TIMESTAMP(3);
+ALTER TABLE "Session"
+  ADD COLUMN IF NOT EXISTS "refreshToken" TEXT,
+  ADD COLUMN IF NOT EXISTS "refreshTokenExpires" TIMESTAMP(3);
 
--- CreateIndex (idempotent)
-CREATE INDEX "Session_shop_idx" ON "Session"("shop");
+CREATE INDEX IF NOT EXISTS "Session_shop_idx" ON "Session"("shop");

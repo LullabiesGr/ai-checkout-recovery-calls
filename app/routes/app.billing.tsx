@@ -25,6 +25,7 @@ import { PLANS, isPlanKey, type PlanKey } from "../lib/billingPlans.shared";
 import {
   ensureBillingRow,
   syncBillingFromShopify,
+  createSubscriptionForPlan,
   cancelActiveSubscription,
   requestCapIncrease,
 } from "../lib/billing.server";
@@ -36,11 +37,38 @@ type LoaderData = {
   billingError: string | null;
 };
 
+function requiredEnv(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env: ${name}`);
+  return v;
+}
+
 function asErrorMessage(e: unknown) {
+  if (!e) return "Unknown error";
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
+
+  const anyE: any = e;
+  if (anyE?.message && typeof anyE.message === "string") return anyE.message;
+
+  if (Array.isArray(anyE?.graphQLErrors) && anyE.graphQLErrors.length) {
+    try {
+      return JSON.stringify(anyE.graphQLErrors);
+    } catch {
+      return "GraphQL error";
+    }
+  }
+  if (anyE?.response?.errors) {
+    try {
+      return JSON.stringify(anyE.response.errors);
+    } catch {
+      return "Response error";
+    }
+  }
+
   try {
-    return JSON.stringify(e);
+    const s = JSON.stringify(e);
+    return s === "{}" ? "Request failed (empty error object)" : s;
   } catch {
     return String(e);
   }
@@ -68,12 +96,27 @@ function embeddedPath(pathname: string, request: Request, extra?: Record<string,
 }
 
 /**
- * Short returnUrl that lands back inside Admin embedded app.
+ * Admin embedded URL (Shopify will iframe your app).
  */
-function billingReturnUrlInAdmin(shop: string) {
-  const apiKey = process.env.SHOPIFY_API_KEY ?? "";
-  if (!apiKey) throw new Error("Missing SHOPIFY_API_KEY");
-  return `https://${shop}/admin/apps/${apiKey}/app/billing`;
+function billingAdminUrl(shop: string, extra?: Record<string, string>) {
+  const apiKey = requiredEnv("SHOPIFY_API_KEY");
+  const u = new URL(`https://${shop}/admin/apps/${apiKey}/app/billing`);
+  if (extra) {
+    for (const [k, v] of Object.entries(extra)) {
+      if (v != null && String(v).length) u.searchParams.set(k, String(v));
+    }
+  }
+  return u.toString();
+}
+
+/**
+ * Return URL for Billing confirmation (MUST be on your app domain).
+ * Keep it short to avoid the 255-char limit.
+ */
+function billingReturnUrlOnApp(request: Request, shop: string) {
+  const base =
+    (process.env.SHOPIFY_APP_URL ?? process.env.APP_URL ?? new URL(request.url).origin).replace(/\/+$/, "");
+  return `${base}/app/billing/confirm?shop=${encodeURIComponent(shop)}`;
 }
 
 function badgeToneFromStatus(status: string) {
@@ -86,76 +129,6 @@ function badgeToneFromStatus(status: string) {
 
 function formatEUR(amount: number) {
   return new Intl.NumberFormat("el-GR", { style: "currency", currency: "EUR" }).format(amount);
-}
-
-type CouponRule = {
-  percentOff?: number; // 0..100
-  amountOffEUR?: number; // >= 0
-  plans?: string[]; // optional allowlist (e.g. ["STARTER","PRO"])
-};
-
-function readCouponsFromEnv(): Record<string, CouponRule> {
-  const raw = (process.env.BILLING_COUPONS_JSON ?? "").trim();
-  if (!raw) return {};
-  try {
-    const obj = JSON.parse(raw);
-    if (!obj || typeof obj !== "object") return {};
-    return obj as Record<string, CouponRule>;
-  } catch {
-    return {};
-  }
-}
-
-function normalizeCoupon(code: string) {
-  return String(code || "").trim().toUpperCase();
-}
-
-function toCents(eur: number) {
-  return Math.round(Number(eur) * 100);
-}
-function fromCents(cents: number) {
-  return Math.round(cents) / 100;
-}
-
-function applyCouponToMonthlyEUR(args: {
-  planKey: PlanKey;
-  baseMonthlyEUR: number;
-  coupon: string;
-}) {
-  const coupon = normalizeCoupon(args.coupon);
-  if (!coupon) return { monthlyEUR: args.baseMonthlyEUR, applied: null as string | null };
-
-  const coupons = readCouponsFromEnv();
-  const rule = coupons[coupon];
-  if (!rule) throw new Error("Invalid coupon code");
-
-  if (rule.plans?.length) {
-    const ok = rule.plans.map((p) => String(p).toUpperCase()).includes(String(args.planKey).toUpperCase());
-    if (!ok) throw new Error("Coupon not applicable to this plan");
-  }
-
-  const baseCents = toCents(args.baseMonthlyEUR);
-  let newCents = baseCents;
-
-  if (typeof rule.percentOff === "number") {
-    const pct = Math.max(0, Math.min(100, rule.percentOff));
-    newCents = Math.round(baseCents * (1 - pct / 100));
-  }
-  if (typeof rule.amountOffEUR === "number") {
-    const off = Math.max(0, toCents(rule.amountOffEUR));
-    newCents = newCents - off;
-  }
-
-  // Keep >= €0.00. (If you want to force minimum €0.01, change here.)
-  newCents = Math.max(0, newCents);
-
-  return { monthlyEUR: fromCents(newCents), applied: coupon };
-}
-
-function shouldUseTestBilling() {
-  const v = (process.env.SHOPIFY_BILLING_TEST ?? "").trim();
-  if (!v) return process.env.NODE_ENV !== "production";
-  return v !== "0" && v.toLowerCase() !== "false";
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -195,32 +168,24 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const fd = await request.formData();
   const intent = String(fd.get("intent") || "");
-  const couponRaw = String(fd.get("coupon") || "");
+  const wantsTop = String(fd.get("top") || "") === "1";
+  const couponCode = String(fd.get("coupon") || "").trim();
 
-  const backToBilling = (extra?: Record<string, string>) =>
-    new Response(null, {
-      status: 303,
-      headers: { Location: embeddedPath("/app/billing", request, extra) },
-    });
+  const backToBilling = (extra?: Record<string, string>) => {
+    const location = wantsTop
+      ? billingAdminUrl(shop, extra)
+      : embeddedPath("/app/billing", request, extra);
+
+    return new Response(null, { status: 303, headers: { Location: location } });
+  };
 
   const fail = (msg: string) => backToBilling({ billing_error: msg });
 
-  // Always force top-level navigation (no App Bridge postMessage dependency).
-  const redirectTop = (url: string) => {
-    const html = `<!doctype html><html><head><meta charset="utf-8" />
-<meta http-equiv="cache-control" content="no-store" />
-<meta http-equiv="pragma" content="no-cache" />
-<meta http-equiv="expires" content="0" />
-</head><body>
-<script>window.top.location.href=${JSON.stringify(url)};</script>
-</body></html>`;
-    return new Response(html, {
-      status: 200,
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-store",
-      },
-    });
+  // If a non-_top submit ever hits this, still try to bust out safely.
+  const redirectTopHtml = (url: string) => {
+    const html = `<!doctype html><html><head><meta charset="utf-8" /></head>
+<body><script>window.top.location.href=${JSON.stringify(url)};</script></body></html>`;
+    return new Response(html, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
   };
 
   try {
@@ -232,102 +197,31 @@ export async function action({ request }: ActionFunctionArgs) {
         await cancelActiveSubscription({ shop, admin, prorate: false });
         await db.shopBilling.update({
           where: { shop },
-          data: { plan: "FREE", status: "NONE", pendingPlan: null },
+          data: { plan: "FREE", status: "NONE", pendingPlan: null, pendingCouponId: null, pendingCouponCode: null },
         });
         return backToBilling({ ok: "1" });
       }
 
-      const planKey = planRaw as PlanKey;
-      const p = PLANS[planKey];
-      if (!p) return fail("Invalid plan");
+      const returnUrl = billingReturnUrlOnApp(request, shop);
 
-      // Apply coupon to recurring monthly price (only affects subscription fee).
-      let recurringMonthlyEUR = Number(p.recurringMonthlyEUR ?? 0);
-      let appliedCoupon: string | null = null;
+      const test =
+        process.env.SHOPIFY_BILLING_TEST === "true" ||
+        (process.env.NODE_ENV !== "production" && process.env.SHOPIFY_BILLING_TEST !== "false");
 
-      if (recurringMonthlyEUR > 0 && normalizeCoupon(couponRaw)) {
-        const r = applyCouponToMonthlyEUR({
-          planKey,
-          baseMonthlyEUR: recurringMonthlyEUR,
-          coupon: couponRaw,
-        });
-        recurringMonthlyEUR = r.monthlyEUR;
-        appliedCoupon = r.applied;
-      } else if (normalizeCoupon(couponRaw) && recurringMonthlyEUR <= 0) {
-        // PAYG (0€/month): coupon has no effect on recurring fee.
-        // If you want coupons to add bonus minutes instead, handle it elsewhere.
-        appliedCoupon = normalizeCoupon(couponRaw);
-      }
-
-      const returnUrl = billingReturnUrlInAdmin(shop);
-      const test = shouldUseTestBilling();
-
-      const nameParts = [`Ai Checkout Calls - ${planKey}`];
-      if (appliedCoupon && recurringMonthlyEUR > 0) nameParts.push(`(${appliedCoupon})`);
-      const subscriptionName = nameParts.join(" ");
-
-      const lineItems: any[] = [];
-
-      // Recurring line item (skip if €0/month).
-      if (recurringMonthlyEUR > 0) {
-        lineItems.push({
-          plan: {
-            appRecurringPricingDetails: {
-              price: { amount: String(recurringMonthlyEUR.toFixed(2)), currencyCode: "EUR" },
-            },
-          },
-        });
-      }
-
-      // Usage line item (cap).
-      lineItems.push({
-        plan: {
-          appUsagePricingDetails: {
-            cappedAmount: { amount: String(Number(p.usageCapEUR).toFixed(2)), currencyCode: "EUR" },
-            terms:
-              planKey === "PAYG"
-                ? `Usage billed at €${Number(p.overageEURPerMin).toFixed(2)}/min`
-                : `Overage billed at €${Number(p.overageEURPerMin).toFixed(2)}/min after included minutes`,
-          },
-        },
+      const { confirmationUrl } = await createSubscriptionForPlan({
+        shop,
+        admin,
+        plan: planRaw as PlanKey,
+        returnUrl,
+        test,
+        couponCode,
       });
 
-      const mutation = `#graphql
-        mutation AppSubscriptionCreate($name: String!, $returnUrl: URL!, $lineItems: [AppSubscriptionLineItemInput!]!, $test: Boolean) {
-          appSubscriptionCreate(name: $name, returnUrl: $returnUrl, lineItems: $lineItems, test: $test) {
-            confirmationUrl
-            userErrors { field message }
-            appSubscription { id status }
-          }
-        }
-      `;
-
-      const resp = await admin.graphql(mutation, {
-        variables: {
-          name: subscriptionName,
-          returnUrl,
-          lineItems,
-          test,
-        },
-      });
-
-      const json = await resp.json();
-      const create = json?.data?.appSubscriptionCreate;
-
-      const userErrors = create?.userErrors ?? [];
-      if (userErrors.length) {
-        return fail(String(userErrors[0]?.message || "Billing error"));
+      if (wantsTop) {
+        return new Response(null, { status: 303, headers: { Location: confirmationUrl } });
       }
 
-      const confirmationUrl = create?.confirmationUrl;
-      if (!confirmationUrl) return fail("Missing confirmationUrl");
-
-      await db.shopBilling.update({
-        where: { shop },
-        data: { pendingPlan: planKey, status: "PENDING" },
-      });
-
-      return redirectTop(confirmationUrl);
+      return redirectTopHtml(confirmationUrl);
     }
 
     if (intent === "increase_cap") {
@@ -335,7 +229,12 @@ export async function action({ request }: ActionFunctionArgs) {
       if (!Number.isFinite(newCapEUR) || newCapEUR <= 0) return fail("Invalid cap amount");
 
       const { confirmationUrl } = await requestCapIncrease({ shop, admin, newCapEUR });
-      return redirectTop(confirmationUrl);
+
+      if (wantsTop) {
+        return new Response(null, { status: 303, headers: { Location: confirmationUrl } });
+      }
+
+      return redirectTopHtml(confirmationUrl);
     }
 
     if (intent === "cancel") {
@@ -352,8 +251,6 @@ export async function action({ request }: ActionFunctionArgs) {
 export default function BillingRoute() {
   const { shop, billing, usage, billingError } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
-
-  const [coupon, setCoupon] = React.useState<string>("");
 
   const isBusy = navigation.state === "submitting" || navigation.state === "loading";
   const activeIntent = navigation.formData?.get("intent")?.toString() ?? "";
@@ -372,6 +269,9 @@ export default function BillingRoute() {
 
   const balanceUsed = usage?.balanceUsed ? Number(usage.balanceUsed.amount) : null;
   const capAmount = usage?.cappedAmount ? Number(usage.cappedAmount.amount) : null;
+
+  const prefillCoupon = String(billing?.pendingCouponCode || billing?.appliedCouponCode || "");
+  const [coupon, setCoupon] = React.useState(prefillCoupon);
 
   return (
     <Page title="Billing" subtitle={shop}>
@@ -395,6 +295,12 @@ export default function BillingRoute() {
               <Text as="p">
                 Plan: <b>{activePlanKey}</b>
               </Text>
+
+              {billing?.appliedCouponCode ? (
+                <Text as="p">
+                  Coupon: <b>{String(billing.appliedCouponCode)}</b>
+                </Text>
+              ) : null}
 
               {activePlanKey === "FREE" ? (
                 <Text as="p">
@@ -426,9 +332,14 @@ export default function BillingRoute() {
                 ) : null}
 
                 {activePlanKey !== "FREE" ? (
-                  <Form method="post">
+                  <Form method="post" reloadDocument target="_top">
                     <input type="hidden" name="intent" value="increase_cap" />
-                    <input type="hidden" name="newCapEUR" value={String((capAmount ?? plan.usageCapEUR) + 50)} />
+                    <input type="hidden" name="top" value="1" />
+                    <input
+                      type="hidden"
+                      name="newCapEUR"
+                      value={String((capAmount ?? plan.usageCapEUR) + 50)}
+                    />
                     <Button submit loading={isBusy && activeIntent === "increase_cap"}>
                       Increase cap +€50
                     </Button>
@@ -459,6 +370,9 @@ export default function BillingRoute() {
                 const isActive = k === activePlanKey;
                 const isThisSubmitting = isBusy && activeIntent === "select_plan" && activePlan === k;
 
+                const needsConfirmation = k !== "FREE";
+                const formProps: any = needsConfirmation ? { reloadDocument: true, target: "_top" } : {};
+
                 return (
                   <Card key={k} sectioned>
                     <BlockStack gap="200">
@@ -473,19 +387,20 @@ export default function BillingRoute() {
                         <Text as="p">€0/month • 10 free phone minutes (one-time)</Text>
                       ) : k === "PAYG" ? (
                         <Text as="p">
-                          €0/month • €{Number(p.overageEURPerMin).toFixed(2)}/min • cap {formatEUR(Number(p.usageCapEUR))}
+                          €0/month • €{p.overageEURPerMin.toFixed(2)}/min • cap {formatEUR(p.usageCapEUR)}
                         </Text>
                       ) : (
                         <Text as="p">
-                          {formatEUR(Number(p.recurringMonthlyEUR))}/month • {p.includedMinutes} included min • €
-                          {Number(p.overageEURPerMin).toFixed(2)}/min after • cap {formatEUR(Number(p.usageCapEUR))}
+                          {formatEUR(p.recurringMonthlyEUR)}/month • {p.includedMinutes} included min • €
+                          {p.overageEURPerMin.toFixed(2)}/min after • cap {formatEUR(p.usageCapEUR)}
                         </Text>
                       )}
 
-                      <Form method="post">
+                      <Form method="post" {...formProps}>
                         <input type="hidden" name="intent" value="select_plan" />
                         <input type="hidden" name="plan" value={k} />
-                        <input type="hidden" name="coupon" value={coupon} />
+                        <input type="hidden" name="coupon" value={coupon.trim()} />
+                        {needsConfirmation ? <input type="hidden" name="top" value="1" /> : null}
                         <Button submit disabled={isActive} loading={isThisSubmitting}>
                           {isActive ? "Selected" : "Select"}
                         </Button>

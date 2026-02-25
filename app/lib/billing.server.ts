@@ -4,15 +4,10 @@ import { sessionStorage } from "../shopify.server";
 import { BILLING_CURRENCY, PLANS, type PlanKey, isPlanKey } from "./billingPlans.server";
 
 type AdminLike = {
-  graphql: (query: string, options?: any) => Promise<any>; // Response in current templates
+  graphql: (query: string, options?: any) => Promise<any>; // Shopify templates may return a Response
 };
 
 const API_VERSION = process.env.SHOPIFY_API_VERSION ?? "2025-07";
-
-function moneyInputFromCents(cents: number) {
-  const amount = (cents / 100).toFixed(2);
-  return { amount, currencyCode: BILLING_CURRENCY };
-}
 
 function eurToCents(eur: number) {
   return Math.round(eur * 100);
@@ -36,10 +31,13 @@ function asErrorMessage(e: unknown) {
   }
 }
 
+function normalizeCouponCode(v: unknown) {
+  return String(v ?? "").trim().toUpperCase();
+}
+
 async function graphqlShop(shop: string, query: string, variables: any, admin?: AdminLike) {
   if (admin) {
     const resp = await admin.graphql(query, { variables });
-    // Current Shopify templates return a Response, so parse it. If not, just return as-is.
     if (resp && typeof resp.json === "function") return await resp.json();
     return resp;
   }
@@ -68,6 +66,67 @@ export async function ensureBillingRow(shop: string) {
     update: {},
     create: { shop },
   });
+}
+
+type CouponResolve = {
+  couponId: string;
+  code: string;
+  discountInput: any; // AppSubscriptionDiscountInput
+};
+
+async function resolveCouponForPlan(args: { shop: string; plan: PlanKey; couponCode: string }) {
+  const { shop, plan } = args;
+  const code = normalizeCouponCode(args.couponCode);
+  if (!code) return null as CouponResolve | null;
+
+  const p = PLANS[plan];
+  if (!p || p.isUsageOnly || p.recurringMonthlyEUR <= 0) {
+    throw new Error("Coupon applies only to monthly subscription plans");
+  }
+
+  const coupon = await db.billingCoupon.findUnique({ where: { code } });
+  if (!coupon || !coupon.active) throw new Error("Invalid coupon code");
+
+  const now = new Date();
+  if (coupon.startsAt && coupon.startsAt > now) throw new Error("Coupon not active yet");
+  if (coupon.endsAt && coupon.endsAt < now) throw new Error("Coupon expired");
+  if (coupon.maxRedemptions != null && coupon.redeemedCount >= coupon.maxRedemptions) {
+    throw new Error("Coupon has no remaining redemptions");
+  }
+
+  if (coupon.appliesToPlans) {
+    const raw = coupon.appliesToPlans as any;
+    const list = Array.isArray(raw) ? raw.map((x) => String(x).toUpperCase()) : [];
+    if (list.length && !list.includes(plan)) throw new Error("Coupon not valid for this plan");
+  }
+
+  const redeemed = await db.billingCouponRedemption.findUnique({
+    where: { couponId_shop: { couponId: coupon.id, shop } },
+  });
+  if (redeemed) throw new Error("Coupon already used on this shop");
+
+  const type = String(coupon.type || "").toUpperCase();
+  let value: any;
+
+  if (type === "PERCENT") {
+    const percentage = Number(coupon.percentage ?? 0);
+    // Shopify expects decimal fraction (0.20 = 20%)
+    if (!(percentage > 0 && percentage < 1)) throw new Error("Coupon misconfigured (percentage)");
+    value = { percentage };
+  } else if (type === "AMOUNT") {
+    const amount = Number(coupon.amountOffEUR ?? 0);
+    if (!(amount > 0)) throw new Error("Coupon misconfigured (amount)");
+    value = { amount: Math.min(amount, p.recurringMonthlyEUR) };
+  } else {
+    throw new Error("Coupon misconfigured (type)");
+  }
+
+  const discountInput: any = { value };
+  if (coupon.durationLimitInIntervals != null && coupon.durationLimitInIntervals > 0) {
+    discountInput.durationLimitInIntervals = coupon.durationLimitInIntervals;
+  }
+
+  return { couponId: coupon.id, code: coupon.code, discountInput } as CouponResolve;
 }
 
 export async function syncBillingFromShopify(args: { shop: string; admin: AdminLike }) {
@@ -106,45 +165,94 @@ query BillingState {
   const subs = json?.data?.currentAppInstallation?.activeSubscriptions ?? [];
   const ours = subs.find((s: any) => String(s?.name ?? "").startsWith("AI Checkout Calls - "));
 
-  if (!ours) {
-    await db.shopBilling.update({
+  const usageDetails = (() => {
+    if (!ours) return null;
+    const usageLine = (ours.lineItems ?? []).find(
+      (li: any) => li?.plan?.pricingDetails?.__typename === "AppUsagePricing"
+    );
+    return usageLine?.plan?.pricingDetails ?? null;
+  })();
+
+  await db.$transaction(async (tx) => {
+    const row = await tx.shopBilling.upsert({
+      where: { shop },
+      update: {},
+      create: { shop },
+    });
+
+    if (!ours) {
+      await tx.shopBilling.update({
+        where: { shop },
+        data: {
+          status: "NONE",
+          subscriptionId: null,
+          usageLineItemId: null,
+          recurringLineItemId: null,
+          pendingPlan: null,
+          pendingCouponId: null,
+          pendingCouponCode: null,
+        },
+      });
+      return;
+    }
+
+    const planKey = String(ours.name).replace("AI Checkout Calls - ", "").trim().toUpperCase();
+    const normalizedPlan: PlanKey = isPlanKey(planKey) ? (planKey as PlanKey) : "STARTER";
+
+    const usageLine = (ours.lineItems ?? []).find(
+      (li: any) => li?.plan?.pricingDetails?.__typename === "AppUsagePricing"
+    );
+    const recurLine = (ours.lineItems ?? []).find(
+      (li: any) => li?.plan?.pricingDetails?.__typename === "AppRecurringPricing"
+    );
+
+    const status = String(ours.status ?? "ACTIVE").toUpperCase();
+
+    await tx.shopBilling.update({
       where: { shop },
       data: {
-        status: "NONE",
-        subscriptionId: null,
-        usageLineItemId: null,
-        recurringLineItemId: null,
+        plan: normalizedPlan as any,
         pendingPlan: null,
+        status: status as any,
+        subscriptionId: ours.id,
+        usageLineItemId: usageLine?.id ?? null,
+        recurringLineItemId: recurLine?.id ?? null,
       },
     });
-    return { active: false, usage: null as any };
-  }
 
-  const planKey = (String(ours.name).replace("AI Checkout Calls - ", "").trim().toUpperCase()) as PlanKey;
-  const normalizedPlan: PlanKey = isPlanKey(planKey) ? planKey : "STARTER";
+    // Finalize coupon redemption only once the subscription is ACTIVE.
+    if (status === "ACTIVE" && row.pendingCouponId) {
+      const already = await tx.billingCouponRedemption.findUnique({
+        where: { couponId_shop: { couponId: row.pendingCouponId, shop } },
+      });
 
-  const usageLine = (ours.lineItems ?? []).find(
-    (li: any) => li?.plan?.pricingDetails?.__typename === "AppUsagePricing"
-  );
-  const recurLine = (ours.lineItems ?? []).find(
-    (li: any) => li?.plan?.pricingDetails?.__typename === "AppRecurringPricing"
-  );
+      if (!already) {
+        await tx.billingCouponRedemption.create({
+          data: {
+            couponId: row.pendingCouponId,
+            shop,
+            subscriptionId: ours.id,
+          },
+        });
 
-  const usageDetails = usageLine?.plan?.pricingDetails ?? null;
+        await tx.billingCoupon.update({
+          where: { id: row.pendingCouponId },
+          data: { redeemedCount: { increment: 1 } },
+        });
+      }
 
-  await db.shopBilling.update({
-    where: { shop },
-    data: {
-      plan: normalizedPlan as any,
-      pendingPlan: null,
-      status: "ACTIVE",
-      subscriptionId: ours.id,
-      usageLineItemId: usageLine?.id ?? null,
-      recurringLineItemId: recurLine?.id ?? null,
-    },
+      await tx.shopBilling.update({
+        where: { shop },
+        data: {
+          appliedCouponCode: row.pendingCouponCode ?? row.appliedCouponCode ?? null,
+          pendingCouponId: null,
+          pendingCouponCode: null,
+        },
+      });
+    }
   });
 
-  return { active: true, usage: usageDetails };
+  return { active: !!ours, usage: usageDetails };
 }
 
 export async function createSubscriptionForPlan(args: {
@@ -153,20 +261,30 @@ export async function createSubscriptionForPlan(args: {
   plan: PlanKey;
   returnUrl: string;
   test?: boolean;
+  couponCode?: string;
 }) {
   const { shop, admin, plan, returnUrl, test } = args;
   const p = PLANS[plan];
   if (!p) throw new Error("Unknown plan");
 
+  const coupon = await resolveCouponForPlan({
+    shop,
+    plan,
+    couponCode: args.couponCode ?? "",
+  });
+
   const lineItems: any[] = [];
 
   if (!p.isUsageOnly && p.recurringMonthlyEUR > 0) {
+    const recurring: any = {
+      interval: "EVERY_30_DAYS",
+      price: { amount: p.recurringMonthlyEUR, currencyCode: BILLING_CURRENCY },
+    };
+    if (coupon) recurring.discount = coupon.discountInput;
+
     lineItems.push({
       plan: {
-        appRecurringPricingDetails: {
-          interval: "EVERY_30_DAYS",
-          price: { amount: p.recurringMonthlyEUR, currencyCode: BILLING_CURRENCY },
-        },
+        appRecurringPricingDetails: recurring,
       },
     });
   }
@@ -246,6 +364,9 @@ mutation AppSubscriptionCreate(
       subscriptionId: sub?.id ?? null,
       usageLineItemId: usageLine?.id ?? null,
       recurringLineItemId: recurLine?.id ?? null,
+
+      pendingCouponId: coupon?.couponId ?? null,
+      pendingCouponCode: coupon?.code ?? null,
     },
   });
 
@@ -286,6 +407,8 @@ mutation CancelSub($id: ID!, $prorate: Boolean) {
       usageLineItemId: null,
       recurringLineItemId: null,
       pendingPlan: null,
+      pendingCouponId: null,
+      pendingCouponCode: null,
     },
   });
 }
@@ -434,7 +557,7 @@ export async function applyBillingForCall(args: {
             await tx.shopBilling.update({
               where: { shop },
               data: {
-                status: "ACTIVE",
+                status: String(ours.status ?? "ACTIVE").toUpperCase() as any,
                 subscriptionId: ours.id,
                 usageLineItemId: usageLine?.id ?? null,
                 recurringLineItemId: recurLine?.id ?? null,
@@ -494,7 +617,7 @@ export async function applyBillingForCall(args: {
         m,
         {
           description: `${p.title}: ${chargeableMinutes} min overage (call ${callJobId})`,
-          price: moneyInputFromCents(amountCents),
+          price: { amount: (amountCents / 100).toFixed(2), currencyCode: BILLING_CURRENCY },
           subscriptionLineItemId: billing.usageLineItemId,
           idempotencyKey,
         },
