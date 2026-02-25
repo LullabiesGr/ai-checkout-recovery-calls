@@ -9,7 +9,7 @@ import {
 } from "react-router";
 
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { Provider as AppBridgeProvider, NavMenu } from "@shopify/app-bridge-react";
+import { NavMenu } from "@shopify/app-bridge-react";
 import { Page, Banner } from "@shopify/polaris";
 
 import { authenticate } from "../shopify.server";
@@ -17,7 +17,6 @@ import { authenticate } from "../shopify.server";
 type LoaderData = {
   shop: string;
   host: string;
-  apiKey: string;
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -33,26 +32,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return redirect("/auth/login");
   }
 
-  const apiKey = process.env.SHOPIFY_API_KEY ?? "";
-  if (!apiKey) throw new Error("Missing SHOPIFY_API_KEY");
-
-  return { shop, host, apiKey } satisfies LoaderData;
+  return { shop, host } satisfies LoaderData;
 };
 
 export default function AppLayout() {
-  const { shop, host, apiKey } = useLoaderData<typeof loader>();
+  const { shop, host } = useLoaderData<typeof loader>();
 
   const qs = new URLSearchParams({ shop, host, embedded: "1" });
   const link = (path: string) => `${path}?${qs.toString()}`;
 
   return (
-    <AppBridgeProvider
-      config={{
-        apiKey,
-        host,
-        forceRedirect: true,
-      }}
-    >
+    <>
       <NavMenu>
         <a href={link("/app")}>Dashboard</a>
         <a href={link("/app/checkouts")}>Checkouts</a>
@@ -64,7 +54,7 @@ export default function AppLayout() {
       <Page fullWidth>
         <Outlet />
       </Page>
-    </AppBridgeProvider>
+    </>
   );
 }
 
