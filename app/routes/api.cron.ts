@@ -1,4 +1,3 @@
-// app/routes/api.cron.ts
 import type { ActionFunctionArgs } from "react-router";
 import db from "../db.server";
 import { ensureSettings, markAbandonedByDelay, enqueueCallJobs } from "../callRecovery.server";
@@ -11,7 +10,6 @@ function json(body: any, status = 200) {
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  // Auth (Supabase Scheduler -> Render)
   const want = process.env.CRON_TOKEN || "";
   if (want) {
     const got = request.headers.get("x-cron-token") || "";
@@ -20,17 +18,15 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const serverNow = new Date();
 
-  // Shops
-  // Use both Settings and Checkout as sources so cron still works even if the shop
-  // has checkouts but no Settings row yet.
   const settingsShops = (await db.settings.findMany({ select: { shop: true } })).map((x) => x.shop);
   const checkoutShops = (await db.checkout.findMany({ select: { shop: true }, distinct: ["shop"] })).map((x) => x.shop);
   const shops = Array.from(new Set([...settingsShops, ...checkoutShops].filter(Boolean)));
 
+  console.log("[CRON] shops", shops);
+
   let markedTotal = 0;
   let enqueuedTotal = 0;
 
-  // Snapshot before
   const queuedDueBefore = await db.callJob.count({
     where: { status: "QUEUED", scheduledFor: { lte: serverNow } },
   });
@@ -48,13 +44,20 @@ export async function action({ request }: ActionFunctionArgs) {
   for (const shop of shops) {
     const settings = await ensureSettings(shop);
 
-    // NOTE:
-    // delayMinutes is used both as:
-    // - legacy markAbandonedByDelay cutoff (OPEN -> ABANDONED)
-    // - first call timing (handled inside enqueueCallJobs using Settings.delayMinutes)
     const delayMinutes = Number(settings.delayMinutes ?? 30);
     const retryMinutes = Number(settings.retryMinutes ?? 180);
     const maxAttempts = Number(settings.maxAttempts ?? 2);
+
+    console.log("[CRON] shop", {
+      shop,
+      enabled: Boolean(settings.enabled),
+      delayMinutes,
+      retryMinutes,
+      maxAttempts,
+      minOrderValue: Number(settings.minOrderValue ?? 0),
+      callWindowStart: String((settings as any).callWindowStart ?? "09:00"),
+      callWindowEnd: String((settings as any).callWindowEnd ?? "19:00"),
+    });
 
     const markedRes = await markAbandonedByDelay(shop, delayMinutes);
     const marked = Number((markedRes as any)?.count ?? 0);
@@ -66,11 +69,6 @@ export async function action({ request }: ActionFunctionArgs) {
       minOrderValue: Number(settings.minOrderValue ?? 0),
       callWindowStart: String((settings as any).callWindowStart ?? "09:00"),
       callWindowEnd: String((settings as any).callWindowEnd ?? "19:00"),
-
-      // IMPORTANT:
-      // These minutes come from Settings table and MUST drive spacing:
-      // - first attempt scheduled at abandonedAt + delayMinutes
-      // - next attempt scheduled at lastAttemptAt + retryMinutes
       delayMinutes,
       maxAttempts,
       retryMinutes,
@@ -78,6 +76,8 @@ export async function action({ request }: ActionFunctionArgs) {
 
     const enqueued = Number((enq as any)?.enqueued ?? 0);
     enqueuedTotal += enqueued;
+
+    console.log("[CRON] result", { shop, marked, enqueued });
 
     perShop.push({
       shop,
@@ -90,13 +90,11 @@ export async function action({ request }: ActionFunctionArgs) {
     });
   }
 
-  // Snapshot after
   const nowAfter = new Date();
   const queuedDueAfter = await db.callJob.count({
     where: { status: "QUEUED", scheduledFor: { lte: nowAfter } },
   });
 
-  // Kick dialer (safe + idempotent because /api/run-calls locks jobs)
   let runCallsStatus: number | null = null;
   let runCallsBody: any = null;
 
@@ -123,7 +121,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
-  return json({
+  const body = {
     ok: true,
     shops: shops.length,
     perShop,
@@ -134,5 +132,9 @@ export async function action({ request }: ActionFunctionArgs) {
     runCallsStatus,
     runCallsBody,
     serverNow: new Date().toISOString(),
-  });
+  };
+
+  console.log("[CRON] summary", body);
+
+  return json(body);
 }

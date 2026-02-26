@@ -1,4 +1,3 @@
-// app/callRecovery.server.ts
 import db from "./db.server";
 
 type AdminClient = {
@@ -78,7 +77,6 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
   const { admin, shop } = params;
   const limit = Math.min(Math.max(params.limit ?? 50, 1), 100);
 
-  // ADDED: countryCodeV2/country so they land in checkout.raw (no new DB columns)
   const query = `
     query AbandonedCheckouts($first: Int!) {
       abandonedCheckouts(first: $first) {
@@ -162,13 +160,8 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
       const amount = Number(n?.totalPriceSet?.shopMoney?.amount ?? 0);
       const currency = String(n?.totalPriceSet?.shopMoney?.currencyCode ?? "USD");
       const completedAt = n?.completedAt ? new Date(n.completedAt) : null;
-
-      // store raw-ish phone always (digits or +digits)
       const phoneStored = normalizePhoneForStorage(n?.phone);
 
-      // IMPORTANT:
-      // - Keep status ABANDONED (Shopify already considers it abandoned)
-      // - Use abandonedAt = Shopify updatedAt/createdAt so delay can be enforced reliably
       const abandonedAt = completedAt ? null : new Date(n?.updatedAt ?? n?.createdAt ?? Date.now());
 
       await db.checkout.upsert({
@@ -178,12 +171,12 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
           checkoutId,
           token: null,
           email: n?.email ?? null,
-          phone: phoneStored, // IMPORTANT: do not null out non-E.164 phones
+          phone: phoneStored,
           value: Number.isFinite(amount) ? amount : 0,
           currency,
           status: completedAt ? "CONVERTED" : "ABANDONED",
           abandonedAt,
-          raw: JSON.stringify(n ?? null), // contains countryCodeV2 now
+          raw: JSON.stringify(n ?? null),
           customerName,
           itemsJson,
         },
@@ -226,7 +219,8 @@ export async function ensureSettings(shop: string) {
         vapiAssistantId: null,
         vapiPhoneNumberId: null,
         userPrompt: "",
-        promptMode: "append", // PromptMode enum value
+        merchantPrompt: "",
+        promptMode: "append",
       } as any,
     }))
   );
@@ -235,8 +229,6 @@ export async function ensureSettings(shop: string) {
 export async function markAbandonedByDelay(shop: string, delayMinutes: number) {
   const cutoff = new Date(Date.now() - delayMinutes * 60 * 1000);
 
-  // Use updatedAt so “last activity” drives abandonment timing.
-  // Also avoid re-updating abandonedAt repeatedly.
   return db.checkout.updateMany({
     where: {
       shop,
@@ -252,15 +244,11 @@ export async function markAbandonedByDelay(shop: string, delayMinutes: number) {
 }
 
 /**
- * ENQUEUE (FAST + IMMEDIATE)
+ * ENQUEUE
  *
- * - Creates CallJob immediately (so UI shows it right away), even if scheduledFor is in the future.
- * - scheduledFor still respects: abandonedAt + delayMinutes and call window.
- * - Prevents duplicates by skipping if any QUEUED/CALLING exists for that checkout.
- * - Avoids N+1: does a single batch query for all CallJobs for candidate checkoutIds.
- *
- * NOTE: If you only run this via cron, the fastest it can appear is the next cron tick.
- * For true instant enqueue, call enqueueCallJobs() from the checkout webhook route too.
+ * Important fix:
+ * - maxAttempts is now enforced per current abandonment cycle, not for the checkout's lifetime.
+ * - If the checkout was updated / re-abandoned after an older finished call, it can enqueue again.
  */
 export async function enqueueCallJobs(params: {
   shop: string;
@@ -269,20 +257,22 @@ export async function enqueueCallJobs(params: {
   callWindowStart: string;
   callWindowEnd: string;
   delayMinutes: number;
-  maxAttempts: number; // per-checkout cap
-  retryMinutes: number; // spacing between attempts
+  maxAttempts: number;
+  retryMinutes: number;
 }) {
   const { shop, enabled, minOrderValue, callWindowStart, callWindowEnd, delayMinutes, maxAttempts, retryMinutes } =
     params;
 
-  if (!enabled) return { enqueued: 0 };
+  if (!enabled) {
+    console.log("[ENQUEUE] disabled", { shop });
+    return { enqueued: 0 };
+  }
 
   const minValue = Number(minOrderValue ?? 0);
   const delayM = Math.max(0, Number(delayMinutes ?? 30));
   const retryM = Math.max(0, Number(retryMinutes ?? 180));
   const maxA = clamp(Number(maxAttempts ?? 2), 1, 10);
 
-  // Candidates must be ABANDONED with phone and abandonedAt set.
   const candidates = await db.checkout.findMany({
     where: {
       shop,
@@ -291,15 +281,17 @@ export async function enqueueCallJobs(params: {
       value: { gte: minValue },
       abandonedAt: { not: null },
     },
-    select: { checkoutId: true, phone: true, abandonedAt: true },
+    select: { checkoutId: true, phone: true, abandonedAt: true, updatedAt: true, value: true },
     take: 200,
   });
 
-  if (!candidates.length) return { enqueued: 0 };
+  if (!candidates.length) {
+    console.log("[ENQUEUE] no_candidates", { shop, minValue });
+    return { enqueued: 0 };
+  }
 
   const checkoutIds = candidates.map((c) => c.checkoutId);
 
-  // Batch query all existing jobs for these checkouts (single query).
   const existingJobs = await db.callJob.findMany({
     where: {
       shop,
@@ -315,77 +307,124 @@ export async function enqueueCallJobs(params: {
     take: 5000,
   });
 
-  const totalCount = new Map<string, number>();
-  const hasInFlight = new Set<string>();
-  const lastJob = new Map<string, { status: string; createdAt: Date; scheduledFor: Date | null }>();
-
+  const jobsByCheckout = new Map<string, Array<{ status: string; createdAt: Date; scheduledFor: Date | null }>>();
   for (const j of existingJobs) {
-    totalCount.set(j.checkoutId, (totalCount.get(j.checkoutId) ?? 0) + 1);
-
-    if (j.status === "QUEUED" || j.status === "CALLING") {
-      hasInFlight.add(j.checkoutId);
-    }
-
-    // Because we ordered by createdAt desc, first job per checkout is latest.
-    if (!lastJob.has(j.checkoutId)) {
-      lastJob.set(j.checkoutId, {
-        status: String(j.status),
-        createdAt: new Date(j.createdAt),
-        scheduledFor: (j as any).scheduledFor ? new Date((j as any).scheduledFor) : null,
-      });
-    }
+    const arr = jobsByCheckout.get(j.checkoutId) ?? [];
+    arr.push({
+      status: String(j.status),
+      createdAt: new Date(j.createdAt),
+      scheduledFor: (j as any).scheduledFor ? new Date((j as any).scheduledFor) : null,
+    });
+    jobsByCheckout.set(j.checkoutId, arr);
   }
+
+  console.log("[ENQUEUE] candidates", {
+    shop,
+    count: candidates.length,
+    candidates: candidates.map((c) => ({
+      checkoutId: c.checkoutId,
+      abandonedAt: c.abandonedAt,
+      updatedAt: c.updatedAt,
+      hasPhone: Boolean(String((c as any).phone ?? "").trim()),
+      value: Number(c.value ?? 0),
+    })),
+  });
 
   let enqueued = 0;
 
   for (const c of candidates) {
     const phone = String((c as any).phone || "").trim();
-    if (!phone) continue;
+    const cycleStart = new Date((c.abandonedAt as any) ?? (c.updatedAt as any) ?? Date.now());
 
-    if (hasInFlight.has(c.checkoutId)) continue;
+    if (!phone) {
+      console.log("[ENQUEUE] skip", { shop, checkoutId: c.checkoutId, reason: "NO_PHONE" });
+      continue;
+    }
 
-    const total = totalCount.get(c.checkoutId) ?? 0;
-    if (total >= maxA) continue;
+    const allJobs = jobsByCheckout.get(c.checkoutId) ?? [];
+    const cycleJobs = allJobs.filter((j) => new Date(j.createdAt).getTime() >= cycleStart.getTime());
 
-    const last = lastJob.get(c.checkoutId) ?? null;
+    const inFlight = cycleJobs.some((j) => j.status === "QUEUED" || j.status === "CALLING");
+    if (inFlight) {
+      console.log("[ENQUEUE] skip", { shop, checkoutId: c.checkoutId, reason: "IN_FLIGHT_EXISTS" });
+      continue;
+    }
 
-    // Compute next target time from SETTINGS minutes (not cron tick time)
+    const cycleAttempts = cycleJobs.length;
+    if (cycleAttempts >= maxA) {
+      console.log("[ENQUEUE] skip", {
+        shop,
+        checkoutId: c.checkoutId,
+        reason: "MAX_ATTEMPTS_REACHED_FOR_CURRENT_CYCLE",
+        cycleAttempts,
+        maxA,
+        cycleStart: cycleStart.toISOString(),
+      });
+      continue;
+    }
+
+    const lastCycleJob = cycleJobs[0] ?? null;
     let target: Date;
 
-    if (!last) {
-      const base = new Date(c.abandonedAt as any);
-      target = new Date(base.getTime() + delayM * 60 * 1000);
+    if (!lastCycleJob) {
+      target = new Date(cycleStart.getTime() + delayM * 60 * 1000);
     } else {
-      // Next attempt only after terminal status
-      if (last.status !== "FAILED" && last.status !== "COMPLETED") continue;
+      if (lastCycleJob.status !== "FAILED" && lastCycleJob.status !== "COMPLETED" && lastCycleJob.status !== "CANCELED") {
+        console.log("[ENQUEUE] skip", {
+          shop,
+          checkoutId: c.checkoutId,
+          reason: "LAST_JOB_NOT_TERMINAL",
+          lastStatus: lastCycleJob.status,
+        });
+        continue;
+      }
 
-      const anchor = new Date((last.scheduledFor ?? last.createdAt) as any);
+      const anchor = new Date((lastCycleJob.scheduledFor ?? lastCycleJob.createdAt) as any);
       target = new Date(anchor.getTime() + retryM * 60 * 1000);
     }
 
     const scheduledFor = adjustToWindow(target, callWindowStart, callWindowEnd);
 
     try {
-      await db.callJob.create({
+      const created = await db.callJob.create({
         data: {
           shop,
           checkoutId: c.checkoutId,
-          phone, // can be digits or +digits; provider will normalize using checkout.raw country
+          phone,
           scheduledFor,
           status: "QUEUED",
           attempts: 0,
         },
       });
 
-      // Update local caches so we don't enqueue twice in the same run
-      hasInFlight.add(c.checkoutId);
-      totalCount.set(c.checkoutId, total + 1);
-      lastJob.set(c.checkoutId, { status: "QUEUED", createdAt: new Date(), scheduledFor });
+      const arr = jobsByCheckout.get(c.checkoutId) ?? [];
+      arr.unshift({
+        status: "QUEUED",
+        createdAt: new Date(),
+        scheduledFor,
+      });
+      jobsByCheckout.set(c.checkoutId, arr);
 
       enqueued += 1;
+
+      console.log("[ENQUEUE] created", {
+        id: created.id,
+        shop,
+        checkoutId: c.checkoutId,
+        scheduledFor: scheduledFor.toISOString(),
+        cycleStart: cycleStart.toISOString(),
+      });
     } catch (e: any) {
       const msg = String(e?.message ?? "").toLowerCase();
-      if (msg.includes("unique")) continue;
+      if (msg.includes("unique")) {
+        console.log("[ENQUEUE] skip", { shop, checkoutId: c.checkoutId, reason: "UNIQUE_CONSTRAINT" });
+        continue;
+      }
+      console.log("[ENQUEUE] error", {
+        shop,
+        checkoutId: c.checkoutId,
+        error: String(e?.message ?? e),
+      });
       throw e;
     }
   }
