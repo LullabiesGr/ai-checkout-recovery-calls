@@ -2,6 +2,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import db from "../db.server";
 import { applyBillingForCall } from "../lib/billing.server";
+import { handleVapiToolsWebhook } from "../callProvider.server";
 
 function requiredEnv(name: string) {
   const v = process.env[name];
@@ -423,6 +424,7 @@ ${args.transcript}
 }
 
 export async function action({ request }: ActionFunctionArgs) {
+  const requestForTools = request.clone();
   const url = new URL(request.url);
   const secret = url.searchParams.get("secret") ?? "";
   if (!process.env.VAPI_WEBHOOK_SECRET || secret !== process.env.VAPI_WEBHOOK_SECRET) {
@@ -447,98 +449,10 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   /* =========================
-     NEW: tool-calls handler
+     tool-calls handler (shared)
      ========================= */
   if (messageType === "tool-calls") {
-    const toolCalls = normalizeToolCalls(msg);
-
-    // deterministic "to": ALWAYS from call.customer.number (ignore model args)
-    const to =
-      String(call?.customer?.number ?? "").trim() ||
-      String(msg?.customer?.number ?? "").trim() ||
-      String(payload?.customer?.number ?? "").trim() ||
-      "";
-
-    const results: any[] = [];
-
-    for (const tc of toolCalls) {
-      const name = tc.name;
-      const toolCallId = tc.id;
-
-      if (name !== "send_checkout_sms") {
-        results.push({
-          name,
-          toolCallId,
-          result: JSON.stringify({ ok: true, skipped: true }),
-        });
-        continue;
-      }
-
-      try {
-        if (!to) throw new Error("Missing customer number (call.customer.number).");
-
-        // Prefer DB extraction, fallback to assistant prompt scrape
-        let checkoutLink: string | null = null;
-        let offerCode: string | null = null;
-
-        // DB: callJob -> checkout -> raw url
-        const job = await db.callJob.findFirst({
-          where: { id: callJobId, shop },
-          select: { checkoutId: true },
-        });
-
-        const checkoutId = String(job?.checkoutId ?? checkoutIdMeta ?? "").trim();
-
-        if (checkoutId) {
-          const co = await db.checkout.findFirst({
-            where: { shop, checkoutId },
-            select: { raw: true },
-          });
-
-          checkoutLink = extractFromRawCheckout((co as any)?.raw) ?? null;
-        }
-
-        // Fallback: parse from assistant config/messages
-        if (!checkoutLink) checkoutLink = extractCheckoutLinkFromAssistantConfig(payload);
-        offerCode = extractOfferCodeFromAssistantConfig(payload);
-
-        const body = buildCheckoutSmsBody({ checkoutLink, offerCode });
-
-        const tw = await twilioSendSms({ to, body });
-
-        await db.callJob.updateMany({
-          where: { id: callJobId, shop },
-          data: {
-            outcome: safeStr(`SMS_SENT sid=${tw.sid} to=${to}`, 2000),
-          },
-        });
-
-        results.push({
-          name,
-          toolCallId,
-          result: JSON.stringify({
-            ok: true,
-            sid: tw.sid,
-            to,
-          }),
-        });
-      } catch (e: any) {
-        const err = safeStr(e?.message ?? String(e), 800);
-        await db.callJob.updateMany({
-          where: { id: callJobId, shop },
-          data: { outcome: safeStr(`SMS_ERROR: ${err}`, 2000) },
-        });
-
-        results.push({
-          name,
-          toolCallId,
-          error: err,
-        });
-      }
-    }
-
-    // This exact shape is REQUIRED by Vapi for tool-calls responses :contentReference[oaicite:2]{index=2}
-    return jsonResponse({ results });
+    return handleVapiToolsWebhook(requestForTools);
   }
 
   // status updates (optional)

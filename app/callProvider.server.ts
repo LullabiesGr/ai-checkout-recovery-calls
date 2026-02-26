@@ -40,8 +40,8 @@ type ExtrasRow = {
   sms_template_offer: string | null;
   sms_template_no_offer: string | null;
 
-  vapiAssistantId: string | null;
-  vapiPhoneNumberId: string | null;
+  vapi_assistant_id: string | null;
+  vapi_phone_number_id: string | null;
 };
 
 function clamp(n: number, min: number, max: number) {
@@ -92,8 +92,8 @@ async function readSettingsExtras(shop: string): Promise<ExtrasRow | null> {
       sms_template_offer: true,
       sms_template_no_offer: true,
 
-      vapiAssistantId: true,
-      vapiPhoneNumberId: true,
+      vapi_assistant_id: true,
+      vapi_phone_number_id: true,
     },
   });
 
@@ -852,10 +852,12 @@ ${merchant}
   const smsBlock =
     args.smsEnabled && checkout.phone
       ? `
-SMS (tool use):
-- Tool name: send_checkout_sms
-- Call it exactly ONCE only if the customer explicitly agrees to receive an SMS.
-- The server will send the pre-approved checkout link + offer code automatically.
+SMS / OFFER TOOL (tool use):
+- Tool name: send_checkout_offer
+- Call it exactly ONCE only after the customer accepts the next step (for example: they ask for the link/code by SMS, or they accept the offer you propose).
+- You may choose the final offer during the conversation, but you must stay within the configured limits.
+- If you choose a discount, pass the exact discountPercent you decided on. Do not exceed the configured maximum.
+- Do not promise that any code was sent until the tool succeeds. The server will create the real Shopify discount code only when the tool runs.
 `.trim()
       : "";
 
@@ -971,28 +973,87 @@ function pickBearerToken(req: Request) {
 }
 
 export async function handleVapiToolsWebhook(request: Request): Promise<Response> {
-  const expected = String(process.env.VAPI_TOOL_BEARER_TOKEN ?? process.env.VAPI_WEBHOOK_BEARER_TOKEN ?? "").trim();
-  if (expected) {
-    const got = pickBearerToken(request);
-    if (!got || got !== expected) {
-      return new Response(JSON.stringify({ error: "unauthorized" }), {
-        status: 401,
-        headers: { "Content-Type": "application/json" },
-      });
+  const url = new URL(request.url);
+
+  const internalExpected = String(process.env.INTERNAL_API_SECRET ?? "").trim();
+  const gotInternal = String(request.headers.get("x-internal-secret") ?? "").trim();
+  const internalOk = Boolean(internalExpected && gotInternal && gotInternal === internalExpected);
+
+  if (!internalOk) {
+    const expectedBearer = String(
+      process.env.VAPI_TOOL_BEARER_TOKEN ?? process.env.VAPI_WEBHOOK_BEARER_TOKEN ?? ""
+    ).trim();
+    const expectedSecret = String(process.env.VAPI_WEBHOOK_SECRET ?? "").trim();
+
+    if (expectedBearer) {
+      const got = pickBearerToken(request);
+      if (!got || got !== expectedBearer) {
+        return new Response(JSON.stringify({ error: "unauthorized" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    if (expectedSecret) {
+      const gotSecret = String(url.searchParams.get("secret") ?? "").trim();
+      if (!gotSecret || gotSecret !== expectedSecret) {
+        return new Response(JSON.stringify({ error: "unauthorized" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
     }
   }
 
   const payload = await request.json().catch(() => null);
-  const msg = payload?.message;
+  if (!payload) {
+    return new Response(JSON.stringify({ error: "bad_request" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 
-  const toolCalls = (msg?.toolCallList ?? msg?.toolCalls ?? []) as Array<{
-    id: string;
-    name: string;
-    arguments: any;
-  }>;
+  const msg = payload?.message ?? payload ?? {};
+  const messageType = String(msg?.type ?? msg?.messageType ?? msg?.event ?? "").trim();
+
+  const toolCalls: Array<{ id: string; name: string; arguments: any }> = [];
+
+  for (const tc of Array.isArray(msg?.toolCallList) ? msg.toolCallList : []) {
+    toolCalls.push({
+      id: String(tc?.id ?? "").trim(),
+      name: String(tc?.name ?? "").trim(),
+      arguments: tc?.arguments ?? tc?.parameters ?? {},
+    });
+  }
+
+  for (const tc of Array.isArray(msg?.toolCalls) ? msg.toolCalls : []) {
+    const fn = tc?.function ?? {};
+    toolCalls.push({
+      id: String(tc?.id ?? "").trim(),
+      name: String(tc?.name ?? fn?.name ?? "").trim(),
+      arguments: tc?.arguments ?? fn?.arguments ?? tc?.parameters ?? {},
+    });
+  }
+
+  for (const x of Array.isArray(msg?.toolWithToolCallList) ? msg.toolWithToolCallList : []) {
+    const tc = x?.toolCall ?? {};
+    const fn = tc?.function ?? {};
+    toolCalls.push({
+      id: String(tc?.id ?? "").trim(),
+      name: String(x?.name ?? tc?.name ?? fn?.name ?? "").trim(),
+      arguments: tc?.arguments ?? fn?.arguments ?? tc?.parameters ?? {},
+    });
+  }
+
+  if (messageType && messageType !== "tool-calls") {
+    return new Response(JSON.stringify({ ok: true, ignored: messageType }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 
   const call = msg?.call ?? payload?.call ?? null;
-
   const meta =
     call?.assistant?.metadata ||
     call?.assistant?.assistant?.metadata ||
@@ -1003,18 +1064,36 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
   const shop = String(meta?.shop ?? payload?.shop ?? "").trim();
   const callJobId = String(meta?.callJobId ?? payload?.callJobId ?? "").trim();
 
-  const results: Array<{ toolCallId: string; result: string }> = [];
+  const results: Array<{ name: string; toolCallId: string; result?: string; error?: string }> = [];
 
-  for (const tc of toolCalls) {
-    if (!tc?.id) continue;
+  function parseArgs(raw: any) {
+    if (!raw) return {};
+    if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+    return typeof raw === "object" ? raw : {};
+  }
 
-    if (String(tc?.name ?? "") !== "send_checkout_sms") {
-      results.push({ toolCallId: tc.id, result: "ignored" });
+  for (const tc of toolCalls.filter((x) => x.id && x.name)) {
+    const toolName = String(tc.name).trim();
+
+    if (toolName !== "send_checkout_offer" && toolName !== "send_checkout_sms") {
+      results.push({
+        name: toolName,
+        toolCallId: tc.id,
+        result: JSON.stringify({ ok: true, ignored: true }),
+      });
       continue;
     }
 
     try {
-      if (!shop || !callJobId) throw new Error("Missing shop/callJobId in metadata.");
+      if (!shop) throw new Error("Missing shop in metadata.");
+      if (!callJobId) throw new Error("Missing callJobId in metadata.");
 
       const job = await db.callJob.findFirst({ where: { id: callJobId, shop } });
       if (!job) throw new Error("CallJob not found.");
@@ -1022,38 +1101,149 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
       const checkout = await db.checkout.findFirst({ where: { shop, checkoutId: job.checkoutId } });
       if (!checkout) throw new Error("Checkout not found.");
 
-      const a = safeJsonParse(job.analysisJson) || {};
-      const offer = a?.offer || {};
-      const smsText = String(offer?.smsText ?? "").trim();
-      const smsFrom = String(offer?.smsFrom ?? process.env.VAPI_SMS_FROM_NUMBER ?? "").trim();
+      const extras = await readSettingsExtras(shop);
+
+      const playbook = {
+        discountEnabled: Boolean(extras?.discount_enabled ?? false),
+        maxDiscountPercent: clamp(Number(extras?.max_discount_percent ?? 10), 0, 50),
+        minCartValueForDiscount:
+          extras?.min_cart_value_for_discount == null ? null : Number(extras.min_cart_value_for_discount),
+        couponPrefix: (extras?.coupon_prefix ?? "").trim() ? String(extras?.coupon_prefix).trim() : null,
+        couponValidityHours: clamp(Number(extras?.coupon_validity_hours ?? 24), 1, 168),
+        freeShippingEnabled: Boolean(extras?.free_shipping_enabled ?? false),
+        followupSmsEnabled: Boolean(extras?.followup_sms_enabled ?? false),
+      };
+
+      if (!playbook.followupSmsEnabled) throw new Error("SMS follow-up is disabled for this shop.");
+
+      const recoveryUrl = extractRecoveryUrlFromCheckoutRaw(checkout.raw);
+      if (!recoveryUrl) throw new Error("Missing recovery checkout URL.");
+
       const to = String(job.phone ?? "").trim();
+      if (!to || !to.startsWith("+")) throw new Error("Missing/invalid E.164 recipient on CallJob.");
 
-      if (!to || !to.startsWith("+")) throw new Error("Missing/invalid E.164 recipient.");
-      if (!smsText) throw new Error("Missing smsText (offer.smsText) on CallJob analysisJson.");
+      const smsFrom = String(process.env.VAPI_SMS_FROM_NUMBER ?? "").trim();
+      const hasSmsTransport = Boolean(String(process.env.TWILIO_MESSAGING_SERVICE_SID ?? "").trim() || smsFrom);
+      if (!hasSmsTransport) throw new Error("SMS transport is not configured.");
 
-      const tw = await twilioSendSms({ to, body: smsText, from: smsFrom || null });
-      const sid = String(tw?.sid ?? "").trim();
+      const args = parseArgs(tc.arguments);
+      const requestedType = toolName === "send_checkout_sms" ? "link_only" : String(args?.offerType ?? "link_only").trim().toLowerCase();
+      const sendSms = toolName === "send_checkout_sms" ? true : args?.sendSms !== false;
+      if (!sendSms) throw new Error("Tool called with sendSms=false.");
+
+      let finalType: "link_only" | "discount" | "free_shipping" = "link_only";
+      let finalDiscountPercent: number | null = null;
+      let offerCode: string | null = null;
+      let discountNodeId: string | null = null;
+      let offerCreateError: string | null = null;
+      let discountLink: string = recoveryUrl;
+
+      if (requestedType === "discount") {
+        if (!playbook.discountEnabled) throw new Error("Discounts are disabled for this shop.");
+        if (playbook.minCartValueForDiscount != null && Number(checkout.value) < Number(playbook.minCartValueForDiscount)) {
+          throw new Error("Cart total does not meet the minimum value for discount.");
+        }
+
+        const asked = Math.floor(Number(args?.discountPercent ?? 0));
+        if (!Number.isFinite(asked) || asked <= 0) throw new Error("A positive discountPercent is required.");
+        if (asked > playbook.maxDiscountPercent) {
+          throw new Error(`Requested discountPercent exceeds the max of ${playbook.maxDiscountPercent}.`);
+        }
+
+        try {
+          const accessToken = await getOfflineAccessToken(shop);
+          const customerGid = await findCustomerGidByEmail(shop, accessToken, checkout.email);
+          const candidate = makeUniqueCode({
+            customerName: checkout.customerName,
+            percent: asked,
+            prefix: playbook.couponPrefix,
+          });
+          const created = await createDiscountCodeBasic({
+            shop,
+            accessToken,
+            code: candidate,
+            percent: asked,
+            startsAt: new Date().toISOString(),
+            endsAt: hoursFromNowIso(playbook.couponValidityHours),
+            customerGid,
+            minSubtotal: playbook.minCartValueForDiscount,
+          });
+          offerCode = created.createdCode ?? candidate;
+          discountNodeId = created.nodeId;
+          finalDiscountPercent = asked;
+          finalType = "discount";
+          discountLink = appendDiscountParam(recoveryUrl, offerCode);
+        } catch (e: any) {
+          offerCreateError = String(e?.message ?? e);
+          throw new Error(`Could not create Shopify discount code: ${offerCreateError}`);
+        }
+      } else if (requestedType === "free_shipping") {
+        if (!playbook.freeShippingEnabled) throw new Error("Free shipping offers are disabled for this shop.");
+        finalType = "free_shipping";
+      }
+
+      const smsText = buildSmsText({
+        checkoutLink: discountLink,
+        offerCode,
+        discountPercent: offerCode ? finalDiscountPercent : null,
+        couponValidityHours: playbook.couponValidityHours,
+        templateOffer: extras?.sms_template_offer ?? null,
+        templateNoOffer: extras?.sms_template_no_offer ?? null,
+      });
+
+      const tw = await twilioSendSms({
+        to,
+        body: smsText,
+        from: smsFrom || null,
+      });
+
+      const sid = String(tw?.sid ?? "").trim() || null;
 
       await db.callJob.update({
         where: { id: job.id },
         data: {
           analysisJson: mergeAnalysisJson(job.analysisJson ?? null, {
             offer: {
-              ...offer,
+              checkoutLink: recoveryUrl,
+              discountLink,
+              offerType: finalType,
+              offerCode,
+              discountPercent: finalDiscountPercent,
+              couponValidityHours: playbook.couponValidityHours,
+              shopifyDiscountNodeId: discountNodeId,
+              offerCreateError,
+              generatedAt: new Date().toISOString(),
+              smsEnabled: true,
+              smsFrom: smsFrom || null,
+              smsText,
               smsSentAt: new Date().toISOString(),
-              smsMessageSid: sid || null,
+              smsMessageSid: sid,
             },
           }),
         },
       });
 
-      results.push({ toolCallId: tc.id, result: `sms_sent:${sid || "ok"}` });
+      results.push({
+        name: toolName,
+        toolCallId: tc.id,
+        result: JSON.stringify({
+          ok: true,
+          sms_sent: true,
+          sms_sid: sid,
+          offer_type: finalType,
+          code: offerCode ?? null,
+          discount_percent: finalDiscountPercent,
+        }),
+      });
     } catch (e: any) {
-      results.push({ toolCallId: tc.id, result: `error:${String(e?.message ?? e)}` });
+      results.push({
+        name: toolName,
+        toolCallId: tc.id,
+        error: String(e?.message ?? e),
+      });
     }
   }
 
-  // Vapi expects { results: [{ toolCallId, result }] } :contentReference[oaicite:3]{index=3}
   return new Response(JSON.stringify({ results }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
@@ -1140,72 +1330,10 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       : null;
 
   const recoveryUrl = extractRecoveryUrlFromCheckoutRaw(checkout.raw);
-
-  const minOk =
-    playbook.minCartValueForDiscount == null ? true : Number(checkout.value) >= Number(playbook.minCartValueForDiscount);
-
-  const discountPercent = playbook.discountEnabled && minOk ? Number(playbook.maxDiscountPercent || 0) : 0;
-
-  const existingOffer = safeJsonParse(job.analysisJson)?.offer ?? null;
-  let offerCode: string | null = existingOffer?.offerCode ? String(existingOffer.offerCode) : null;
-  let discountNodeId: string | null = existingOffer?.shopifyDiscountNodeId
-    ? String(existingOffer.shopifyDiscountNodeId)
-    : null;
-  let offerCreateError: string | null = null;
-
-  if (!offerCode && discountPercent > 0) {
-    try {
-      const accessToken = await getOfflineAccessToken(params.shop);
-      const customerGid = await findCustomerGidByEmail(params.shop, accessToken, checkout.email);
-
-      for (let i = 0; i < 3; i++) {
-        const candidate = makeUniqueCode({
-          customerName: checkout.customerName,
-          percent: discountPercent,
-          prefix: playbook.couponPrefix,
-        });
-
-        const created = await createDiscountCodeBasic({
-          shop: params.shop,
-          accessToken,
-          code: candidate,
-          percent: discountPercent,
-          startsAt: new Date().toISOString(),
-          endsAt: hoursFromNowIso(playbook.couponValidityHours),
-          customerGid,
-          minSubtotal: playbook.minCartValueForDiscount,
-        });
-
-        offerCode = created.createdCode ?? candidate;
-        discountNodeId = created.nodeId;
-        break;
-      }
-
-      if (!offerCode) offerCreateError = "Could not generate a unique Shopify discount code after retries.";
-    } catch (e: any) {
-      offerCreateError = String(e?.message ?? e);
-      offerCode = null;
-      discountNodeId = null;
-    }
-  }
-
-  const discountLink = offerCode && recoveryUrl ? appendDiscountParam(recoveryUrl, offerCode) : recoveryUrl;
-
-  const smsFrom = String(process.env.VAPI_SMS_FROM_NUMBER ?? "").trim(); // E.164
+  const smsFrom = String(process.env.VAPI_SMS_FROM_NUMBER ?? "").trim();
+  const hasSmsTransport = Boolean(String(process.env.TWILIO_MESSAGING_SERVICE_SID ?? "").trim() || smsFrom);
   const smsEnabled =
-    Boolean(playbook.followupSmsEnabled) && Boolean(smsFrom) && Boolean(discountLink) && Boolean(customerNumber);
-
-  const smsText =
-    smsEnabled && discountLink
-      ? buildSmsText({
-          checkoutLink: discountLink,
-          offerCode,
-          discountPercent: offerCode ? discountPercent : null,
-          couponValidityHours: playbook.couponValidityHours,
-          templateOffer: extras?.sms_template_offer ?? null,
-          templateNoOffer: extras?.sms_template_no_offer ?? null,
-        })
-      : null;
+    Boolean(playbook.followupSmsEnabled) && hasSmsTransport && Boolean(recoveryUrl) && Boolean(customerNumber);
 
   const promptMode = pickPromptMode((settings as any)?.promptMode ?? "append");
   const merchantPrompt = String((settings as any)?.merchantPrompt ?? (settings as any)?.userPrompt ?? "");
@@ -1217,9 +1345,9 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     previousMemory,
     smsEnabled,
     offer: {
-      checkoutLink: discountLink ?? null,
-      offerCode: offerCode ?? null,
-      discountPercent: offerCode ? discountPercent : null,
+      checkoutLink: recoveryUrl ?? null,
+      offerCode: null,
+      discountPercent: null,
       couponValidityHours: playbook.couponValidityHours,
     },
     checkout: {
@@ -1260,7 +1388,16 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     messages.push({
       role: "user",
       content:
-        "If the customer agrees to receive an SMS, call tool send_checkout_sms once. Do not ask again if they decline.",
+        `There is no pre-created code yet. If you decide to offer a discount, you must choose the exact percentage during the call and then use the tool to create the real Shopify code after the customer agrees.`,
+    });
+
+    messages.push({
+      role: "user",
+      content:
+        `If the customer wants the link/code by SMS or accepts your proposed next step, call tool send_checkout_offer exactly once. ` +
+        `Choose offerType as one of: link_only, discount, free_shipping. ` +
+        `If you choose discount, choose the exact discountPercent yourself based on the conversation, but never exceed ${playbook.maxDiscountPercent}% and only use a positive integer. ` +
+        `Do not promise that a code exists until the tool succeeds.`,
     });
   }
 
@@ -1275,16 +1412,17 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
   const nextAnalysisJson = mergeAnalysisJson(job.analysisJson ?? null, {
     offer: {
       checkoutLink: recoveryUrl,
-      discountLink,
-      offerCode,
-      discountPercent: offerCode ? discountPercent : null,
+      discountLink: recoveryUrl,
+      offerType: null,
+      offerCode: null,
+      discountPercent: null,
       couponValidityHours: playbook.couponValidityHours,
-      shopifyDiscountNodeId: discountNodeId,
-      offerCreateError,
+      shopifyDiscountNodeId: null,
+      offerCreateError: null,
       generatedAt: new Date().toISOString(),
       smsEnabled,
       smsFrom: smsEnabled ? smsFrom : null,
-      smsText: smsText,
+      smsText: null,
     },
     phone_resolution: {
       rawPhone,
@@ -1308,7 +1446,11 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     },
   });
 
-  const webhookUrl = VAPI_SERVER_URL.replace(/\/$/, "");
+  const webhookSecret = String(process.env.VAPI_WEBHOOK_SECRET ?? "").trim();
+  const webhookBaseUrl = VAPI_SERVER_URL.replace(/\/$/, "");
+  const webhookUrl = webhookSecret
+    ? `${webhookBaseUrl}${webhookBaseUrl.includes("?") ? "&" : "?"}secret=${encodeURIComponent(webhookSecret)}`
+    : webhookBaseUrl;
 
   const assistantId =
     String((extras as any)?.vapiAssistantId ?? "").trim() || process.env.VAPI_ASSISTANT_ID || requiredEnv("VAPI_ASSISTANT_ID");
@@ -1316,9 +1458,6 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     String((extras as any)?.vapiPhoneNumberId ?? "").trim() ||
     process.env.VAPI_PHONE_NUMBER_ID ||
     requiredEnv("VAPI_PHONE_NUMBER_ID");
-
-  // ToolId from Vapi dashboard (Function tool: send_checkout_sms)
-  const toolId = String(process.env.VAPI_TOOL_SEND_CHECKOUT_SMS_ID ?? "").trim();
 
   const res = await fetch("https://api.vapi.ai/call/phone", {
     method: "POST",
@@ -1341,7 +1480,39 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
           provider: "openai",
           model: "gpt-4o-mini",
           messages,
-          ...(smsEnabled && toolId ? { toolIds: [toolId] } : {}),
+          ...(smsEnabled
+            ? {
+                tools: [
+                  {
+                    type: "function",
+                    function: {
+                      name: "send_checkout_offer",
+                      description:
+                        "Send the checkout link by SMS. Optionally create a real Shopify discount code at the exact discountPercent chosen during the call, then send it by SMS.",
+                      parameters: {
+                        type: "object",
+                        properties: {
+                          offerType: {
+                            type: "string",
+                            enum: ["link_only", "discount", "free_shipping"],
+                            description: "The final offer you decided to send.",
+                          },
+                          discountPercent: {
+                            type: "integer",
+                            description: "Required only when offerType=discount. Must be a positive integer within the configured limit.",
+                          },
+                          sendSms: {
+                            type: "boolean",
+                            description: "Set true when the customer accepted receiving the SMS.",
+                          },
+                        },
+                        required: ["offerType", "sendSms"],
+                      },
+                    },
+                  },
+                ],
+              }
+            : {}),
         },
 
         serverUrl: webhookUrl,
@@ -1351,6 +1522,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
           shop: params.shop,
           callJobId: job.id,
           checkoutId: job.checkoutId,
+          promptMode,
         },
       },
 
@@ -1358,6 +1530,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
         shop: params.shop,
         callJobId: job.id,
         checkoutId: job.checkoutId,
+        promptMode,
       },
     }),
   });
@@ -1385,6 +1558,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
 export async function createVapiCallForJob(params: { shop: string; callJobId: string }) {
   return startVapiCallForJob(params);
 }
+
 
 export async function placeCall(_params: {
   shop: string;
