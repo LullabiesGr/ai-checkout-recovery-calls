@@ -40,8 +40,8 @@ type ExtrasRow = {
   sms_template_offer: string | null;
   sms_template_no_offer: string | null;
 
-  vapi_assistant_id: string | null;
-  vapi_phone_number_id: string | null;
+  vapiAssistantId: string | null;
+  vapiPhoneNumberId: string | null;
 };
 
 function clamp(n: number, min: number, max: number) {
@@ -92,8 +92,8 @@ async function readSettingsExtras(shop: string): Promise<ExtrasRow | null> {
       sms_template_offer: true,
       sms_template_no_offer: true,
 
-      vapi_assistant_id: true,
-      vapi_phone_number_id: true,
+      vapiAssistantId: true,
+      vapiPhoneNumberId: true,
     },
   });
 
@@ -838,22 +838,11 @@ Memory rules:
   const validityHours = offer?.couponValidityHours ?? playbook.couponValidityHours;
 
   const merchantBlock =
-    merchant
-      ? mode === "replace"
-        ? `
-MERCHANT PRIMARY INSTRUCTIONS (HIGHEST PRIORITY)
-You MUST follow these instructions as the main script and behavioral source for the call.
-- Treat them as the primary script, wording guide, and objection-handling logic.
-- If they conflict with the "Hard rules" section or the explicit facts below, follow Hard rules and explicit facts.
-- Otherwise, these instructions override tone/goal/playbook defaults and any generic call starter guidance.
-- Do NOT dilute, paraphrase away, or ignore these instructions.
-
-${merchant}
-`.trim()
-        : `
+    mode === "append" && merchant
+      ? `
 MERCHANT INSTRUCTIONS (HIGHEST PRIORITY)
 You MUST follow these instructions exactly.
-- If they conflict with the "Hard rules" section or the explicit facts below, follow Hard rules and explicit facts.
+- If they conflict with the "Hard rules" section, follow Hard rules.
 - Otherwise, these instructions override any other guidance (tone/goal/playbook defaults).
 
 ${merchant}
@@ -867,33 +856,10 @@ SMS (tool use):
 - Tool name: send_checkout_sms
 - Call it exactly ONCE only if the customer explicitly agrees to receive an SMS.
 - The server will send the pre-approved checkout link + offer code automatically.
-- Do not promise an SMS unless you will call the tool.
 `.trim()
       : "";
 
-  const modeBlock =
-    mode === "replace"
-      ? `
-Prompt mode:
-- promptMode=replace
-- The merchant's custom prompt is the primary script for this call.
-- Keep all Hard rules, exact facts, and exact offer data intact.
-- Use the playbook only as fallback constraints where the merchant prompt is silent.
-`.trim()
-      : mode === "append"
-      ? `
-Prompt mode:
-- promptMode=append
-- The merchant's custom prompt is a high-priority overlay on top of the default recovery flow.
-- Keep the default recovery structure unless the merchant prompt explicitly changes it.
-`.trim()
-      : `
-Prompt mode:
-- promptMode=default_only
-- Ignore merchant custom prompt and use only the default recovery flow below.
-`.trim();
-
-  return `
+  const base = `
 You are the merchant's AI phone agent. Your job: recover an abandoned checkout politely and efficiently.
 ${attemptN > 1 ? `This is a follow-up attempt (#${attemptN}).` : "This is the first attempt."}
 
@@ -902,11 +868,7 @@ Hard rules:
 - Keep it short. Target a maximum call length of ~${playbook.maxCallSeconds} seconds.
 - Do not be pushy. If not interested, end politely.
 - Never invent policies, discounts, coupon codes, or links. Use only what is provided below.
-- Never contradict the explicit facts below.
-- If the merchant prompt gives exact wording/instructions, follow it unless it violates Hard rules or explicit facts.
 ${memoryBlock ? `\n\n${memoryBlock}\n` : ""}
-
-${modeBlock}
 
 ${merchantBlock ? `\n\n${merchantBlock}\n` : ""}
 
@@ -929,7 +891,7 @@ Playbook:
   })}
 ${smsBlock ? `\n\n${smsBlock}\n` : ""}
 
-Explicit facts (ground truth):
+Context:
 - checkoutId: ${checkout.checkoutId}
 - customerName: ${checkout.customerName ?? "-"}
 - email: ${checkout.email ?? "-"}
@@ -944,6 +906,9 @@ Offer context (use these exact fields):
 - PERCENT: ${discountPercent == null ? "-" : String(Math.floor(Number(discountPercent) || 0))}
 - VALIDITY_HOURS: ${String(Math.floor(Number(validityHours) || 24))}
 `.trim();
+
+  if (mode === "replace") return merchant ? merchant : base;
+  return base;
 }
 
 // =========================
@@ -1269,14 +1234,42 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     playbook,
   });
 
+  const factsBlock =
+    promptMode === "replace" && merchantPrompt.trim()
+      ? buildFactsBlock({
+          attemptNumber,
+          previousMemory,
+          checkout: {
+            checkoutId: String(checkout.checkoutId),
+            customerName: checkout.customerName,
+            email: checkout.email,
+            phone: customerNumber,
+            value: checkout.value,
+            currency: checkout.currency,
+            itemsJson: checkout.itemsJson,
+          },
+          playbook,
+        })
+      : null;
+
   const messages: Array<{ role: "system" | "user"; content: string }> = [{ role: "system", content: systemPrompt }];
+
+  if (factsBlock) messages.push({ role: "user", content: factsBlock });
+
+  if (smsEnabled) {
+    messages.push({
+      role: "user",
+      content:
+        "If the customer agrees to receive an SMS, call tool send_checkout_sms once. Do not ask again if they decline.",
+    });
+  }
 
   messages.push({
     role: "user",
     content:
       attemptNumber >= 2
-        ? "Continue the follow-up call now using the system instructions above."
-        : "Begin the call now using the system instructions above.",
+        ? "Follow-up call. Reference previous context if relevant. Keep it short and move to a concrete next step."
+        : "Start the call now. Greet the customer, mention they almost completed checkout, and ask if they want help finishing the order.",
   });
 
   const nextAnalysisJson = mergeAnalysisJson(job.analysisJson ?? null, {
@@ -1317,10 +1310,10 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
 
   const webhookUrl = VAPI_SERVER_URL.replace(/\/$/, "");
 
-  const selectedAssistantId =
-    String((extras as any)?.vapi_assistant_id ?? "").trim() || process.env.VAPI_ASSISTANT_ID || requiredEnv("VAPI_ASSISTANT_ID");
+  const assistantId =
+    String((extras as any)?.vapiAssistantId ?? "").trim() || process.env.VAPI_ASSISTANT_ID || requiredEnv("VAPI_ASSISTANT_ID");
   const phoneNumberId =
-    String((extras as any)?.vapi_phone_number_id ?? "").trim() ||
+    String((extras as any)?.vapiPhoneNumberId ?? "").trim() ||
     process.env.VAPI_PHONE_NUMBER_ID ||
     requiredEnv("VAPI_PHONE_NUMBER_ID");
 
@@ -1336,6 +1329,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     },
     body: JSON.stringify({
       phoneNumberId,
+      assistantId,
 
       customer: {
         number: customerNumber,
@@ -1357,8 +1351,6 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
           shop: params.shop,
           callJobId: job.id,
           checkoutId: job.checkoutId,
-          selectedAssistantId,
-          promptMode,
         },
       },
 
@@ -1366,8 +1358,6 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
         shop: params.shop,
         callJobId: job.id,
         checkoutId: job.checkoutId,
-        selectedAssistantId,
-        promptMode,
       },
     }),
   });
