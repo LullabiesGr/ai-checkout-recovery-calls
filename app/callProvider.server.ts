@@ -1208,7 +1208,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       : null;
 
   const promptMode = pickPromptMode((settings as any)?.promptMode ?? "append");
-  const merchantPrompt = String((settings as any)?.userPrompt ?? "");
+  const merchantPrompt = String((settings as any)?.merchantPrompt ?? (settings as any)?.userPrompt ?? "");
 
   const systemPrompt = buildSystemPrompt({
     merchantPrompt,

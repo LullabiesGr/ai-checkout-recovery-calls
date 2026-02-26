@@ -21,7 +21,11 @@ export async function action({ request }: ActionFunctionArgs) {
   const serverNow = new Date();
 
   // Shops
-  const shops = (await db.settings.findMany({ select: { shop: true } })).map((x) => x.shop);
+  // Use both Settings and Checkout as sources so cron still works even if the shop
+  // has checkouts but no Settings row yet.
+  const settingsShops = (await db.settings.findMany({ select: { shop: true } })).map((x) => x.shop);
+  const checkoutShops = (await db.checkout.findMany({ select: { shop: true }, distinct: ["shop"] })).map((x) => x.shop);
+  const shops = Array.from(new Set([...settingsShops, ...checkoutShops].filter(Boolean)));
 
   let markedTotal = 0;
   let enqueuedTotal = 0;

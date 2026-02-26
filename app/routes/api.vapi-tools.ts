@@ -1,5 +1,5 @@
 // app/routes/api.vapi-tools.ts
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { handleVapiToolsWebhook } from "../callProvider.server";
 
 export async function action({ request }: ActionFunctionArgs) {

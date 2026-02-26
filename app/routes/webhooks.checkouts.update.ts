@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import { ensureSettings } from "../callRecovery.server";
 
 function toFloat(v: any) {
   const n = Number.parseFloat(String(v ?? ""));
@@ -82,6 +83,8 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const customerName = buildCustomerName(c);
   const itemsJson = buildItemsJson(c);
+
+  await ensureSettings(shop);
 
   await db.checkout.upsert({
     where: { shop_checkoutId: { shop, checkoutId } },
