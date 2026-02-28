@@ -12,58 +12,36 @@ function safeJsonParse(s: string) {
 }
 
 function keysOf(x: any) {
-  return x && typeof x === "object" ? Object.keys(x).slice(0, 60) : [];
+  return x && typeof x === "object" ? Object.keys(x).slice(0, 80) : [];
 }
 
-function head(s: string, n = 1200) {
+function head(s: string, n = 600) {
   const t = String(s ?? "");
   return t.length > n ? t.slice(0, n) + "…" : t;
 }
 
-function normalizeCheckoutId(raw: any): { id: string; source: string } {
-  const s = String(raw ?? "").trim();
-  if (!s) return { id: "", source: "empty" };
+// Shopify sends checkout webhooks without "id". Use stable token-based key.
+function extractCheckoutKey(c: any, root: any): { checkoutId: string; source: string } {
+  const pick = (label: string, v: any) => {
+    const s = String(v ?? "").trim();
+    return s ? ({ checkoutId: s, source: label } as const) : null;
+  };
 
-  if (s.startsWith("gid://")) {
-    const m = /\/(?:Checkout|AbandonedCheckout)\/(\d+)/.exec(s);
-    if (m?.[1]) return { id: String(m[1]), source: "gid_digits" };
-    return { id: s, source: "gid_full" };
-  }
+  const fromId = pick("id", c?.id ?? root?.id);
+  if (fromId) return fromId;
 
-  return { id: s, source: "plain" };
-}
+  const fromAdminGid = pick("admin_graphql_api_id", c?.admin_graphql_api_id ?? root?.admin_graphql_api_id);
+  if (fromAdminGid) return fromAdminGid;
 
-function unwrapCheckout(root: any) {
-  if (!root || typeof root !== "object") return null;
-  return (
-    root.checkout ??
-    root.abandoned_checkout ??
-    root.abandonedCheckout ??
-    root.data?.checkout ??
-    root.data ??
-    root.payload ??
-    root
-  );
-}
+  const fromToken = pick("token", c?.token ?? root?.token);
+  if (fromToken) return fromToken;
 
-function extractCheckoutId(root: any, c: any) {
-  const candidates: Array<[string, any]> = [
-    ["c.id", c?.id],
-    ["c.checkout_id", c?.checkout_id],
-    ["c.checkoutId", c?.checkoutId],
-    ["c.admin_graphql_api_id", c?.admin_graphql_api_id],
-    ["c.adminGraphqlApiId", c?.adminGraphqlApiId],
+  const fromCartToken = pick("cart_token", c?.cart_token ?? root?.cart_token);
+  if (fromCartToken) return fromCartToken;
 
-    ["root.id", root?.id],
-    ["root.checkout_id", root?.checkout_id],
-    ["root.checkoutId", root?.checkoutId],
-    ["root.admin_graphql_api_id", root?.admin_graphql_api_id],
-  ];
+  const fromName = pick("name", c?.name ?? root?.name);
+  if (fromName) return fromName;
 
-  for (const [src, v] of candidates) {
-    const n = normalizeCheckoutId(v);
-    if (n.id) return { checkoutId: n.id, source: `${src}:${n.source}` };
-  }
   return { checkoutId: "", source: "none" };
 }
 
@@ -75,13 +53,11 @@ function toFloat(v: any) {
 function extractValueCurrency(c: any) {
   const value =
     toFloat(c?.total_price) ??
+    toFloat(c?.subtotal_price) ??
     toFloat(c?.totalPrice) ??
-    toFloat(c?.total_price_set?.shop_money?.amount) ??
-    toFloat(c?.total_price_set?.shopMoney?.amount) ??
-    toFloat(c?.totalPriceSet?.shopMoney?.amount) ??
     null;
 
-  const currency = String(c?.currency || c?.currency_code || c?.currencyCode || "USD").toUpperCase();
+  const currency = String(c?.currency || c?.presentment_currency || "USD").toUpperCase();
   return { value, currency };
 }
 
@@ -101,40 +77,24 @@ function normalizePhoneForStorage(raw: any): string | null {
 }
 
 function buildCustomerName(c: any): string | null {
-  const ship = c?.shipping_address ?? c?.shippingAddress ?? null;
-  const bill = c?.billing_address ?? c?.billingAddress ?? null;
+  const ship = c?.shipping_address ?? null;
   const cust = c?.customer ?? null;
 
-  const first =
-    ship?.first_name ??
-    ship?.firstName ??
-    bill?.first_name ??
-    bill?.firstName ??
-    cust?.first_name ??
-    cust?.firstName ??
-    null;
-
-  const last =
-    ship?.last_name ??
-    ship?.lastName ??
-    bill?.last_name ??
-    bill?.lastName ??
-    cust?.last_name ??
-    cust?.lastName ??
-    null;
-
-  const full = `${String(first ?? "").trim()} ${String(last ?? "").trim()}`.trim();
+  const first = ship?.first_name ?? cust?.first_name ?? "";
+  const last = ship?.last_name ?? cust?.last_name ?? "";
+  const full = `${String(first).trim()} ${String(last).trim()}`.trim();
   return full ? full : null;
 }
 
 function buildItemsJson(c: any): string | null {
-  const arr = c?.line_items ?? c?.lineItems ?? c?.items ?? [];
+  const arr = c?.line_items ?? [];
   if (!Array.isArray(arr) || arr.length === 0) return null;
 
   const items = arr
     .map((it: any) => ({
       title: it?.title ?? it?.name ?? null,
       quantity: Number(it?.quantity ?? 1),
+      variantTitle: it?.variant_title ?? null,
     }))
     .filter((x: any) => x.title);
 
@@ -150,7 +110,7 @@ export async function action({ request }: ActionFunctionArgs) {
     rawLen: rawText.length,
     rawParsed: Boolean(rawJson),
     rawKeys: keysOf(rawJson),
-    rawHead: head(rawText, 500),
+    rawHead: head(rawText),
   });
 
   let topic: any, shop: any, payload: any;
@@ -178,15 +138,14 @@ export async function action({ request }: ActionFunctionArgs) {
     rawJson ??
     null;
 
-  const c = unwrapCheckout(root);
+  const c = root;
 
   console.log("[CHECKOUTS_UPDATE] shape", {
     rootType: typeof root,
     rootKeys: keysOf(root),
-    checkoutKeys: keysOf(c),
   });
 
-  const { checkoutId, source } = extractCheckoutId(root, c);
+  const { checkoutId, source } = extractCheckoutKey(c, root);
   if (!checkoutId) {
     console.error("[CHECKOUTS_UPDATE] missing checkoutId", { source });
     return new Response("OK", { status: 200 });
@@ -197,6 +156,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const token = c?.token ? String(c.token) : null;
   const email = c?.email ? String(c.email) : null;
   const phone = normalizePhoneForStorage(c?.phone);
+
   const completedAt = c?.completed_at ?? c?.completedAt ?? null;
 
   const customerName = buildCustomerName(c);
@@ -209,20 +169,17 @@ export async function action({ request }: ActionFunctionArgs) {
   });
 
   const prevStatus = String(existing?.status ?? "");
-  const prevAbandonedAt = existing?.abandonedAt ?? null;
 
-  // important: μην εξαφανίζεις ABANDONED candidate από update spam
+  // IMPORTANT:
+  // UPDATE event = customer activity => set OPEN and clear abandonedAt.
+  // Then markAbandonedByDelay will set ABANDONED later if no further activity.
   const nextStatus = completedAt
     ? "CONVERTED"
     : prevStatus === "RECOVERED"
     ? "RECOVERED"
-    : prevStatus === "CONVERTED"
-    ? "CONVERTED"
-    : prevStatus === "ABANDONED"
-    ? "ABANDONED"
     : "OPEN";
 
-  const nextAbandonedAt = completedAt ? null : nextStatus === "ABANDONED" ? prevAbandonedAt : null;
+  const nextAbandonedAt = completedAt ? null : null;
 
   const value = parsedValue != null ? parsedValue : Number(existing?.value ?? 0);
   const currency = parsedCurrency || String(existing?.currency ?? "USD");
@@ -231,9 +188,9 @@ export async function action({ request }: ActionFunctionArgs) {
     shop,
     checkoutId,
     idSource: source,
+    tokenPresent: Boolean(token),
     prevStatus,
     nextStatus,
-    nextAbandonedAt: nextAbandonedAt ? new Date(nextAbandonedAt).toISOString() : null,
     hasPhone: Boolean(phone),
     value,
     currency,
@@ -255,7 +212,7 @@ export async function action({ request }: ActionFunctionArgs) {
         abandonedAt: nextAbandonedAt,
         customerName,
         itemsJson,
-        raw: JSON.stringify(c ?? root ?? null),
+        raw: JSON.stringify(root ?? null),
       },
       update: {
         token,
@@ -267,7 +224,7 @@ export async function action({ request }: ActionFunctionArgs) {
         abandonedAt: nextAbandonedAt,
         customerName,
         itemsJson,
-        raw: JSON.stringify(c ?? root ?? null),
+        raw: JSON.stringify(root ?? null),
       },
     });
 
