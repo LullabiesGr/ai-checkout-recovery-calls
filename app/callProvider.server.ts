@@ -70,34 +70,34 @@ function pickOfferRule(v: any): OfferRule {
 }
 
 async function readSettingsExtras(shop: string): Promise<ExtrasRow | null> {
-  const row = await db.settings.findUnique({
-    where: { shop },
-    select: {
-      tone: true,
-      goal: true,
-      max_call_seconds: true,
-      max_followup_questions: true,
+  const row: any = await db.settings.findUnique({ where: { shop } });
+  if (!row) return null;
 
-      discount_enabled: true,
-      max_discount_percent: true,
-      offer_rule: true,
-      min_cart_value_for_discount: true,
-      coupon_prefix: true,
-      coupon_validity_hours: true,
-      free_shipping_enabled: true,
+  const pick = (a: any, b: any) => (a !== undefined ? a : b);
 
-      followup_email_enabled: true,
-      followup_sms_enabled: true,
+  return {
+    tone: pick(row?.tone, row?.tone) ?? null,
+    goal: pick(row?.goal, row?.goal) ?? null,
+    max_call_seconds: pick(row?.max_call_seconds, row?.maxCallSeconds) ?? null,
+    max_followup_questions: pick(row?.max_followup_questions, row?.maxFollowupQuestions) ?? null,
 
-      sms_template_offer: true,
-      sms_template_no_offer: true,
+    discount_enabled: pick(row?.discount_enabled, row?.discountEnabled) ?? null,
+    max_discount_percent: pick(row?.max_discount_percent, row?.maxDiscountPercent) ?? null,
+    offer_rule: pick(row?.offer_rule, row?.offerRule) ?? null,
+    min_cart_value_for_discount: pick(row?.min_cart_value_for_discount, row?.minCartValueForDiscount) ?? null,
+    coupon_prefix: pick(row?.coupon_prefix, row?.couponPrefix) ?? null,
+    coupon_validity_hours: pick(row?.coupon_validity_hours, row?.couponValidityHours) ?? null,
+    free_shipping_enabled: pick(row?.free_shipping_enabled, row?.freeShippingEnabled) ?? null,
 
-      vapi_assistant_id: true,
-      vapi_phone_number_id: true,
-    },
-  });
+    followup_email_enabled: pick(row?.followup_email_enabled, row?.followupEmailEnabled) ?? null,
+    followup_sms_enabled: pick(row?.followup_sms_enabled, row?.followupSmsEnabled) ?? null,
 
-  return (row as any) ?? null;
+    sms_template_offer: pick(row?.sms_template_offer, row?.smsTemplateOffer) ?? null,
+    sms_template_no_offer: pick(row?.sms_template_no_offer, row?.smsTemplateNoOffer) ?? null,
+
+    vapi_assistant_id: pick(row?.vapi_assistant_id, row?.vapiAssistantId) ?? null,
+    vapi_phone_number_id: pick(row?.vapi_phone_number_id, row?.vapiPhoneNumberId) ?? null,
+  };
 }
 
 function toneGuidance(tone: Tone) {
@@ -497,6 +497,13 @@ function makeUniqueCode(args: { customerName?: string | null; percent: number; p
   return `${pfx}-${nameFrag}-${pct}-${rand}`.slice(0, 45);
 }
 
+function makeUniqueCodeSimple(args: { customerName?: string | null; prefix?: string | null }) {
+  const nameFrag = codeFragmentFromCustomerName(args.customerName);
+  const pfx = normalizePrefix(args.prefix ?? "OFFER").slice(0, 8);
+  const rand = randomBytes(3).toString("hex").toUpperCase();
+  return `${pfx}-${nameFrag}-${rand}`.slice(0, 45);
+}
+
 function applySmsTemplate(tpl: string, vars: Record<string, string>) {
   let out = tpl;
   for (const [k, v] of Object.entries(vars)) {
@@ -529,6 +536,11 @@ function buildSmsText(args: {
     const tpl = String(args.templateOffer ?? "").trim();
     if (tpl) return applySmsTemplate(tpl, vars);
     return `Finish your checkout: ${link}\nOffer: ${pct} off\nCode: ${code}\nValid: ${validity}h`;
+  }
+  if (link && code && !pct) {
+    const tpl = String(args.templateNoOffer ?? "").trim() || String(args.templateOffer ?? "").trim();
+    if (tpl) return applySmsTemplate(tpl, vars);
+    return `Finish your checkout: ${link}\nCode: ${code}\nValid: ${validity}h`;
   }
 
   const tpl2 = String(args.templateNoOffer ?? "").trim();
@@ -617,7 +629,6 @@ async function createDiscountCodeBasic(params: {
   customerGid: string | null;
   minSubtotal: number | null;
 }) {
-  // FIX: proper Shopify mutation + variables (the previous version was invalid)
   const mutation = `
     mutation CreateDiscountCode($basicCodeDiscount: DiscountCodeBasicInput!) {
       discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
@@ -674,6 +685,254 @@ async function createDiscountCodeBasic(params: {
     nodeId: String(nodeId),
     createdCode: createdCode ? String(createdCode) : null,
   };
+}
+
+async function createDiscountCodeFreeShipping(params: {
+  shop: string;
+  accessToken: string;
+  code: string;
+  startsAt: string;
+  endsAt: string | null;
+  customerGid: string | null;
+  minSubtotal: number | null;
+}) {
+  const mutation = `
+    mutation CreateFreeShipping($freeShippingCodeDiscount: DiscountCodeFreeShippingInput!) {
+      discountCodeFreeShippingCreate(freeShippingCodeDiscount: $freeShippingCodeDiscount) {
+        codeDiscountNode {
+          id
+          codeDiscount {
+            ... on DiscountCodeFreeShipping {
+              title
+              codes(first: 1) { nodes { code } }
+            }
+          }
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const freeShippingCodeDiscount: any = {
+    title: `Free Shipping Recovery`,
+    code: params.code,
+    startsAt: params.startsAt,
+    appliesOncePerCustomer: true,
+    customerSelection: params.customerGid ? { customers: { add: [params.customerGid] } } : { all: true },
+    destination: { all: true },
+  };
+
+  if (params.endsAt) freeShippingCodeDiscount.endsAt = params.endsAt;
+
+  if (params.minSubtotal != null && Number.isFinite(Number(params.minSubtotal)) && Number(params.minSubtotal) > 0) {
+    freeShippingCodeDiscount.minimumRequirement = {
+      subtotal: { greaterThanOrEqualToSubtotal: Number(params.minSubtotal) },
+    };
+  }
+
+  const out = await shopifyGraphql(params.shop, params.accessToken, mutation, { freeShippingCodeDiscount });
+
+  const payload = out?.data?.discountCodeFreeShippingCreate;
+  if (!payload) throw new Error(`discountCodeFreeShippingCreate returned null payload: ${JSON.stringify(out)}`);
+
+  const errs = payload?.userErrors ?? [];
+  if (errs.length) {
+    throw new Error(errs.map((e: any) => String(e?.message ?? "")).filter(Boolean).join(" | "));
+  }
+
+  const nodeId = payload?.codeDiscountNode?.id ?? null;
+  const createdCode = payload?.codeDiscountNode?.codeDiscount?.codes?.nodes?.[0]?.code ?? null;
+
+  if (!nodeId) throw new Error(`discountCodeFreeShippingCreate returned no codeDiscountNode: ${JSON.stringify(payload)}`);
+
+  return {
+    nodeId: String(nodeId),
+    createdCode: createdCode ? String(createdCode) : null,
+  };
+}
+
+// =========================
+// Checkout backfill (if DB is missing the checkout row)
+// =========================
+
+function gidCandidatesForAbandonedCheckout(checkoutId: string): string[] {
+  const id = String(checkoutId ?? "").trim();
+  if (!id) return [];
+
+  if (id.startsWith("gid://")) {
+    const candidates = [id];
+    candidates.push(id.replace("/Checkout/", "/AbandonedCheckout/"));
+    candidates.push(id.replace("/checkout/", "/AbandonedCheckout/"));
+    return Array.from(new Set(candidates)).filter(Boolean);
+  }
+
+  if (/^\d+$/.test(id)) {
+    return [`gid://shopify/AbandonedCheckout/${id}`];
+  }
+
+  return [`gid://shopify/AbandonedCheckout/${id}`];
+}
+
+async function fetchAbandonedCheckoutByGid(shop: string, accessToken: string, gid: string): Promise<any | null> {
+  const query = `
+    query Node($id: ID!) {
+      node(id: $id) {
+        ... on AbandonedCheckout {
+          id
+          abandonedCheckoutUrl
+          email
+          phone
+          createdAt
+          updatedAt
+          completedAt
+          totalPriceSet {
+            shopMoney { amount currencyCode }
+            presentmentMoney { amount currencyCode }
+          }
+          shippingAddress { firstName lastName countryCodeV2 country }
+          billingAddress { countryCodeV2 country }
+          customer { firstName lastName email phone defaultAddress { countryCodeV2 country } }
+          lineItems(first: 10) {
+            edges { node { title quantity variantTitle originalUnitPriceSet { shopMoney { amount currencyCode } } } }
+            nodes { title quantity variantTitle originalUnitPriceSet { shopMoney { amount currencyCode } } }
+          }
+        }
+      }
+    }
+  `;
+
+  const out = await shopifyGraphql(shop, accessToken, query, { id: gid });
+  const node = out?.data?.node ?? null;
+  if (node && node.abandonedCheckoutUrl) return node;
+
+  try {
+    const q2 = `
+      query AbandonedCheckouts($q: String!) {
+        abandonedCheckouts(first: 1, query: $q) {
+          nodes {
+            id
+            abandonedCheckoutUrl
+            email
+            phone
+            createdAt
+            updatedAt
+            completedAt
+            totalPriceSet { shopMoney { amount currencyCode } presentmentMoney { amount currencyCode } }
+            shippingAddress { firstName lastName countryCodeV2 country }
+            billingAddress { countryCodeV2 country }
+            customer { firstName lastName email phone defaultAddress { countryCodeV2 country } }
+            lineItems(first: 10) {
+              edges { node { title quantity variantTitle originalUnitPriceSet { shopMoney { amount currencyCode } } } }
+              nodes { title quantity variantTitle originalUnitPriceSet { shopMoney { amount currencyCode } } }
+            }
+          }
+        }
+      }
+    `;
+    const out2 = await shopifyGraphql(shop, accessToken, q2, { q: `id:${gid}` });
+    const n2 = out2?.data?.abandonedCheckouts?.nodes?.[0] ?? null;
+    if (n2 && n2.abandonedCheckoutUrl) return n2;
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
+
+function mapItemsJsonFromAbandonedCheckout(n: any): string | null {
+  const edges = Array.isArray(n?.lineItems?.edges) ? n.lineItems.edges : [];
+  const nodes = Array.isArray(n?.lineItems?.nodes) ? n.lineItems.nodes : [];
+  const list = (edges.length ? edges.map((e: any) => e?.node) : nodes).filter(Boolean);
+
+  const items = list
+    .map((it: any) => ({
+      title: it?.title ?? null,
+      quantity: Number(it?.quantity ?? 1),
+      variantTitle: it?.variantTitle ?? null,
+      price: it?.originalUnitPriceSet?.shopMoney?.amount ?? null,
+      currency: it?.originalUnitPriceSet?.shopMoney?.currencyCode ?? null,
+    }))
+    .filter((x: any) => x.title);
+
+  return items.length ? JSON.stringify(items) : null;
+}
+
+function mapCustomerNameFromAbandonedCheckout(n: any): string | null {
+  const first = String(n?.shippingAddress?.firstName ?? n?.customer?.firstName ?? "").trim();
+  const last = String(n?.shippingAddress?.lastName ?? n?.customer?.lastName ?? "").trim();
+  const full = `${first} ${last}`.trim();
+  return full ? full : null;
+}
+
+function mapMoney(n: any): { value: number; currency: string } {
+  const m = n?.totalPriceSet?.shopMoney ?? n?.totalPriceSet?.presentmentMoney ?? null;
+  const amount = Number(m?.amount ?? 0);
+  const currency = String(m?.currencyCode ?? "USD").toUpperCase();
+  return { value: Number.isFinite(amount) ? amount : 0, currency: currency || "USD" };
+}
+
+async function backfillCheckoutFromShopify(shop: string, checkoutIdKey: string): Promise<boolean> {
+  const key = String(checkoutIdKey ?? "").trim();
+  if (!shop || !key) return false;
+
+  try {
+    const accessToken = await getOfflineAccessToken(shop);
+    const candidates = gidCandidatesForAbandonedCheckout(key);
+
+    for (const gid of candidates) {
+      try {
+        const node = await fetchAbandonedCheckoutByGid(shop, accessToken, gid);
+        if (!node) continue;
+
+        const money = mapMoney(node);
+        const completedAt = node?.completedAt ? new Date(node.completedAt) : null;
+
+        const abandonedAt =
+          completedAt
+            ? null
+            : node?.updatedAt || node?.createdAt
+            ? new Date(String(node.updatedAt ?? node.createdAt))
+            : null;
+
+        await db.checkout.upsert({
+          where: { shop_checkoutId: { shop, checkoutId: key } },
+          create: {
+            shop,
+            checkoutId: key,
+            token: null,
+            email: node?.email ?? node?.customer?.email ?? null,
+            phone: node?.phone ?? node?.customer?.phone ?? null,
+            value: money.value,
+            currency: money.currency,
+            status: completedAt ? "CONVERTED" : "ABANDONED",
+            abandonedAt,
+            customerName: mapCustomerNameFromAbandonedCheckout(node),
+            itemsJson: mapItemsJsonFromAbandonedCheckout(node),
+            raw: JSON.stringify({ ...node, _fetchedGid: gid, _fetchedAt: new Date().toISOString() }),
+          },
+          update: {
+            email: node?.email ?? node?.customer?.email ?? null,
+            phone: node?.phone ?? node?.customer?.phone ?? null,
+            value: money.value,
+            currency: money.currency,
+            status: completedAt ? "CONVERTED" : "ABANDONED",
+            abandonedAt,
+            customerName: mapCustomerNameFromAbandonedCheckout(node),
+            itemsJson: mapItemsJsonFromAbandonedCheckout(node),
+            raw: JSON.stringify({ ...node, _fetchedGid: gid, _fetchedAt: new Date().toISOString() }),
+          },
+        });
+
+        return true;
+      } catch {
+        // try next candidate
+      }
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
 }
 
 // =========================
@@ -914,36 +1173,94 @@ Offer context (use these exact fields):
 }
 
 // =========================
-// Twilio SMS (no dependency)
+// Brevo Transactional SMS (no dependency)
 // =========================
 
-async function twilioSendSms(params: { to: string; body: string; from?: string | null }) {
-  const accountSid = requiredEnv("TWILIO_ACCOUNT_SID");
-  const authToken = requiredEnv("TWILIO_AUTH_TOKEN");
-  const messagingServiceSid = String(process.env.TWILIO_MESSAGING_SERVICE_SID ?? "").trim();
-  const from = String(params.from ?? "").trim();
+function pickBrevoApiKey() {
+  return String(process.env.BREVO_API_KEY ?? process.env.BREVO_SMS_API_KEY ?? "").trim();
+}
 
-  const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
-  const form = new URLSearchParams();
-  form.set("To", params.to);
-  form.set("Body", params.body);
+function normalizeBrevoRecipient(e164: string) {
+  // Brevo expects country code without "+"
+  return String(e164 ?? "").trim().replace(/[^\d+]/g, "").replace(/^\+/, "");
+}
 
-  if (messagingServiceSid) {
-    form.set("MessagingServiceSid", messagingServiceSid);
-  } else {
-    if (!from) throw new Error("Missing TWILIO_MESSAGING_SERVICE_SID and no explicit from number provided.");
-    form.set("From", from);
-  }
+function normalizeBrevoSender(sender: string) {
+  const raw = String(sender ?? "").trim();
+  if (!raw) return "";
 
-  const auth = Buffer.from(`${accountSid}:${authToken}`).toString("base64");
-  const res = await fetch(url, {
+  // numeric sender: up to 15 digits, no "+"
+  const digits = raw.replace(/[^\d]/g, "");
+  const looksNumeric = digits.length >= 6 && /^\d+$/.test(digits);
+
+  if (looksNumeric) return digits.slice(0, 15);
+
+  // alphanumeric sender: docs allow up to 11 chars
+  return raw.replace(/\s+/g, "").slice(0, 11);
+}
+
+function pickBrevoSender() {
+  const s = String(
+    process.env.BREVO_SMS_SENDER ??
+      process.env.BREVO_SENDER ??
+      process.env.VAPI_SMS_SENDER ??
+      process.env.VAPI_SMS_FROM_NUMBER ??
+      ""
+  ).trim();
+  return normalizeBrevoSender(s);
+}
+
+function normalizeBrevoType(t: any) {
+  const v = String(t ?? "").trim().toLowerCase();
+  if (v === "marketing") return "marketing";
+  return "transactional";
+}
+
+async function brevoSendSms(params: {
+  toE164: string;
+  body: string;
+  sender?: string | null;
+  type?: string | null;
+  tag?: string | null;
+  organisationPrefix?: string | null;
+  unicodeEnabled?: boolean;
+}) {
+  const apiKey = pickBrevoApiKey();
+  if (!apiKey) throw new Error("Missing env: BREVO_API_KEY");
+
+  const sender = normalizeBrevoSender(String(params.sender ?? pickBrevoSender()).trim());
+  if (!sender) throw new Error("Missing env: BREVO_SMS_SENDER (or fallback VAPI_SMS_FROM_NUMBER/VAPI_SMS_SENDER)");
+
+  const recipient = normalizeBrevoRecipient(params.toE164);
+  if (!recipient) throw new Error("Invalid recipient phone");
+
+  const payload: Record<string, any> = {
+    sender,
+    recipient,
+    content: String(params.body ?? "").trim(),
+    type: normalizeBrevoType(params.type ?? process.env.BREVO_SMS_TYPE),
+  };
+
+  const tag = String(params.tag ?? process.env.BREVO_SMS_TAG ?? "").trim();
+  if (tag) payload.tag = tag;
+
+  const organisationPrefix = String(params.organisationPrefix ?? process.env.BREVO_SMS_ORGANISATION_PREFIX ?? "").trim();
+  if (organisationPrefix) payload.organisationPrefix = organisationPrefix;
+
+  const unicodeEnabled =
+    typeof params.unicodeEnabled === "boolean"
+      ? params.unicodeEnabled
+      : String(process.env.BREVO_SMS_UNICODE ?? "").trim().toLowerCase() === "true";
+  if (unicodeEnabled) payload.unicodeEnabled = true;
+
+  const res = await fetch("https://api.brevo.com/v3/transactionalSMS/send", {
     method: "POST",
     headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
+      accept: "application/json",
+      "content-type": "application/json",
+      "api-key": apiKey,
     },
-    body: form.toString(),
+    body: JSON.stringify(payload),
   });
 
   const text = await res.text();
@@ -951,14 +1268,14 @@ async function twilioSendSms(params: { to: string; body: string; from?: string |
   try {
     json = text ? JSON.parse(text) : null;
   } catch {
-    // keep as text
+    json = null;
   }
 
   if (!res.ok) {
-    throw new Error(`Twilio SMS failed HTTP ${res.status}: ${text.slice(0, 900)}`);
+    throw new Error(`Brevo SMS failed HTTP ${res.status}: ${text.slice(0, 900)}`);
   }
 
-  return json;
+  return json; // { messageId: number }
 }
 
 // =========================
@@ -1098,7 +1415,11 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
       const job = await db.callJob.findFirst({ where: { id: callJobId, shop } });
       if (!job) throw new Error("CallJob not found.");
 
-      const checkout = await db.checkout.findFirst({ where: { shop, checkoutId: job.checkoutId } });
+      let checkout = await db.checkout.findFirst({ where: { shop, checkoutId: job.checkoutId } });
+      if (!checkout) {
+        await backfillCheckoutFromShopify(shop, String(job.checkoutId));
+        checkout = await db.checkout.findFirst({ where: { shop, checkoutId: job.checkoutId } });
+      }
       if (!checkout) throw new Error("Checkout not found.");
 
       const extras = await readSettingsExtras(shop);
@@ -1122,12 +1443,14 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
       const to = String(job.phone ?? "").trim();
       if (!to || !to.startsWith("+")) throw new Error("Missing/invalid E.164 recipient on CallJob.");
 
-      const smsFrom = String(process.env.VAPI_SMS_FROM_NUMBER ?? "").trim();
-      const hasSmsTransport = Boolean(String(process.env.TWILIO_MESSAGING_SERVICE_SID ?? "").trim() || smsFrom);
-      if (!hasSmsTransport) throw new Error("SMS transport is not configured.");
+      const brevoKey = pickBrevoApiKey();
+      const smsSender = pickBrevoSender();
+      const hasSmsTransport = Boolean(brevoKey && smsSender);
+      if (!hasSmsTransport) throw new Error("SMS transport is not configured (Brevo).");
 
       const args = parseArgs(tc.arguments);
-      const requestedType = toolName === "send_checkout_sms" ? "link_only" : String(args?.offerType ?? "link_only").trim().toLowerCase();
+      const requestedType =
+        toolName === "send_checkout_sms" ? "link_only" : String(args?.offerType ?? "link_only").trim().toLowerCase();
       const sendSms = toolName === "send_checkout_sms" ? true : args?.sendSms !== false;
       if (!sendSms) throw new Error("Tool called with sendSms=false.");
 
@@ -1140,7 +1463,10 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
 
       if (requestedType === "discount") {
         if (!playbook.discountEnabled) throw new Error("Discounts are disabled for this shop.");
-        if (playbook.minCartValueForDiscount != null && Number(checkout.value) < Number(playbook.minCartValueForDiscount)) {
+        if (
+          playbook.minCartValueForDiscount != null &&
+          Number(checkout.value) < Number(playbook.minCartValueForDiscount)
+        ) {
           throw new Error("Cart total does not meet the minimum value for discount.");
         }
 
@@ -1179,7 +1505,39 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
         }
       } else if (requestedType === "free_shipping") {
         if (!playbook.freeShippingEnabled) throw new Error("Free shipping offers are disabled for this shop.");
-        finalType = "free_shipping";
+        if (
+          playbook.minCartValueForDiscount != null &&
+          Number(checkout.value) < Number(playbook.minCartValueForDiscount)
+        ) {
+          throw new Error("Cart total does not meet the minimum value for offer.");
+        }
+
+        try {
+          const accessToken = await getOfflineAccessToken(shop);
+          const customerGid = await findCustomerGidByEmail(shop, accessToken, checkout.email);
+          const candidate = makeUniqueCodeSimple({
+            customerName: checkout.customerName,
+            prefix: playbook.couponPrefix ?? "SHIP",
+          });
+
+          const created = await createDiscountCodeFreeShipping({
+            shop,
+            accessToken,
+            code: candidate,
+            startsAt: new Date().toISOString(),
+            endsAt: hoursFromNowIso(playbook.couponValidityHours),
+            customerGid,
+            minSubtotal: playbook.minCartValueForDiscount,
+          });
+
+          offerCode = created.createdCode ?? candidate;
+          discountNodeId = created.nodeId;
+          finalType = "free_shipping";
+          discountLink = appendDiscountParam(recoveryUrl, offerCode);
+        } catch (e: any) {
+          offerCreateError = String(e?.message ?? e);
+          throw new Error(`Could not create Shopify free shipping code: ${offerCreateError}`);
+        }
       }
 
       const smsText = buildSmsText({
@@ -1191,13 +1549,16 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
         templateNoOffer: extras?.sms_template_no_offer ?? null,
       });
 
-      const tw = await twilioSendSms({
-        to,
+      const br = await brevoSendSms({
+        toE164: to,
         body: smsText,
-        from: smsFrom || null,
+        sender: smsSender,
+        type: process.env.BREVO_SMS_TYPE ?? "transactional",
+        tag: process.env.BREVO_SMS_TAG ?? "checkout-recovery",
+        organisationPrefix: process.env.BREVO_SMS_ORGANISATION_PREFIX ?? null,
       });
 
-      const sid = String(tw?.sid ?? "").trim() || null;
+      const messageId = String(br?.messageId ?? "").trim() || null;
 
       await db.callJob.update({
         where: { id: job.id },
@@ -1214,10 +1575,10 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
               offerCreateError,
               generatedAt: new Date().toISOString(),
               smsEnabled: true,
-              smsFrom: smsFrom || null,
+              smsFrom: smsSender || null,
               smsText,
               smsSentAt: new Date().toISOString(),
-              smsMessageSid: sid,
+              smsMessageSid: messageId,
             },
           }),
         },
@@ -1229,7 +1590,7 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
         result: JSON.stringify({
           ok: true,
           sms_sent: true,
-          sms_sid: sid,
+          sms_message_id: messageId,
           offer_type: finalType,
           code: offerCode ?? null,
           discount_percent: finalDiscountPercent,
@@ -1261,7 +1622,11 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
   const job = await db.callJob.findFirst({ where: { id: params.callJobId, shop: params.shop } });
   if (!job) throw new Error("CallJob not found");
 
-  const checkout = await db.checkout.findFirst({ where: { shop: params.shop, checkoutId: job.checkoutId } });
+  let checkout = await db.checkout.findFirst({ where: { shop: params.shop, checkoutId: job.checkoutId } });
+  if (!checkout) {
+    await backfillCheckoutFromShopify(params.shop, String(job.checkoutId));
+    checkout = await db.checkout.findFirst({ where: { shop: params.shop, checkoutId: job.checkoutId } });
+  }
   if (!checkout) throw new Error("Checkout not found");
 
   const checkoutPhoneRaw = (checkout as any).phone ?? null;
@@ -1330,8 +1695,9 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       : null;
 
   const recoveryUrl = extractRecoveryUrlFromCheckoutRaw(checkout.raw);
-  const smsFrom = String(process.env.VAPI_SMS_FROM_NUMBER ?? "").trim();
-  const hasSmsTransport = Boolean(String(process.env.TWILIO_MESSAGING_SERVICE_SID ?? "").trim() || smsFrom);
+  const brevoKey = pickBrevoApiKey();
+  const smsSender = pickBrevoSender();
+  const hasSmsTransport = Boolean(brevoKey && smsSender);
   const smsEnabled =
     Boolean(playbook.followupSmsEnabled) && hasSmsTransport && Boolean(recoveryUrl) && Boolean(customerNumber);
 
@@ -1421,7 +1787,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       offerCreateError: null,
       generatedAt: new Date().toISOString(),
       smsEnabled,
-      smsFrom: smsEnabled ? smsFrom : null,
+      smsFrom: smsEnabled ? smsSender : null,
       smsText: null,
     },
     phone_resolution: {
@@ -1453,9 +1819,11 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     : webhookBaseUrl;
 
   const assistantId =
-    String((extras as any)?.vapiAssistantId ?? "").trim() || process.env.VAPI_ASSISTANT_ID || requiredEnv("VAPI_ASSISTANT_ID");
+    String((extras as any)?.vapi_assistant_id ?? (extras as any)?.vapiAssistantId ?? "").trim() ||
+    process.env.VAPI_ASSISTANT_ID ||
+    requiredEnv("VAPI_ASSISTANT_ID");
   const phoneNumberId =
-    String((extras as any)?.vapiPhoneNumberId ?? "").trim() ||
+    String((extras as any)?.vapi_phone_number_id ?? (extras as any)?.vapiPhoneNumberId ?? "").trim() ||
     process.env.VAPI_PHONE_NUMBER_ID ||
     requiredEnv("VAPI_PHONE_NUMBER_ID");
 
@@ -1488,7 +1856,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
                     function: {
                       name: "send_checkout_offer",
                       description:
-                        "Send the checkout link by SMS. Optionally create a real Shopify discount code at the exact discountPercent chosen during the call, then send it by SMS.",
+                        "Send the checkout link by SMS. Optionally create a real Shopify discount/free-shipping code (depending on offerType) and send it by SMS.",
                       parameters: {
                         type: "object",
                         properties: {
@@ -1499,7 +1867,8 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
                           },
                           discountPercent: {
                             type: "integer",
-                            description: "Required only when offerType=discount. Must be a positive integer within the configured limit.",
+                            description:
+                              "Required only when offerType=discount. Must be a positive integer within the configured limit.",
                           },
                           sendSms: {
                             type: "boolean",
@@ -1558,7 +1927,6 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
 export async function createVapiCallForJob(params: { shop: string; callJobId: string }) {
   return startVapiCallForJob(params);
 }
-
 
 export async function placeCall(_params: {
   shop: string;
