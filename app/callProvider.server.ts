@@ -26,6 +26,9 @@ type ExtrasRow = {
   max_call_seconds: number | null;
   max_followup_questions: number | null;
 
+  // NEW: per-shop Brevo sender
+  brevoSmsSender: string | null;
+
   discount_enabled: boolean | null;
   max_discount_percent: number | null;
   offer_rule: string | null;
@@ -73,30 +76,32 @@ async function readSettingsExtras(shop: string): Promise<ExtrasRow | null> {
   const row: any = await db.settings.findUnique({ where: { shop } });
   if (!row) return null;
 
-  const pick = (a: any, b: any) => (a !== undefined ? a : b);
+  const pick = (a: any, b: any) => (a !== undefined && a !== null ? a : b);
 
   return {
-    tone: pick(row?.tone, row?.tone) ?? null,
-    goal: pick(row?.goal, row?.goal) ?? null,
-    max_call_seconds: pick(row?.max_call_seconds, row?.maxCallSeconds) ?? null,
-    max_followup_questions: pick(row?.max_followup_questions, row?.maxFollowupQuestions) ?? null,
+    tone: pick(row.tone, row.tone) ?? null,
+    goal: pick(row.goal, row.goal) ?? null,
+    max_call_seconds: pick(row.max_call_seconds, row.maxCallSeconds) ?? null,
+    max_followup_questions: pick(row.max_followup_questions, row.maxFollowupQuestions) ?? null,
 
-    discount_enabled: pick(row?.discount_enabled, row?.discountEnabled) ?? null,
-    max_discount_percent: pick(row?.max_discount_percent, row?.maxDiscountPercent) ?? null,
-    offer_rule: pick(row?.offer_rule, row?.offerRule) ?? null,
-    min_cart_value_for_discount: pick(row?.min_cart_value_for_discount, row?.minCartValueForDiscount) ?? null,
-    coupon_prefix: pick(row?.coupon_prefix, row?.couponPrefix) ?? null,
-    coupon_validity_hours: pick(row?.coupon_validity_hours, row?.couponValidityHours) ?? null,
-    free_shipping_enabled: pick(row?.free_shipping_enabled, row?.freeShippingEnabled) ?? null,
+    discount_enabled: pick(row.discount_enabled, row.discountEnabled) ?? null,
+    max_discount_percent: pick(row.max_discount_percent, row.maxDiscountPercent) ?? null,
+    offer_rule: pick(row.offer_rule, row.offerRule) ?? null,
+    min_cart_value_for_discount: pick(row.min_cart_value_for_discount, row.minCartValueForDiscount) ?? null,
+    coupon_prefix: pick(row.coupon_prefix, row.couponPrefix) ?? null,
+    coupon_validity_hours: pick(row.coupon_validity_hours, row.couponValidityHours) ?? null,
+    free_shipping_enabled: pick(row.free_shipping_enabled, row.freeShippingEnabled) ?? null,
 
-    followup_email_enabled: pick(row?.followup_email_enabled, row?.followupEmailEnabled) ?? null,
-    followup_sms_enabled: pick(row?.followup_sms_enabled, row?.followupSmsEnabled) ?? null,
+    followup_email_enabled: pick(row.followup_email_enabled, row.followupEmailEnabled) ?? null,
+    followup_sms_enabled: pick(row.followup_sms_enabled, row.followupSmsEnabled) ?? null,
 
-    sms_template_offer: pick(row?.sms_template_offer, row?.smsTemplateOffer) ?? null,
-    sms_template_no_offer: pick(row?.sms_template_no_offer, row?.smsTemplateNoOffer) ?? null,
+    sms_template_offer: pick(row.sms_template_offer, row.smsTemplateOffer) ?? null,
+    sms_template_no_offer: pick(row.sms_template_no_offer, row.smsTemplateNoOffer) ?? null,
 
-    vapi_assistant_id: pick(row?.vapi_assistant_id, row?.vapiAssistantId) ?? null,
-    vapi_phone_number_id: pick(row?.vapi_phone_number_id, row?.vapiPhoneNumberId) ?? null,
+    vapi_assistant_id: pick(row.vapi_assistant_id, row.vapiAssistantId) ?? null,
+    vapi_phone_number_id: pick(row.vapi_phone_number_id, row.vapiPhoneNumberId) ?? null,
+
+    brevoSmsSender: pick(row.brevoSmsSender, row.brevo_sms_sender) ?? null,
   };
 }
 
@@ -174,9 +179,9 @@ function followupGuidance(args: {
 - If they decline, stop asking and end politely.`;
 }
 
-// =========================
-// Follow-up memory helpers
-// =========================
+/* =========================
+   Follow-up memory helpers
+   ========================= */
 
 type PrevSummaryRow = {
   received_at: string | null;
@@ -198,9 +203,9 @@ function cleanLine(s: any) {
     .trim();
 }
 
-// =========================
-// JSON helper (single source of truth)
-// =========================
+/* =========================
+   JSON helper
+   ========================= */
 function safeJsonParse(s: any): any | null {
   try {
     if (!s) return null;
@@ -210,9 +215,9 @@ function safeJsonParse(s: any): any | null {
   }
 }
 
-// =========================
-// Country inference from checkout.raw (no DB country column)
-// =========================
+/* =========================
+   Country inference (from checkout.raw)
+   ========================= */
 const ISO2_TO_CALLING_CODE: Record<string, string> = {
   US: "1",
   CA: "1",
@@ -319,7 +324,7 @@ function inferIso2FromCheckoutRaw(checkoutRaw: string | null): string | null {
   if (url) {
     try {
       const u = new URL(url);
-      const loc = String(u.searchParams.get("locale") ?? "").trim(); // e.g. en-US
+      const loc = String(u.searchParams.get("locale") ?? "").trim();
       const m = /([A-Za-z]{2})-([A-Za-z]{2})/.exec(loc);
       if (m) return m[2].toUpperCase();
     } catch {
@@ -336,9 +341,9 @@ function inferCallingCodeFromCheckoutRaw(checkoutRaw: string | null): string | n
   return ISO2_TO_CALLING_CODE[iso2] ?? null;
 }
 
-// =========================
-// Phone normalization (E.164) with checkout-based country inference
-// =========================
+/* =========================
+   Phone normalization (E.164)
+   ========================= */
 function normalizePhoneE164(raw: any, defaultCallingCode?: string | null): string | null {
   const input = String(raw ?? "").trim();
   if (!input) return null;
@@ -365,7 +370,7 @@ function normalizePhoneE164(raw: any, defaultCallingCode?: string | null): strin
   if (!defaultCallingCode) return null;
 
   let national = digits;
-  const keepLeadingZeroCallingCodes = new Set(["39"]); // Italy often keeps leading 0
+  const keepLeadingZeroCallingCodes = new Set(["39"]);
   if (national.startsWith("0") && !keepLeadingZeroCallingCodes.has(defaultCallingCode)) {
     national = national.replace(/^0+/, "");
     if (!national) return null;
@@ -376,6 +381,9 @@ function normalizePhoneE164(raw: any, defaultCallingCode?: string | null): strin
   return "+" + full;
 }
 
+/* =========================
+   Previous call memory
+   ========================= */
 async function readPreviousCallMemory(params: {
   shop: string;
   checkoutId: string;
@@ -448,10 +456,9 @@ async function readPreviousCallMemory(params: {
   return trunc(lines.join("\n"), 1400);
 }
 
-// =========================
-// Offer/SMS helpers
-// =========================
-
+/* =========================
+   Offer/SMS helpers
+   ========================= */
 function mergeAnalysisJson(prev: string | null, patch: any) {
   const base = safeJsonParse(prev) || {};
   return JSON.stringify({ ...base, ...patch });
@@ -504,54 +511,35 @@ function makeUniqueCodeSimple(args: { customerName?: string | null; prefix?: str
   return `${pfx}-${nameFrag}-${rand}`.slice(0, 45);
 }
 
-function applySmsTemplate(tpl: string, vars: Record<string, string>) {
-  let out = tpl;
+function applyTemplate(tpl: string, vars: Record<string, string>) {
+  let out = String(tpl ?? "");
   for (const [k, v] of Object.entries(vars)) {
+    out = out.replaceAll(`{{${k}}}`, v);
     out = out.replaceAll(`{${k}}`, v);
   }
   return out;
 }
 
 function buildSmsText(args: {
-  checkoutLink: string | null;
-  offerCode: string | null;
-  discountPercent: number | null;
-  couponValidityHours: number;
   templateOffer?: string | null;
   templateNoOffer?: string | null;
+  vars: Record<string, string>;
+  hasOffer: boolean;
 }) {
-  const link = args.checkoutLink ? String(args.checkoutLink) : "";
-  const code = args.offerCode ? String(args.offerCode) : "";
-  const pct = args.discountPercent == null ? "" : `${Math.floor(Number(args.discountPercent) || 0)}%`;
-  const validity = clamp(Number(args.couponValidityHours || 24), 1, 168);
+  const defaultOfferTemplate =
+    "Finish your checkout: {{discount_link}}\nOffer: {{percent}}% off\nCode: {{offer_code}}\nValid: {{validity_hours}}h";
+  const defaultNoOfferTemplate = "Finish your checkout: {{checkout_link}}";
 
-  const vars = {
-    link,
-    code,
-    percent: pct,
-    validityHours: String(validity),
-  };
+  const tpl = args.hasOffer
+    ? String(args.templateOffer ?? "").trim() || defaultOfferTemplate
+    : String(args.templateNoOffer ?? "").trim() || defaultNoOfferTemplate;
 
-  if (link && code && pct) {
-    const tpl = String(args.templateOffer ?? "").trim();
-    if (tpl) return applySmsTemplate(tpl, vars);
-    return `Finish your checkout: ${link}\nOffer: ${pct} off\nCode: ${code}\nValid: ${validity}h`;
-  }
-  if (link && code && !pct) {
-    const tpl = String(args.templateNoOffer ?? "").trim() || String(args.templateOffer ?? "").trim();
-    if (tpl) return applySmsTemplate(tpl, vars);
-    return `Finish your checkout: ${link}\nCode: ${code}\nValid: ${validity}h`;
-  }
-
-  const tpl2 = String(args.templateNoOffer ?? "").trim();
-  if (tpl2) return applySmsTemplate(tpl2, vars);
-  return link ? `Finish your checkout: ${link}` : `Finish your checkout using the link from the call.`;
+  return applyTemplate(tpl, args.vars).trim();
 }
 
-// =========================
-// Shopify Discount Creation
-// =========================
-
+/* =========================
+   Shopify Discount Creation
+   ========================= */
 const SHOPIFY_ADMIN_API_VERSION = process.env.SHOPIFY_ADMIN_API_VERSION ?? "2025-07";
 
 async function getOfflineAccessToken(shop: string): Promise<string> {
@@ -583,11 +571,7 @@ async function shopifyGraphql(shop: string, accessToken: string, query: string, 
   }
 
   if (!res.ok) throw new Error(`Shopify GraphQL HTTP ${res.status}: ${JSON.stringify(json)}`);
-
-  if (Array.isArray(json?.errors) && json.errors.length) {
-    throw new Error(`Shopify GraphQL errors: ${JSON.stringify(json.errors)}`);
-  }
-
+  if (Array.isArray(json?.errors) && json.errors.length) throw new Error(`Shopify GraphQL errors: ${JSON.stringify(json.errors)}`);
   return json;
 }
 
@@ -611,7 +595,6 @@ async function findCustomerGidByEmail(
       }
     }
   `;
-
   const q = `email:${e}`;
   const out = await shopifyGraphql(shop, accessToken, query, { q });
   const node = out?.data?.customers?.nodes?.[0];
@@ -672,19 +655,14 @@ async function createDiscountCodeBasic(params: {
   if (!payload) throw new Error(`discountCodeBasicCreate returned null payload: ${JSON.stringify(out)}`);
 
   const errs = payload?.userErrors ?? [];
-  if (errs.length) {
-    throw new Error(errs.map((e: any) => String(e?.message ?? "")).filter(Boolean).join(" | "));
-  }
+  if (errs.length) throw new Error(errs.map((e: any) => String(e?.message ?? "")).filter(Boolean).join(" | "));
 
   const nodeId = payload?.codeDiscountNode?.id ?? null;
   const createdCode = payload?.codeDiscountNode?.codeDiscount?.codes?.nodes?.[0]?.code ?? null;
 
   if (!nodeId) throw new Error(`discountCodeBasicCreate returned no codeDiscountNode: ${JSON.stringify(payload)}`);
 
-  return {
-    nodeId: String(nodeId),
-    createdCode: createdCode ? String(createdCode) : null,
-  };
+  return { nodeId: String(nodeId), createdCode: createdCode ? String(createdCode) : null };
 }
 
 async function createDiscountCodeFreeShipping(params: {
@@ -726,7 +704,7 @@ async function createDiscountCodeFreeShipping(params: {
 
   if (params.minSubtotal != null && Number.isFinite(Number(params.minSubtotal)) && Number(params.minSubtotal) > 0) {
     freeShippingCodeDiscount.minimumRequirement = {
-      subtotal: { greaterThanOrEqualToSubtotal: Number(params.minSubtotal) },
+      subtotal: { greaterThanOrEqualToSubtotal: String(params.minSubtotal) },
     };
   }
 
@@ -736,25 +714,19 @@ async function createDiscountCodeFreeShipping(params: {
   if (!payload) throw new Error(`discountCodeFreeShippingCreate returned null payload: ${JSON.stringify(out)}`);
 
   const errs = payload?.userErrors ?? [];
-  if (errs.length) {
-    throw new Error(errs.map((e: any) => String(e?.message ?? "")).filter(Boolean).join(" | "));
-  }
+  if (errs.length) throw new Error(errs.map((e: any) => String(e?.message ?? "")).filter(Boolean).join(" | "));
 
   const nodeId = payload?.codeDiscountNode?.id ?? null;
   const createdCode = payload?.codeDiscountNode?.codeDiscount?.codes?.nodes?.[0]?.code ?? null;
 
   if (!nodeId) throw new Error(`discountCodeFreeShippingCreate returned no codeDiscountNode: ${JSON.stringify(payload)}`);
 
-  return {
-    nodeId: String(nodeId),
-    createdCode: createdCode ? String(createdCode) : null,
-  };
+  return { nodeId: String(nodeId), createdCode: createdCode ? String(createdCode) : null };
 }
 
-// =========================
-// Checkout backfill (if DB is missing the checkout row)
-// =========================
-
+/* =========================
+   Checkout backfill (if DB missing checkout row)
+   ========================= */
 function gidCandidatesForAbandonedCheckout(checkoutId: string): string[] {
   const id = String(checkoutId ?? "").trim();
   if (!id) return [];
@@ -766,9 +738,7 @@ function gidCandidatesForAbandonedCheckout(checkoutId: string): string[] {
     return Array.from(new Set(candidates)).filter(Boolean);
   }
 
-  if (/^\d+$/.test(id)) {
-    return [`gid://shopify/AbandonedCheckout/${id}`];
-  }
+  if (/^\d+$/.test(id)) return [`gid://shopify/AbandonedCheckout/${id}`];
 
   return [`gid://shopify/AbandonedCheckout/${id}`];
 }
@@ -904,23 +874,23 @@ async function backfillCheckoutFromShopify(shop: string, checkoutIdKey: string):
             phone: node?.phone ?? node?.customer?.phone ?? null,
             value: money.value,
             currency: money.currency,
-            status: completedAt ? "CONVERTED" : "ABANDONED",
+            status: completedAt ? ("CONVERTED" as any) : ("ABANDONED" as any),
             abandonedAt,
             customerName: mapCustomerNameFromAbandonedCheckout(node),
             itemsJson: mapItemsJsonFromAbandonedCheckout(node),
             raw: JSON.stringify({ ...node, _fetchedGid: gid, _fetchedAt: new Date().toISOString() }),
-          },
+          } as any,
           update: {
             email: node?.email ?? node?.customer?.email ?? null,
             phone: node?.phone ?? node?.customer?.phone ?? null,
             value: money.value,
             currency: money.currency,
-            status: completedAt ? "CONVERTED" : "ABANDONED",
+            status: completedAt ? ("CONVERTED" as any) : ("ABANDONED" as any),
             abandonedAt,
             customerName: mapCustomerNameFromAbandonedCheckout(node),
             itemsJson: mapItemsJsonFromAbandonedCheckout(node),
             raw: JSON.stringify({ ...node, _fetchedGid: gid, _fetchedAt: new Date().toISOString() }),
-          },
+          } as any,
         });
 
         return true;
@@ -935,10 +905,9 @@ async function backfillCheckoutFromShopify(shop: string, checkoutIdKey: string):
   return false;
 }
 
-// =========================
-// Prompt builder
-// =========================
-
+/* =========================
+   Prompt builder
+   ========================= */
 function buildFactsBlock(args: {
   attemptNumber: number;
   previousMemory?: string | null;
@@ -1172,16 +1141,14 @@ Offer context (use these exact fields):
   return base;
 }
 
-// =========================
-// Brevo Transactional SMS (no dependency)
-// =========================
-
+/* =========================
+   Brevo Transactional SMS
+   ========================= */
 function pickBrevoApiKey() {
   return String(process.env.BREVO_API_KEY ?? process.env.BREVO_SMS_API_KEY ?? "").trim();
 }
 
 function normalizeBrevoRecipient(e164: string) {
-  // Brevo expects country code without "+"
   return String(e164 ?? "").trim().replace(/[^\d+]/g, "").replace(/^\+/, "");
 }
 
@@ -1189,25 +1156,28 @@ function normalizeBrevoSender(sender: string) {
   const raw = String(sender ?? "").trim();
   if (!raw) return "";
 
-  // numeric sender: up to 15 digits, no "+"
-  const digits = raw.replace(/[^\d]/g, "");
-  const looksNumeric = digits.length >= 6 && /^\d+$/.test(digits);
+  const noSpace = raw.replace(/\s+/g, "");
+  if (/^\+?\d+$/.test(noSpace)) {
+    const digits = noSpace.replace(/^\+/, "").replace(/[^\d]/g, "");
+    return digits.slice(0, 15);
+  }
 
-  if (looksNumeric) return digits.slice(0, 15);
-
-  // alphanumeric sender: docs allow up to 11 chars
-  return raw.replace(/\s+/g, "").slice(0, 11);
+  const alpha = noSpace.replace(/[^A-Za-z0-9]/g, "");
+  return alpha.slice(0, 11);
 }
 
-function pickBrevoSender() {
-  const s = String(
+function resolveBrevoSender(extras: ExtrasRow | null) {
+  const fromDb = String(extras?.brevoSmsSender ?? "").trim();
+  const fromEnv = String(
     process.env.BREVO_SMS_SENDER ??
       process.env.BREVO_SENDER ??
       process.env.VAPI_SMS_SENDER ??
       process.env.VAPI_SMS_FROM_NUMBER ??
       ""
   ).trim();
-  return normalizeBrevoSender(s);
+
+  const picked = fromDb || fromEnv;
+  return normalizeBrevoSender(picked);
 }
 
 function normalizeBrevoType(t: any) {
@@ -1219,7 +1189,7 @@ function normalizeBrevoType(t: any) {
 async function brevoSendSms(params: {
   toE164: string;
   body: string;
-  sender?: string | null;
+  sender: string;
   type?: string | null;
   tag?: string | null;
   organisationPrefix?: string | null;
@@ -1228,8 +1198,8 @@ async function brevoSendSms(params: {
   const apiKey = pickBrevoApiKey();
   if (!apiKey) throw new Error("Missing env: BREVO_API_KEY");
 
-  const sender = normalizeBrevoSender(String(params.sender ?? pickBrevoSender()).trim());
-  if (!sender) throw new Error("Missing env: BREVO_SMS_SENDER (or fallback VAPI_SMS_FROM_NUMBER/VAPI_SMS_SENDER)");
+  const sender = normalizeBrevoSender(params.sender);
+  if (!sender) throw new Error("Missing Brevo sender (set Settings.brevoSmsSender or BREVO_SMS_SENDER).");
 
   const recipient = normalizeBrevoRecipient(params.toE164);
   if (!recipient) throw new Error("Invalid recipient phone");
@@ -1278,10 +1248,9 @@ async function brevoSendSms(params: {
   return json; // { messageId: number }
 }
 
-// =========================
-// Vapi Tools webhook handler (for /api/vapi-tools)
-// =========================
-
+/* =========================
+   Vapi Tools webhook handler (for /api/vapi-tools)
+   ========================= */
 function pickBearerToken(req: Request) {
   const h = req.headers.get("authorization") || req.headers.get("Authorization");
   if (!h) return null;
@@ -1444,7 +1413,7 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
       if (!to || !to.startsWith("+")) throw new Error("Missing/invalid E.164 recipient on CallJob.");
 
       const brevoKey = pickBrevoApiKey();
-      const smsSender = pickBrevoSender();
+      const smsSender = resolveBrevoSender(extras);
       const hasSmsTransport = Boolean(brevoKey && smsSender);
       if (!hasSmsTransport) throw new Error("SMS transport is not configured (Brevo).");
 
@@ -1540,13 +1509,26 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
         }
       }
 
+      const percentForTemplate =
+        finalType === "discount" && finalDiscountPercent != null ? String(Math.floor(Number(finalDiscountPercent))) : "";
+
+      const vars: Record<string, string> = {
+        shop,
+        shop_name: shop,
+        customer_name: String(checkout.customerName ?? "").trim() || "Customer",
+        checkout_id: String(checkout.checkoutId),
+        checkout_link: String(recoveryUrl),
+        discount_link: String(discountLink),
+        offer_code: String(offerCode ?? ""),
+        percent: percentForTemplate,
+        validity_hours: String(Math.floor(Number(playbook.couponValidityHours || 24))),
+      };
+
       const smsText = buildSmsText({
-        checkoutLink: discountLink,
-        offerCode,
-        discountPercent: offerCode ? finalDiscountPercent : null,
-        couponValidityHours: playbook.couponValidityHours,
         templateOffer: extras?.sms_template_offer ?? null,
         templateNoOffer: extras?.sms_template_no_offer ?? null,
+        vars,
+        hasOffer: Boolean(offerCode),
       });
 
       const br = await brevoSendSms({
@@ -1611,10 +1593,9 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
   });
 }
 
-// =========================
-// Vapi call
-// =========================
-
+/* =========================
+   Vapi call
+   ========================= */
 export async function startVapiCallForJob(params: { shop: string; callJobId: string }) {
   const VAPI_API_KEY = requiredEnv("VAPI_API_KEY");
   const VAPI_SERVER_URL = requiredEnv("VAPI_SERVER_URL");
@@ -1695,9 +1676,11 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       : null;
 
   const recoveryUrl = extractRecoveryUrlFromCheckoutRaw(checkout.raw);
+
   const brevoKey = pickBrevoApiKey();
-  const smsSender = pickBrevoSender();
+  const smsSender = resolveBrevoSender(extras);
   const hasSmsTransport = Boolean(brevoKey && smsSender);
+
   const smsEnabled =
     Boolean(playbook.followupSmsEnabled) && hasSmsTransport && Boolean(recoveryUrl) && Boolean(customerNumber);
 

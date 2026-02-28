@@ -50,6 +50,9 @@ type ExtrasRow = {
 
   sms_template_offer: string | null;
   sms_template_no_offer: string | null;
+
+  // NEW: per-shop sender for Brevo SMS
+  brevoSmsSender: string | null;
 };
 
 type LoaderData = {
@@ -86,6 +89,9 @@ type LoaderData = {
 
     smsTemplateOffer: string;
     smsTemplateNoOffer: string;
+
+    // NEW
+    brevoSmsSender: string;
   };
 };
 
@@ -131,7 +137,8 @@ function pickGoal(v: any): Goal {
 }
 function pickOfferRule(v: any): OfferRule {
   const s = String(v ?? "").trim().toLowerCase();
-  if (s === "price_objection" || s === "after_first_objection" || s === "always" || s === "ask_only") return s as OfferRule;
+  if (s === "price_objection" || s === "after_first_objection" || s === "always" || s === "ask_only")
+    return s as OfferRule;
   return "ask_only";
 }
 function pickCurrency(v: any): string {
@@ -143,6 +150,29 @@ function pickPromptMode(v: any): PromptMode {
   const s = String(v ?? "").trim().toLowerCase();
   if (s === "replace" || s === "append") return s as PromptMode;
   return "append";
+}
+
+/**
+ * NEW: normalize per-shop Brevo sender input
+ * - numeric: keep digits only, max 15
+ * - alphanumeric: keep A-Z0-9 only, max 11
+ */
+function normalizeBrevoSenderInput(v: any): string | null {
+  const raw = String(v ?? "").trim();
+  if (!raw) return null;
+
+  const noSpace = raw.replace(/\s+/g, "");
+  if (!noSpace) return null;
+
+  // numeric sender (allow + but store without +)
+  if (/^\+?\d+$/.test(noSpace)) {
+    const digits = noSpace.replace(/^\+/, "").slice(0, 15);
+    return digits ? digits : null;
+  }
+
+  // alphanumeric sender
+  const alpha = noSpace.replace(/[^A-Za-z0-9]/g, "").slice(0, 11);
+  return alpha ? alpha : null;
 }
 
 /**
@@ -162,28 +192,57 @@ function withSearchMerged(path: string, request: Request) {
 }
 
 async function readSettingsExtras(shop: string): Promise<ExtrasRow | null> {
-  const rows = await (db as any).$queryRaw<ExtrasRow[]>`
-    select
-      tone,
-      goal,
-      max_call_seconds,
-      max_followup_questions,
-      discount_enabled,
-      max_discount_percent,
-      offer_rule,
-      min_cart_value_for_discount,
-      coupon_prefix,
-      coupon_validity_hours,
-      free_shipping_enabled,
-      followup_email_enabled,
-      followup_sms_enabled,
-      sms_template_offer,
-      sms_template_no_offer
-    from public."Settings"
-    where shop = ${shop}
-    limit 1
-  `;
-  return rows?.[0] ?? null;
+  // Backward-safe: if column doesn't exist yet, fall back.
+  try {
+    const rows = await (db as any).$queryRaw<ExtrasRow[]>`
+      select
+        tone,
+        goal,
+        max_call_seconds,
+        max_followup_questions,
+        discount_enabled,
+        max_discount_percent,
+        offer_rule,
+        min_cart_value_for_discount,
+        coupon_prefix,
+        coupon_validity_hours,
+        free_shipping_enabled,
+        followup_email_enabled,
+        followup_sms_enabled,
+        sms_template_offer,
+        sms_template_no_offer,
+        "brevoSmsSender"
+      from public."Settings"
+      where shop = ${shop}
+      limit 1
+    `;
+    return rows?.[0] ?? null;
+  } catch {
+    const rows = await (db as any).$queryRaw<any[]>`
+      select
+        tone,
+        goal,
+        max_call_seconds,
+        max_followup_questions,
+        discount_enabled,
+        max_discount_percent,
+        offer_rule,
+        min_cart_value_for_discount,
+        coupon_prefix,
+        coupon_validity_hours,
+        free_shipping_enabled,
+        followup_email_enabled,
+        followup_sms_enabled,
+        sms_template_offer,
+        sms_template_no_offer
+      from public."Settings"
+      where shop = ${shop}
+      limit 1
+    `;
+    const r = rows?.[0] ?? null;
+    if (!r) return null;
+    return { ...r, brevoSmsSender: null } as ExtrasRow;
+  }
 }
 
 async function writeSettingsExtras(
@@ -207,28 +266,56 @@ async function writeSettingsExtras(
 
     smsTemplateOffer: string | null;
     smsTemplateNoOffer: string | null;
+
+    // NEW
+    brevoSmsSender: string | null;
   }
 ) {
-  await (db as any).$executeRaw`
-    update public."Settings"
-    set
-      tone = ${data.tone},
-      goal = ${data.goal},
-      max_call_seconds = ${data.maxCallSeconds},
-      max_followup_questions = ${data.maxFollowupQuestions},
-      discount_enabled = ${data.discountEnabled},
-      max_discount_percent = ${data.maxDiscountPercent},
-      offer_rule = ${data.offerRule},
-      min_cart_value_for_discount = ${data.minCartValueForDiscount},
-      coupon_prefix = ${data.couponPrefix},
-      coupon_validity_hours = ${data.couponValidityHours},
-      free_shipping_enabled = ${data.freeShippingEnabled},
-      followup_email_enabled = ${data.followupEmailEnabled},
-      followup_sms_enabled = ${data.followupSmsEnabled},
-      sms_template_offer = ${data.smsTemplateOffer},
-      sms_template_no_offer = ${data.smsTemplateNoOffer}
-    where shop = ${shop}
-  `;
+  // Backward-safe: if column doesn't exist yet, update without it.
+  try {
+    await (db as any).$executeRaw`
+      update public."Settings"
+      set
+        tone = ${data.tone},
+        goal = ${data.goal},
+        max_call_seconds = ${data.maxCallSeconds},
+        max_followup_questions = ${data.maxFollowupQuestions},
+        discount_enabled = ${data.discountEnabled},
+        max_discount_percent = ${data.maxDiscountPercent},
+        offer_rule = ${data.offerRule},
+        min_cart_value_for_discount = ${data.minCartValueForDiscount},
+        coupon_prefix = ${data.couponPrefix},
+        coupon_validity_hours = ${data.couponValidityHours},
+        free_shipping_enabled = ${data.freeShippingEnabled},
+        followup_email_enabled = ${data.followupEmailEnabled},
+        followup_sms_enabled = ${data.followupSmsEnabled},
+        sms_template_offer = ${data.smsTemplateOffer},
+        sms_template_no_offer = ${data.smsTemplateNoOffer},
+        "brevoSmsSender" = ${data.brevoSmsSender}
+      where shop = ${shop}
+    `;
+  } catch {
+    await (db as any).$executeRaw`
+      update public."Settings"
+      set
+        tone = ${data.tone},
+        goal = ${data.goal},
+        max_call_seconds = ${data.maxCallSeconds},
+        max_followup_questions = ${data.maxFollowupQuestions},
+        discount_enabled = ${data.discountEnabled},
+        max_discount_percent = ${data.maxDiscountPercent},
+        offer_rule = ${data.offerRule},
+        min_cart_value_for_discount = ${data.minCartValueForDiscount},
+        coupon_prefix = ${data.couponPrefix},
+        coupon_validity_hours = ${data.couponValidityHours},
+        free_shipping_enabled = ${data.freeShippingEnabled},
+        followup_email_enabled = ${data.followupEmailEnabled},
+        followup_sms_enabled = ${data.followupSmsEnabled},
+        sms_template_offer = ${data.smsTemplateOffer},
+        sms_template_no_offer = ${data.smsTemplateNoOffer}
+      where shop = ${shop}
+    `;
+  }
 }
 
 /* =========================
@@ -279,10 +366,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     promptMode: pickPromptMode((base as any).promptMode ?? "append"),
     userPrompt: String((base as any).userPrompt ?? ""),
 
-    smsTemplateOffer: String(extras?.sms_template_offer ?? "").trim() ? String(extras?.sms_template_offer) : defaultOfferTemplate,
+    smsTemplateOffer: String(extras?.sms_template_offer ?? "").trim()
+      ? String(extras?.sms_template_offer)
+      : defaultOfferTemplate,
     smsTemplateNoOffer: String(extras?.sms_template_no_offer ?? "").trim()
       ? String(extras?.sms_template_no_offer)
       : defaultNoOfferTemplate,
+
+    brevoSmsSender: String(extras?.brevoSmsSender ?? "").trim(),
   };
 
   return { shop, saved, settings } satisfies LoaderData;
@@ -336,6 +427,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const smsTemplateOffer = smsTemplateOfferRaw ? smsTemplateOfferRaw : null;
   const smsTemplateNoOffer = smsTemplateNoOfferRaw ? smsTemplateNoOfferRaw : null;
 
+  const brevoSmsSender = normalizeBrevoSenderInput(fd.get("brevoSmsSender"));
+
   await db.settings.update({
     where: { shop },
     data: {
@@ -370,6 +463,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     followupSmsEnabled,
     smsTemplateOffer,
     smsTemplateNoOffer,
+    brevoSmsSender,
   });
 
   return new Response(null, {
@@ -417,6 +511,8 @@ export default function Settings() {
 
   const [smsTemplateOffer, setSmsTemplateOffer] = React.useState(settings.smsTemplateOffer ?? "");
   const [smsTemplateNoOffer, setSmsTemplateNoOffer] = React.useState(settings.smsTemplateNoOffer ?? "");
+
+  const [brevoSmsSender, setBrevoSmsSender] = React.useState(settings.brevoSmsSender ?? "");
 
   const isSaving = fetcher.state === "submitting" || fetcher.state === "loading";
 
@@ -489,19 +585,55 @@ export default function Settings() {
 
                   <FormLayout>
                     <FormLayout.Group>
-                      <TextField label="Delay minutes" name="delayMinutes" value={delayMinutes} onChange={setDelayMinutes} autoComplete="off" />
-                      <TextField label="Max attempts" name="maxAttempts" value={maxAttempts} onChange={setMaxAttempts} autoComplete="off" />
-                      <TextField label="Retry minutes" name="retryMinutes" value={retryMinutes} onChange={setRetryMinutes} autoComplete="off" />
+                      <TextField
+                        label="Delay minutes"
+                        name="delayMinutes"
+                        value={delayMinutes}
+                        onChange={setDelayMinutes}
+                        autoComplete="off"
+                      />
+                      <TextField
+                        label="Max attempts"
+                        name="maxAttempts"
+                        value={maxAttempts}
+                        onChange={setMaxAttempts}
+                        autoComplete="off"
+                      />
+                      <TextField
+                        label="Retry minutes"
+                        name="retryMinutes"
+                        value={retryMinutes}
+                        onChange={setRetryMinutes}
+                        autoComplete="off"
+                      />
                     </FormLayout.Group>
 
                     <FormLayout.Group>
-                      <TextField label="Min order value" name="minOrderValue" value={minOrderValue} onChange={setMinOrderValue} autoComplete="off" />
+                      <TextField
+                        label="Min order value"
+                        name="minOrderValue"
+                        value={minOrderValue}
+                        onChange={setMinOrderValue}
+                        autoComplete="off"
+                      />
                       <Select label="Currency" name="currency" options={currencyOptions} value={currency} onChange={setCurrency} />
                     </FormLayout.Group>
 
                     <FormLayout.Group>
-                      <TextField label="Call window start (HH:MM)" name="callWindowStart" value={callWindowStart} onChange={setCallWindowStart} autoComplete="off" />
-                      <TextField label="Call window end (HH:MM)" name="callWindowEnd" value={callWindowEnd} onChange={setCallWindowEnd} autoComplete="off" />
+                      <TextField
+                        label="Call window start (HH:MM)"
+                        name="callWindowStart"
+                        value={callWindowStart}
+                        onChange={setCallWindowStart}
+                        autoComplete="off"
+                      />
+                      <TextField
+                        label="Call window end (HH:MM)"
+                        name="callWindowEnd"
+                        value={callWindowEnd}
+                        onChange={setCallWindowEnd}
+                        autoComplete="off"
+                      />
                     </FormLayout.Group>
                   </FormLayout>
                 </BlockStack>
@@ -515,13 +647,39 @@ export default function Settings() {
 
                   <FormLayout>
                     <FormLayout.Group>
-                      <Select label="Goal" name="goal" options={goalOptions} value={goal} onChange={(v) => setGoal(v as Goal)} />
-                      <Select label="Tone" name="tone" options={toneOptions} value={tone} onChange={(v) => setTone(v as Tone)} />
+                      <Select
+                        label="Goal"
+                        name="goal"
+                        options={goalOptions}
+                        value={goal}
+                        onChange={(v) => setGoal(v as Goal)}
+                      />
+                      <Select
+                        label="Tone"
+                        name="tone"
+                        options={toneOptions}
+                        value={tone}
+                        onChange={(v) => setTone(v as Tone)}
+                      />
                     </FormLayout.Group>
 
                     <FormLayout.Group>
-                      <TextField label="Max call length (seconds)" name="maxCallSeconds" type="number" value={maxCallSeconds} onChange={setMaxCallSeconds} autoComplete="off" />
-                      <TextField label="Max follow-up questions" name="maxFollowupQuestions" type="number" value={maxFollowupQuestions} onChange={setMaxFollowupQuestions} autoComplete="off" />
+                      <TextField
+                        label="Max call length (seconds)"
+                        name="maxCallSeconds"
+                        type="number"
+                        value={maxCallSeconds}
+                        onChange={setMaxCallSeconds}
+                        autoComplete="off"
+                      />
+                      <TextField
+                        label="Max follow-up questions"
+                        name="maxFollowupQuestions"
+                        type="number"
+                        value={maxFollowupQuestions}
+                        onChange={setMaxFollowupQuestions}
+                        autoComplete="off"
+                      />
                     </FormLayout.Group>
                   </FormLayout>
                 </BlockStack>
@@ -542,18 +700,61 @@ export default function Settings() {
 
                   <FormLayout>
                     <FormLayout.Group>
-                      <TextField label="Max discount %" name="maxDiscountPercent" type="number" value={maxDiscountPercent} onChange={setMaxDiscountPercent} disabled={!discountEnabled} autoComplete="off" />
-                      <Select label="When to offer" name="offerRule" options={offerOptions} value={offerRule} onChange={(v) => setOfferRule(v as OfferRule)} disabled={!discountEnabled} />
+                      <TextField
+                        label="Max discount %"
+                        name="maxDiscountPercent"
+                        type="number"
+                        value={maxDiscountPercent}
+                        onChange={setMaxDiscountPercent}
+                        disabled={!discountEnabled}
+                        autoComplete="off"
+                      />
+                      <Select
+                        label="When to offer"
+                        name="offerRule"
+                        options={offerOptions}
+                        value={offerRule}
+                        onChange={(v) => setOfferRule(v as OfferRule)}
+                        disabled={!discountEnabled}
+                      />
                     </FormLayout.Group>
 
                     <FormLayout.Group>
-                      <TextField label="Min cart value to allow discount (optional)" name="minCartValueForDiscount" type="number" value={minCartValueForDiscount} onChange={setMinCartValueForDiscount} disabled={!discountEnabled} autoComplete="off" />
-                      <TextField label="Coupon validity (hours)" name="couponValidityHours" type="number" value={couponValidityHours} onChange={setCouponValidityHours} disabled={!discountEnabled} autoComplete="off" />
+                      <TextField
+                        label="Min cart value to allow discount (optional)"
+                        name="minCartValueForDiscount"
+                        type="number"
+                        value={minCartValueForDiscount}
+                        onChange={setMinCartValueForDiscount}
+                        disabled={!discountEnabled}
+                        autoComplete="off"
+                      />
+                      <TextField
+                        label="Coupon validity (hours)"
+                        name="couponValidityHours"
+                        type="number"
+                        value={couponValidityHours}
+                        onChange={setCouponValidityHours}
+                        disabled={!discountEnabled}
+                        autoComplete="off"
+                      />
                     </FormLayout.Group>
 
                     <FormLayout.Group>
-                      <TextField label="Coupon prefix (optional)" name="couponPrefix" value={couponPrefix} onChange={setCouponPrefix} disabled={!discountEnabled} autoComplete="off" />
-                      <Checkbox label="Allow free shipping alternative" checked={freeShippingEnabled} onChange={setFreeShippingEnabled} disabled={!discountEnabled} />
+                      <TextField
+                        label="Coupon prefix (optional)"
+                        name="couponPrefix"
+                        value={couponPrefix}
+                        onChange={setCouponPrefix}
+                        disabled={!discountEnabled}
+                        autoComplete="off"
+                      />
+                      <Checkbox
+                        label="Allow free shipping alternative"
+                        checked={freeShippingEnabled}
+                        onChange={setFreeShippingEnabled}
+                        disabled={!discountEnabled}
+                      />
                       <input type="hidden" name="freeShippingEnabled" value={freeShippingEnabled ? "on" : ""} />
                     </FormLayout.Group>
                   </FormLayout>
@@ -567,12 +768,44 @@ export default function Settings() {
                   </Text>
 
                   <InlineStack gap="600">
-                    <Checkbox label="Allow follow-up email suggestion" checked={followupEmailEnabled} onChange={setFollowupEmailEnabled} />
-                    <Checkbox label="Allow follow-up SMS suggestion" checked={followupSmsEnabled} onChange={setFollowupSmsEnabled} />
+                    <Checkbox
+                      label="Allow follow-up email suggestion"
+                      checked={followupEmailEnabled}
+                      onChange={setFollowupEmailEnabled}
+                    />
+                    <Checkbox
+                      label="Allow follow-up SMS suggestion"
+                      checked={followupSmsEnabled}
+                      onChange={setFollowupSmsEnabled}
+                    />
                   </InlineStack>
 
                   <input type="hidden" name="followupEmailEnabled" value={followupEmailEnabled ? "on" : ""} />
                   <input type="hidden" name="followupSmsEnabled" value={followupSmsEnabled ? "on" : ""} />
+                </BlockStack>
+              </Card>
+
+              <Card>
+                <BlockStack gap="300">
+                  <Text as="h2" variant="headingMd">
+                    Brevo SMS sender (per shop)
+                  </Text>
+
+                  <FormLayout>
+                    <TextField
+                      label="Sender"
+                      name="brevoSmsSender"
+                      value={brevoSmsSender}
+                      onChange={setBrevoSmsSender}
+                      autoComplete="off"
+                      helpText="Alphanumeric up to 11 chars (A-Z,0-9) or numeric up to 15 digits. Spaces/symbols are removed."
+                      disabled={!followupSmsEnabled}
+                    />
+                  </FormLayout>
+
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    If empty, the server falls back to ENV sender (if configured).
+                  </Text>
                 </BlockStack>
               </Card>
 
@@ -618,7 +851,13 @@ export default function Settings() {
 
                   <FormLayout>
                     <FormLayout.Group>
-                      <Select label="Prompt mode" name="promptMode" options={promptModeOptions} value={promptMode} onChange={(v) => setPromptMode(v as PromptMode)} />
+                      <Select
+                        label="Prompt mode"
+                        name="promptMode"
+                        options={promptModeOptions}
+                        value={promptMode}
+                        onChange={(v) => setPromptMode(v as PromptMode)}
+                      />
                     </FormLayout.Group>
 
                     <TextField
