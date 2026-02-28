@@ -221,7 +221,7 @@ export async function ensureSettings(shop: string) {
         vapiPhoneNumberId: null,
         userPrompt: "",
         merchantPrompt: "",
-        promptMode: "append",
+        promptMode: "replace",
       } as any,
     }))
   );

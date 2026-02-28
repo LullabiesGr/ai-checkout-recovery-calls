@@ -149,7 +149,7 @@ function pickCurrency(v: any): string {
 function pickPromptMode(v: any): PromptMode {
   const s = String(v ?? "").trim().toLowerCase();
   if (s === "replace" || s === "append") return s as PromptMode;
-  return "append";
+  return "replace";
 }
 
 /**
@@ -332,9 +332,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const saved = url.searchParams.get("saved") === "1";
 
-  const defaultOfferTemplate =
-    "Finish your checkout: {{discount_link}}\nOffer: {{percent}}% off\nCode: {{offer_code}}\nValid: {{validity_hours}}h";
-  const defaultNoOfferTemplate = "Finish your checkout: {{checkout_link}}";
+    const defaultOfferTemplate = "Checkout: {{checkout_link}} Code: {{offer_code}}";
+  const defaultNoOfferTemplate = "Checkout: {{checkout_link}}";
 
   const settings: LoaderData["settings"] = {
     enabled: Boolean(base.enabled),
@@ -363,7 +362,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     followupEmailEnabled: Boolean(extras?.followup_email_enabled ?? true),
     followupSmsEnabled: Boolean(extras?.followup_sms_enabled ?? false),
 
-    promptMode: pickPromptMode((base as any).promptMode ?? "append"),
+        promptMode: pickPromptMode((base as any).promptMode ?? "replace"),
     userPrompt: String((base as any).userPrompt ?? ""),
 
     smsTemplateOffer: String(extras?.sms_template_offer ?? "").trim()
@@ -419,7 +418,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const followupEmailEnabled = toBool(fd.get("followupEmailEnabled"));
   const followupSmsEnabled = toBool(fd.get("followupSmsEnabled"));
 
-  const promptMode = pickPromptMode(fd.get("promptMode") ?? (base as any).promptMode ?? "append");
+    const promptMode = pickPromptMode(fd.get("promptMode") ?? (base as any).promptMode ?? "replace");
   const userPrompt = String(fd.get("userPrompt") ?? "").trim();
 
   const smsTemplateOfferRaw = String(fd.get("smsTemplateOffer") ?? "").trim();
