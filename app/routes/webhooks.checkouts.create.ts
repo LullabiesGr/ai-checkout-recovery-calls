@@ -1,4 +1,3 @@
-// app/routes/webhooks.checkouts.create.ts
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -7,6 +6,16 @@ import { ensureSettings } from "../callRecovery.server";
 function toFloat(v: any) {
   const n = Number.parseFloat(String(v ?? ""));
   return Number.isFinite(n) ? n : null;
+}
+
+function normalizeCheckoutId(raw: any): string {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  if (s.startsWith("gid://")) {
+    const m = /\/(?:Checkout|AbandonedCheckout)\/(\d+)/.exec(s);
+    return m?.[1] ? String(m[1]) : s;
+  }
+  return s;
 }
 
 function normalizePhoneForStorage(raw: any): string | null {
@@ -86,12 +95,34 @@ function extractValueCurrency(c: any) {
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  const { topic, shop, payload } = await authenticate.webhook(request);
-  if (topic !== "CHECKOUTS_CREATE") return new Response("Ignored", { status: 200 });
+  console.log("[CHECKOUTS_CREATE] hit", { at: new Date().toISOString() });
+
+  let topic: any, shop: any, payload: any;
+  try {
+    const auth = await authenticate.webhook(request);
+    topic = (auth as any)?.topic;
+    shop = (auth as any)?.shop;
+    payload = (auth as any)?.payload;
+  } catch (e: any) {
+    console.error("[CHECKOUTS_CREATE] authenticate.webhook failed", String(e?.message ?? e));
+    return new Response("OK", { status: 200 });
+  }
+
+  const topicStr = String(topic ?? "");
+  console.log("[CHECKOUTS_CREATE] authed", { topic: topicStr, shop: String(shop ?? "") });
+
+  if (!topicStr.toUpperCase().includes("CHECKOUTS_CREATE")) {
+    console.log("[CHECKOUTS_CREATE] ignored", { topic: topicStr });
+    return new Response("Ignored", { status: 200 });
+  }
 
   const c = payload as any;
-  const checkoutId = c?.id != null ? String(c.id) : "";
-  if (!checkoutId) return new Response("OK", { status: 200 });
+
+  const checkoutId = normalizeCheckoutId(c?.id);
+  if (!checkoutId) {
+    console.log("[CHECKOUTS_CREATE] missing checkoutId", { rawId: c?.id ?? null });
+    return new Response("OK", { status: 200 });
+  }
 
   await ensureSettings(shop);
 
@@ -120,37 +151,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const value = parsedValue != null ? parsedValue : Number(existing?.value ?? 0);
   const currency = parsedCurrency || String(existing?.currency ?? "USD");
 
-  await db.checkout.upsert({
-    where: { shop_checkoutId: { shop, checkoutId } },
-    create: {
-      shop,
-      checkoutId,
-      token,
-      email,
-      phone,
-      value,
-      currency,
-      status: nextStatus as any,
-      abandonedAt: nextAbandonedAt,
-      customerName,
-      itemsJson,
-      raw: JSON.stringify(c),
-    },
-    update: {
-      token,
-      email,
-      phone,
-      value,
-      currency,
-      status: nextStatus as any,
-      abandonedAt: nextAbandonedAt,
-      customerName,
-      itemsJson,
-      raw: JSON.stringify(c),
-    },
-  });
-
-  console.log("[CHECKOUTS_CREATE] upserted", {
+  console.log("[CHECKOUTS_CREATE] upsert start", {
     shop,
     checkoutId,
     nextStatus,
@@ -158,7 +159,48 @@ export async function action({ request }: ActionFunctionArgs) {
     hasPhone: Boolean(phone),
     value,
     currency,
+    rawId: String(c?.id ?? ""),
   });
+
+  try {
+    await db.checkout.upsert({
+      where: { shop_checkoutId: { shop, checkoutId } },
+      create: {
+        shop,
+        checkoutId,
+        token,
+        email,
+        phone,
+        value,
+        currency,
+        status: nextStatus as any,
+        abandonedAt: nextAbandonedAt,
+        customerName,
+        itemsJson,
+        raw: JSON.stringify(c),
+      },
+      update: {
+        token,
+        email,
+        phone,
+        value,
+        currency,
+        status: nextStatus as any,
+        abandonedAt: nextAbandonedAt,
+        customerName,
+        itemsJson,
+        raw: JSON.stringify(c),
+      },
+    });
+
+    console.log("[CHECKOUTS_CREATE] upsert OK", { shop, checkoutId });
+  } catch (e: any) {
+    console.error("[CHECKOUTS_CREATE] upsert FAILED", {
+      shop,
+      checkoutId,
+      err: String(e?.message ?? e),
+    });
+  }
 
   return new Response("OK", { status: 200 });
 }
