@@ -3,19 +3,87 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { ensureSettings } from "../callRecovery.server";
 
+function safeJsonParse(s: string) {
+  try {
+    return s ? JSON.parse(s) : null;
+  } catch {
+    return null;
+  }
+}
+
+function keysOf(x: any) {
+  return x && typeof x === "object" ? Object.keys(x).slice(0, 40) : [];
+}
+
+function normalizeCheckoutId(raw: any): { id: string; source: string } {
+  const s = String(raw ?? "").trim();
+  if (!s) return { id: "", source: "empty" };
+
+  if (s.startsWith("gid://")) {
+    const m = /\/(?:Checkout|AbandonedCheckout)\/(\d+)/.exec(s);
+    if (m?.[1]) return { id: m[1], source: "gid_digits" };
+    return { id: s, source: "gid_full" };
+  }
+
+  return { id: s, source: "plain" };
+}
+
+function unwrapPayload(p: any) {
+  if (!p) return null;
+  if (typeof p === "string") return safeJsonParse(p) ?? null;
+  return p;
+}
+
+function unwrapCheckoutObject(root: any) {
+  if (!root || typeof root !== "object") return null;
+  return (
+    root.checkout ??
+    root.abandoned_checkout ??
+    root.abandonedCheckout ??
+    root.data?.checkout ??
+    root.data ??
+    root.payload ??
+    root
+  );
+}
+
+function extractCheckoutId(root: any, c: any): { checkoutId: string; source: string } {
+  const candidates: Array<[string, any]> = [
+    ["c.id", c?.id],
+    ["c.checkout_id", c?.checkout_id],
+    ["c.checkoutId", c?.checkoutId],
+    ["c.admin_graphql_api_id", c?.admin_graphql_api_id],
+    ["c.adminGraphqlApiId", c?.adminGraphqlApiId],
+
+    ["root.id", root?.id],
+    ["root.checkout_id", root?.checkout_id],
+    ["root.checkoutId", root?.checkoutId],
+    ["root.admin_graphql_api_id", root?.admin_graphql_api_id],
+  ];
+
+  for (const [src, v] of candidates) {
+    const n = normalizeCheckoutId(v);
+    if (n.id) return { checkoutId: n.id, source: src + ":" + n.source };
+  }
+  return { checkoutId: "", source: "none" };
+}
+
 function toFloat(v: any) {
   const n = Number.parseFloat(String(v ?? ""));
   return Number.isFinite(n) ? n : null;
 }
 
-function normalizeCheckoutId(raw: any): string {
-  const s = String(raw ?? "").trim();
-  if (!s) return "";
-  if (s.startsWith("gid://")) {
-    const m = /\/(?:Checkout|AbandonedCheckout)\/(\d+)/.exec(s);
-    return m?.[1] ? String(m[1]) : s;
-  }
-  return s;
+function extractValueCurrency(c: any) {
+  const value =
+    toFloat(c?.total_price) ??
+    toFloat(c?.totalPrice) ??
+    toFloat(c?.total_price_set?.shop_money?.amount) ??
+    toFloat(c?.total_price_set?.shopMoney?.amount) ??
+    toFloat(c?.totalPriceSet?.shopMoney?.amount) ??
+    null;
+
+  const currency = String(c?.currency || c?.currency_code || c?.currencyCode || "USD").toUpperCase();
+  return { value, currency };
 }
 
 function normalizePhoneForStorage(raw: any): string | null {
@@ -68,34 +136,22 @@ function buildItemsJson(c: any): string | null {
     .map((it: any) => ({
       title: it?.title ?? it?.name ?? null,
       quantity: Number(it?.quantity ?? 1),
-      sku: it?.sku ?? null,
-      variantTitle: it?.variant_title ?? it?.variantTitle ?? null,
-      variantId: it?.variant_id ?? it?.variantId ?? null,
-      price: it?.price ?? it?.price_set?.shop_money?.amount ?? null,
-      currency:
-        it?.price_set?.shop_money?.currency_code ??
-        it?.price_set?.shop_money?.currencyCode ??
-        null,
     }))
     .filter((x: any) => x.title);
 
   return items.length ? JSON.stringify(items) : null;
 }
 
-function extractValueCurrency(c: any) {
-  const value =
-    toFloat(c?.total_price) ??
-    toFloat(c?.totalPrice) ??
-    toFloat(c?.total_price_set?.shop_money?.amount) ??
-    toFloat(c?.total_price_set?.shopMoney?.amount) ??
-    null;
-
-  const currency = String(c?.currency || c?.currency_code || c?.currencyCode || "USD").toUpperCase();
-  return { value, currency };
-}
-
 export async function action({ request }: ActionFunctionArgs) {
-  console.log("[CHECKOUTS_UPDATE] hit", { at: new Date().toISOString() });
+  const rawText = await request.clone().text().catch(() => "");
+  const rawJson = safeJsonParse(rawText);
+
+  console.log("[CHECKOUTS_UPDATE] hit", {
+    at: new Date().toISOString(),
+    rawLen: rawText.length,
+    rawParsed: Boolean(rawJson),
+    rawKeys: keysOf(rawJson),
+  });
 
   let topic: any, shop: any, payload: any;
   try {
@@ -108,19 +164,26 @@ export async function action({ request }: ActionFunctionArgs) {
     return new Response("OK", { status: 200 });
   }
 
-  const topicStr = String(topic ?? "");
-  console.log("[CHECKOUTS_UPDATE] authed", { topic: topicStr, shop: String(shop ?? "") });
+  console.log("[CHECKOUTS_UPDATE] authed", {
+    topic: String(topic ?? ""),
+    shop: String(shop ?? ""),
+    payloadType: typeof payload,
+    payloadKeys: keysOf(payload),
+  });
 
-  if (!topicStr.toUpperCase().includes("CHECKOUTS_UPDATE")) {
-    console.log("[CHECKOUTS_UPDATE] ignored", { topic: topicStr });
-    return new Response("Ignored", { status: 200 });
-  }
+  if (String(topic ?? "") !== "CHECKOUTS_UPDATE") return new Response("Ignored", { status: 200 });
 
-  const c = payload as any;
+  const root = unwrapPayload(payload) ?? rawJson ?? null;
+  const c = unwrapCheckoutObject(root) ?? null;
 
-  const checkoutId = normalizeCheckoutId(c?.id);
+  console.log("[CHECKOUTS_UPDATE] shape", {
+    rootKeys: keysOf(root),
+    checkoutKeys: keysOf(c),
+  });
+
+  const { checkoutId, source } = extractCheckoutId(root, c);
   if (!checkoutId) {
-    console.log("[CHECKOUTS_UPDATE] missing checkoutId", { rawId: c?.id ?? null });
+    console.error("[CHECKOUTS_UPDATE] missing checkoutId", { idSource: source });
     return new Response("OK", { status: 200 });
   }
 
@@ -129,6 +192,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const token = c?.token ? String(c.token) : null;
   const email = c?.email ? String(c.email) : null;
   const phone = normalizePhoneForStorage(c?.phone);
+
   const completedAt = c?.completed_at ?? c?.completedAt ?? null;
 
   const customerName = buildCustomerName(c);
@@ -143,6 +207,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const prevStatus = String(existing?.status ?? "");
   const prevAbandonedAt = existing?.abandonedAt ?? null;
 
+  // κρατά ABANDONED αν είναι ήδη ABANDONED (για να μη “εξαφανίζεται” ο candidate)
   const nextStatus = completedAt
     ? "CONVERTED"
     : prevStatus === "RECOVERED"
@@ -161,15 +226,14 @@ export async function action({ request }: ActionFunctionArgs) {
   console.log("[CHECKOUTS_UPDATE] upsert start", {
     shop,
     checkoutId,
+    idSource: source,
     prevStatus,
     nextStatus,
-    prevAbandonedAt: prevAbandonedAt ? new Date(prevAbandonedAt).toISOString() : null,
     nextAbandonedAt: nextAbandonedAt ? new Date(nextAbandonedAt).toISOString() : null,
     hasPhone: Boolean(phone),
     value,
     currency,
     completedAt: Boolean(completedAt),
-    rawId: String(c?.id ?? ""),
   });
 
   try {
@@ -187,7 +251,7 @@ export async function action({ request }: ActionFunctionArgs) {
         abandonedAt: nextAbandonedAt,
         customerName,
         itemsJson,
-        raw: JSON.stringify(c),
+        raw: JSON.stringify(c ?? root ?? null),
       },
       update: {
         token,
@@ -199,7 +263,7 @@ export async function action({ request }: ActionFunctionArgs) {
         abandonedAt: nextAbandonedAt,
         customerName,
         itemsJson,
-        raw: JSON.stringify(c),
+        raw: JSON.stringify(c ?? root ?? null),
       },
     });
 
