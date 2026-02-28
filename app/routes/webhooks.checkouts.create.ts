@@ -1,3 +1,4 @@
+// app/routes/webhooks.checkouts.create.ts
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -6,6 +7,21 @@ import { ensureSettings } from "../callRecovery.server";
 function toFloat(v: any) {
   const n = Number.parseFloat(String(v ?? ""));
   return Number.isFinite(n) ? n : null;
+}
+
+function normalizePhoneForStorage(raw: any): string | null {
+  const input = String(raw ?? "").trim();
+  if (!input) return null;
+
+  let s = input.replace(/^tel:/i, "").trim();
+  if (s.startsWith("00")) s = "+" + s.slice(2);
+  if (s.startsWith("011")) s = "+" + s.slice(3);
+
+  const hasPlus = s.startsWith("+");
+  const digits = s.replace(/\D/g, "");
+  if (!digits) return null;
+
+  return hasPlus ? `+${digits}` : digits;
 }
 
 function buildCustomerName(c: any): string | null {
@@ -36,12 +52,7 @@ function buildCustomerName(c: any): string | null {
 }
 
 function buildItemsJson(c: any): string | null {
-  const arr =
-    c?.line_items ??
-    c?.lineItems ??
-    c?.items ??
-    [];
-
+  const arr = c?.line_items ?? c?.lineItems ?? c?.items ?? [];
   if (!Array.isArray(arr) || arr.length === 0) return null;
 
   const items = arr
@@ -52,10 +63,7 @@ function buildItemsJson(c: any): string | null {
       variantTitle: it?.variant_title ?? it?.variantTitle ?? null,
       variantId: it?.variant_id ?? it?.variantId ?? null,
       price: it?.price ?? it?.price_set?.shop_money?.amount ?? null,
-      currency:
-        it?.price_set?.shop_money?.currency_code ??
-        it?.price_set?.shop_money?.currencyCode ??
-        null,
+      currency: it?.price_set?.shop_money?.currency_code ?? it?.price_set?.shop_money?.currencyCode ?? null,
     }))
     .filter((x: any) => x.title);
 
@@ -64,25 +72,33 @@ function buildItemsJson(c: any): string | null {
 
 export async function action({ request }: ActionFunctionArgs) {
   const { topic, shop, payload } = await authenticate.webhook(request);
-
   if (topic !== "CHECKOUTS_CREATE") return new Response("Ignored", { status: 200 });
 
   const c = payload as any;
 
   const checkoutId = c?.id != null ? String(c.id) : "";
   const value = toFloat(c?.total_price ?? c?.totalPrice ?? c?.total_price_set?.shop_money?.amount);
-  const currency = String((c?.currency || c?.currency_code || "USD")).toUpperCase();
+  const currency = String(c?.currency || c?.currency_code || "USD").toUpperCase();
 
   if (!checkoutId || value == null) return new Response("Invalid payload", { status: 200 });
 
   const token = c?.token ? String(c.token) : null;
   const email = c?.email ? String(c.email) : null;
-  const phone = c?.phone ? String(c.phone) : null;
+  const phone = normalizePhoneForStorage(c?.phone);
 
   const customerName = buildCustomerName(c);
   const itemsJson = buildItemsJson(c);
 
   await ensureSettings(shop);
+
+  // Preserve RECOVERED/CONVERTED if it already exists (rare, but safe)
+  const existing = await db.checkout.findUnique({
+    where: { shop_checkoutId: { shop, checkoutId } },
+    select: { status: true },
+  });
+
+  const preserve =
+    existing?.status === "RECOVERED" || existing?.status === "CONVERTED" ? (existing.status as any) : null;
 
   await db.checkout.upsert({
     where: { shop_checkoutId: { shop, checkoutId } },
@@ -94,7 +110,7 @@ export async function action({ request }: ActionFunctionArgs) {
       phone,
       value,
       currency,
-      status: "OPEN",
+      status: preserve ?? "OPEN",
       abandonedAt: null,
       customerName,
       itemsJson,
@@ -106,7 +122,7 @@ export async function action({ request }: ActionFunctionArgs) {
       phone,
       value,
       currency,
-      status: "OPEN",
+      status: preserve ?? "OPEN",
       abandonedAt: null,
       customerName,
       itemsJson,

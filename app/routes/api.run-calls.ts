@@ -57,6 +57,7 @@ export async function action({ request }: ActionFunctionArgs) {
   let processed = 0;
   let started = 0;
   let failed = 0;
+  let canceled = 0;
 
   for (const job of jobs) {
     // Lock exactly once and increment attempts exactly once here.
@@ -71,6 +72,24 @@ export async function action({ request }: ActionFunctionArgs) {
 
     if (locked.count === 0) continue;
     processed += 1;
+
+    // Guard: if checkout is no longer ABANDONED, do not call.
+    const checkout = await db.checkout.findUnique({
+      where: { shop_checkoutId: { shop: job.shop, checkoutId: job.checkoutId } },
+      select: { status: true },
+    });
+
+    if (!checkout || String(checkout.status) !== "ABANDONED") {
+      await db.callJob.update({
+        where: { id: job.id },
+        data: {
+          status: "CANCELED",
+          outcome: checkout ? `CHECKOUT_NOT_ABANDONED:${String(checkout.status)}` : "CHECKOUT_NOT_FOUND",
+        },
+      });
+      canceled += 1;
+      continue;
+    }
 
     const settings = await ensureSettings(job.shop);
     const maxAttempts = Number((settings as any).maxAttempts ?? 1);
@@ -137,6 +156,7 @@ export async function action({ request }: ActionFunctionArgs) {
       processed,
       started,
       failed,
+      canceled,
     }),
     { status: 200, headers: { "Content-Type": "application/json" } }
   );

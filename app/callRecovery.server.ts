@@ -1,3 +1,4 @@
+// app/callRecovery.server.ts
 import db from "./db.server";
 
 type AdminClient = {
@@ -246,9 +247,10 @@ export async function markAbandonedByDelay(shop: string, delayMinutes: number) {
 /**
  * ENQUEUE
  *
- * Important fix:
- * - maxAttempts is now enforced per current abandonment cycle, not for the checkout's lifetime.
- * - If the checkout was updated / re-abandoned after an older finished call, it can enqueue again.
+ * Notes:
+ * - maxAttempts is enforced per current abandonment cycle.
+ * - Abandonment cycle is driven by Checkout.abandonedAt (set by markAbandonedByDelay).
+ * - When a checkout becomes active again, webhook should set status=OPEN + abandonedAt=null to start a new cycle.
  */
 export async function enqueueCallJobs(params: {
   shop: string;
@@ -268,10 +270,17 @@ export async function enqueueCallJobs(params: {
     return { enqueued: 0 };
   }
 
+  const now = new Date();
+  const nowMs = now.getTime();
+
   const minValue = Number(minOrderValue ?? 0);
   const delayM = Math.max(0, Number(delayMinutes ?? 30));
   const retryM = Math.max(0, Number(retryMinutes ?? 180));
   const maxA = clamp(Number(maxAttempts ?? 2), 1, 10);
+
+  // Stale protection to avoid permanent IN_FLIGHT_EXISTS
+  const CALLING_STALE_MINUTES = clamp(Number(process.env.CALLING_STALE_MINUTES ?? 30), 5, 240);
+  const QUEUED_STALE_HOURS = clamp(Number(process.env.QUEUED_STALE_HOURS ?? 24), 1, 168);
 
   const candidates = await db.checkout.findMany({
     where: {
@@ -298,22 +307,39 @@ export async function enqueueCallJobs(params: {
       checkoutId: { in: checkoutIds },
     },
     select: {
+      id: true,
       checkoutId: true,
       status: true,
       createdAt: true,
+      updatedAt: true,
       scheduledFor: true,
+      providerCallId: true,
     },
     orderBy: { createdAt: "desc" },
     take: 5000,
   });
 
-  const jobsByCheckout = new Map<string, Array<{ status: string; createdAt: Date; scheduledFor: Date | null }>>();
+  const jobsByCheckout = new Map<
+    string,
+    Array<{
+      id: string;
+      status: string;
+      createdAt: Date;
+      updatedAt: Date;
+      scheduledFor: Date | null;
+      providerCallId: string | null;
+    }>
+  >();
+
   for (const j of existingJobs) {
     const arr = jobsByCheckout.get(j.checkoutId) ?? [];
     arr.push({
+      id: String(j.id),
       status: String(j.status),
       createdAt: new Date(j.createdAt),
+      updatedAt: new Date((j as any).updatedAt ?? j.createdAt),
       scheduledFor: (j as any).scheduledFor ? new Date((j as any).scheduledFor) : null,
+      providerCallId: (j as any).providerCallId ? String((j as any).providerCallId) : null,
     });
     jobsByCheckout.set(j.checkoutId, arr);
   }
@@ -343,6 +369,47 @@ export async function enqueueCallJobs(params: {
 
     const allJobs = jobsByCheckout.get(c.checkoutId) ?? [];
     const cycleJobs = allJobs.filter((j) => new Date(j.createdAt).getTime() >= cycleStart.getTime());
+
+    // Auto-expire stale CALLING/QUEUED so they don't block forever.
+    for (const j of cycleJobs) {
+      const ageMs = nowMs - j.createdAt.getTime();
+
+      if (j.status === "CALLING" && ageMs > CALLING_STALE_MINUTES * 60 * 1000) {
+        try {
+          await db.callJob.update({
+            where: { id: j.id },
+            data: {
+              status: "FAILED",
+              outcome: `STALE_CALLING_TIMEOUT_${CALLING_STALE_MINUTES}M`,
+              updatedAt: new Date(),
+            } as any,
+          });
+          j.status = "FAILED";
+        } catch (e: any) {
+          console.log("[ENQUEUE] stale_calling_update_failed", { shop, checkoutId: c.checkoutId, id: j.id, err: String(e?.message ?? e) });
+        }
+      }
+
+      if (j.status === "QUEUED") {
+        const dueAt = j.scheduledFor ? j.scheduledFor.getTime() : j.createdAt.getTime();
+        const overdueMs = nowMs - dueAt;
+        if (overdueMs > QUEUED_STALE_HOURS * 60 * 60 * 1000) {
+          try {
+            await db.callJob.update({
+              where: { id: j.id },
+              data: {
+                status: "FAILED",
+                outcome: `STALE_QUEUED_TIMEOUT_${QUEUED_STALE_HOURS}H`,
+                updatedAt: new Date(),
+              } as any,
+            });
+            j.status = "FAILED";
+          } catch (e: any) {
+            console.log("[ENQUEUE] stale_queued_update_failed", { shop, checkoutId: c.checkoutId, id: j.id, err: String(e?.message ?? e) });
+          }
+        }
+      }
+    }
 
     const inFlight = cycleJobs.some((j) => j.status === "QUEUED" || j.status === "CALLING");
     if (inFlight) {
@@ -399,9 +466,12 @@ export async function enqueueCallJobs(params: {
 
       const arr = jobsByCheckout.get(c.checkoutId) ?? [];
       arr.unshift({
+        id: created.id,
         status: "QUEUED",
         createdAt: new Date(),
+        updatedAt: new Date(),
         scheduledFor,
+        providerCallId: null,
       });
       jobsByCheckout.set(c.checkoutId, arr);
 
