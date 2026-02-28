@@ -1,3 +1,4 @@
+// app/routes/webhooks.checkouts.create.ts
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -89,9 +90,10 @@ export async function action({ request }: ActionFunctionArgs) {
   if (topic !== "CHECKOUTS_CREATE") return new Response("Ignored", { status: 200 });
 
   const c = payload as any;
-
   const checkoutId = c?.id != null ? String(c.id) : "";
   if (!checkoutId) return new Response("OK", { status: 200 });
+
+  await ensureSettings(shop);
 
   const token = c?.token ? String(c.token) : null;
   const email = c?.email ? String(c.email) : null;
@@ -99,18 +101,21 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const customerName = buildCustomerName(c);
   const itemsJson = buildItemsJson(c);
-
   const { value: parsedValue, currency: parsedCurrency } = extractValueCurrency(c);
-
-  await ensureSettings(shop);
 
   const existing = await db.checkout.findUnique({
     where: { shop_checkoutId: { shop, checkoutId } },
-    select: { status: true, value: true, currency: true },
+    select: { status: true, abandonedAt: true, value: true, currency: true },
   });
 
-  const preserve =
-    existing?.status === "RECOVERED" || existing?.status === "CONVERTED" ? (existing.status as any) : null;
+  const prevStatus = String(existing?.status ?? "");
+  const prevAbandonedAt = existing?.abandonedAt ?? null;
+
+  const preserveStatus =
+    prevStatus === "ABANDONED" || prevStatus === "RECOVERED" || prevStatus === "CONVERTED";
+
+  const nextStatus = preserveStatus ? prevStatus : "OPEN";
+  const nextAbandonedAt = preserveStatus ? prevAbandonedAt : null;
 
   const value = parsedValue != null ? parsedValue : Number(existing?.value ?? 0);
   const currency = parsedCurrency || String(existing?.currency ?? "USD");
@@ -125,8 +130,8 @@ export async function action({ request }: ActionFunctionArgs) {
       phone,
       value,
       currency,
-      status: preserve ?? "OPEN",
-      abandonedAt: null,
+      status: nextStatus as any,
+      abandonedAt: nextAbandonedAt,
       customerName,
       itemsJson,
       raw: JSON.stringify(c),
@@ -137,12 +142,22 @@ export async function action({ request }: ActionFunctionArgs) {
       phone,
       value,
       currency,
-      status: preserve ?? "OPEN",
-      abandonedAt: null,
+      status: nextStatus as any,
+      abandonedAt: nextAbandonedAt,
       customerName,
       itemsJson,
       raw: JSON.stringify(c),
     },
+  });
+
+  console.log("[CHECKOUTS_CREATE] upserted", {
+    shop,
+    checkoutId,
+    nextStatus,
+    nextAbandonedAt: nextAbandonedAt ? new Date(nextAbandonedAt).toISOString() : null,
+    hasPhone: Boolean(phone),
+    value,
+    currency,
   });
 
   return new Response("OK", { status: 200 });

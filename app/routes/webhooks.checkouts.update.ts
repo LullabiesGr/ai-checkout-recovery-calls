@@ -1,3 +1,4 @@
+// app/routes/webhooks.checkouts.update.ts
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -93,6 +94,8 @@ export async function action({ request }: ActionFunctionArgs) {
   const checkoutId = c?.id != null ? String(c.id) : "";
   if (!checkoutId) return new Response("OK", { status: 200 });
 
+  await ensureSettings(shop);
+
   const token = c?.token ? String(c.token) : null;
   const email = c?.email ? String(c.email) : null;
   const phone = normalizePhoneForStorage(c?.phone);
@@ -101,21 +104,28 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const customerName = buildCustomerName(c);
   const itemsJson = buildItemsJson(c);
-
   const { value: parsedValue, currency: parsedCurrency } = extractValueCurrency(c);
-
-  await ensureSettings(shop);
 
   const existing = await db.checkout.findUnique({
     where: { shop_checkoutId: { shop, checkoutId } },
-    select: { status: true, value: true, currency: true },
+    select: { status: true, abandonedAt: true, value: true, currency: true },
   });
 
-  const existingStatus = String(existing?.status ?? "");
+  const prevStatus = String(existing?.status ?? "");
+  const prevAbandonedAt = existing?.abandonedAt ?? null;
 
-  // 핵심: κάθε update (αν δεν ολοκληρώθηκε) = activity => OPEN + abandonedAt=null => νέο cycle μετά το delay
-  const nextStatus =
-    completedAt ? "CONVERTED" : existingStatus === "RECOVERED" ? "RECOVERED" : "OPEN";
+  const nextStatus = completedAt
+    ? "CONVERTED"
+    : prevStatus === "RECOVERED"
+    ? "RECOVERED"
+    : prevStatus === "CONVERTED"
+    ? "CONVERTED"
+    : prevStatus === "ABANDONED"
+    ? "ABANDONED"
+    : "OPEN";
+
+  const nextAbandonedAt =
+    completedAt ? null : nextStatus === "ABANDONED" ? prevAbandonedAt : null;
 
   const value = parsedValue != null ? parsedValue : Number(existing?.value ?? 0);
   const currency = parsedCurrency || String(existing?.currency ?? "USD");
@@ -131,7 +141,7 @@ export async function action({ request }: ActionFunctionArgs) {
       value,
       currency,
       status: nextStatus as any,
-      abandonedAt: null,
+      abandonedAt: nextAbandonedAt,
       customerName,
       itemsJson,
       raw: JSON.stringify(c),
@@ -143,11 +153,21 @@ export async function action({ request }: ActionFunctionArgs) {
       value,
       currency,
       status: nextStatus as any,
-      abandonedAt: null,
+      abandonedAt: nextAbandonedAt,
       customerName,
       itemsJson,
       raw: JSON.stringify(c),
     },
+  });
+
+  console.log("[CHECKOUTS_UPDATE] upserted", {
+    shop,
+    checkoutId,
+    nextStatus,
+    nextAbandonedAt: nextAbandonedAt ? new Date(nextAbandonedAt).toISOString() : null,
+    hasPhone: Boolean(phone),
+    value,
+    currency,
   });
 
   return new Response("OK", { status: 200 });
