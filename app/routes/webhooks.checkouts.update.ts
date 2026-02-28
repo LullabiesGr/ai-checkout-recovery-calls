@@ -1,4 +1,3 @@
-// app/routes/webhooks.checkouts.update.ts
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -63,11 +62,26 @@ function buildItemsJson(c: any): string | null {
       variantTitle: it?.variant_title ?? it?.variantTitle ?? null,
       variantId: it?.variant_id ?? it?.variantId ?? null,
       price: it?.price ?? it?.price_set?.shop_money?.amount ?? null,
-      currency: it?.price_set?.shop_money?.currency_code ?? it?.price_set?.shop_money?.currencyCode ?? null,
+      currency:
+        it?.price_set?.shop_money?.currency_code ??
+        it?.price_set?.shop_money?.currencyCode ??
+        null,
     }))
     .filter((x: any) => x.title);
 
   return items.length ? JSON.stringify(items) : null;
+}
+
+function extractValueCurrency(c: any) {
+  const value =
+    toFloat(c?.total_price) ??
+    toFloat(c?.totalPrice) ??
+    toFloat(c?.total_price_set?.shop_money?.amount) ??
+    toFloat(c?.total_price_set?.shopMoney?.amount) ??
+    null;
+
+  const currency = String(c?.currency || c?.currency_code || c?.currencyCode || "USD").toUpperCase();
+  return { value, currency };
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -77,10 +91,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const c = payload as any;
 
   const checkoutId = c?.id != null ? String(c.id) : "";
-  const value = toFloat(c?.total_price ?? c?.totalPrice ?? c?.total_price_set?.shop_money?.amount);
-  const currency = String(c?.currency || c?.currency_code || "USD").toUpperCase();
-
-  if (!checkoutId || value == null) return new Response("Invalid payload", { status: 200 });
+  if (!checkoutId) return new Response("OK", { status: 200 });
 
   const token = c?.token ? String(c.token) : null;
   const email = c?.email ? String(c.email) : null;
@@ -91,30 +102,23 @@ export async function action({ request }: ActionFunctionArgs) {
   const customerName = buildCustomerName(c);
   const itemsJson = buildItemsJson(c);
 
+  const { value: parsedValue, currency: parsedCurrency } = extractValueCurrency(c);
+
   await ensureSettings(shop);
 
-  // IMPORTANT FIX:
-  // Any update activity means the customer interacted again.
-  // If NOT completed -> set status OPEN and clear abandonedAt, so delay-based abandon can start a new cycle.
-  // Preserve RECOVERED/CONVERTED.
   const existing = await db.checkout.findUnique({
     where: { shop_checkoutId: { shop, checkoutId } },
-    select: { status: true },
+    select: { status: true, value: true, currency: true },
   });
 
-  const existingStatus = existing?.status ? String(existing.status) : null;
-  const preserveRecovered = existingStatus === "RECOVERED";
-  const preserveConverted = existingStatus === "CONVERTED";
+  const existingStatus = String(existing?.status ?? "");
 
-  const nextStatus = completedAt
-    ? "CONVERTED"
-    : preserveRecovered
-    ? "RECOVERED"
-    : preserveConverted
-    ? "CONVERTED"
-    : "OPEN";
+  // 핵심: κάθε update (αν δεν ολοκληρώθηκε) = activity => OPEN + abandonedAt=null => νέο cycle μετά το delay
+  const nextStatus =
+    completedAt ? "CONVERTED" : existingStatus === "RECOVERED" ? "RECOVERED" : "OPEN";
 
-  const nextAbandonedAt = completedAt ? null : null;
+  const value = parsedValue != null ? parsedValue : Number(existing?.value ?? 0);
+  const currency = parsedCurrency || String(existing?.currency ?? "USD");
 
   await db.checkout.upsert({
     where: { shop_checkoutId: { shop, checkoutId } },
@@ -127,7 +131,7 @@ export async function action({ request }: ActionFunctionArgs) {
       value,
       currency,
       status: nextStatus as any,
-      abandonedAt: nextAbandonedAt,
+      abandonedAt: null,
       customerName,
       itemsJson,
       raw: JSON.stringify(c),
@@ -139,7 +143,7 @@ export async function action({ request }: ActionFunctionArgs) {
       value,
       currency,
       status: nextStatus as any,
-      abandonedAt: nextAbandonedAt,
+      abandonedAt: null,
       customerName,
       itemsJson,
       raw: JSON.stringify(c),
