@@ -12,7 +12,12 @@ function safeJsonParse(s: string) {
 }
 
 function keysOf(x: any) {
-  return x && typeof x === "object" ? Object.keys(x).slice(0, 40) : [];
+  return x && typeof x === "object" ? Object.keys(x).slice(0, 60) : [];
+}
+
+function head(s: string, n = 1200) {
+  const t = String(s ?? "");
+  return t.length > n ? t.slice(0, n) + "…" : t;
 }
 
 function normalizeCheckoutId(raw: any): { id: string; source: string } {
@@ -21,20 +26,14 @@ function normalizeCheckoutId(raw: any): { id: string; source: string } {
 
   if (s.startsWith("gid://")) {
     const m = /\/(?:Checkout|AbandonedCheckout)\/(\d+)/.exec(s);
-    if (m?.[1]) return { id: m[1], source: "gid_digits" };
+    if (m?.[1]) return { id: String(m[1]), source: "gid_digits" };
     return { id: s, source: "gid_full" };
   }
 
   return { id: s, source: "plain" };
 }
 
-function unwrapPayload(p: any) {
-  if (!p) return null;
-  if (typeof p === "string") return safeJsonParse(p) ?? null;
-  return p;
-}
-
-function unwrapCheckoutObject(root: any) {
+function unwrapCheckout(root: any) {
   if (!root || typeof root !== "object") return null;
   return (
     root.checkout ??
@@ -47,7 +46,7 @@ function unwrapCheckoutObject(root: any) {
   );
 }
 
-function extractCheckoutId(root: any, c: any): { checkoutId: string; source: string } {
+function extractCheckoutId(root: any, c: any) {
   const candidates: Array<[string, any]> = [
     ["c.id", c?.id],
     ["c.checkout_id", c?.checkout_id],
@@ -63,7 +62,7 @@ function extractCheckoutId(root: any, c: any): { checkoutId: string; source: str
 
   for (const [src, v] of candidates) {
     const n = normalizeCheckoutId(v);
-    if (n.id) return { checkoutId: n.id, source: src + ":" + n.source };
+    if (n.id) return { checkoutId: n.id, source: `${src}:${n.source}` };
   }
   return { checkoutId: "", source: "none" };
 }
@@ -151,6 +150,7 @@ export async function action({ request }: ActionFunctionArgs) {
     rawLen: rawText.length,
     rawParsed: Boolean(rawJson),
     rawKeys: keysOf(rawJson),
+    rawHead: head(rawText, 500),
   });
 
   let topic: any, shop: any, payload: any;
@@ -173,17 +173,22 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (String(topic ?? "") !== "CHECKOUTS_UPDATE") return new Response("Ignored", { status: 200 });
 
-  const root = unwrapPayload(payload) ?? rawJson ?? null;
-  const c = unwrapCheckoutObject(root) ?? null;
+  const root =
+    (typeof payload === "string" ? safeJsonParse(payload) : payload) ??
+    rawJson ??
+    null;
+
+  const c = unwrapCheckout(root);
 
   console.log("[CHECKOUTS_UPDATE] shape", {
+    rootType: typeof root,
     rootKeys: keysOf(root),
     checkoutKeys: keysOf(c),
   });
 
   const { checkoutId, source } = extractCheckoutId(root, c);
   if (!checkoutId) {
-    console.error("[CHECKOUTS_UPDATE] missing checkoutId", { idSource: source });
+    console.error("[CHECKOUTS_UPDATE] missing checkoutId", { source });
     return new Response("OK", { status: 200 });
   }
 
@@ -192,7 +197,6 @@ export async function action({ request }: ActionFunctionArgs) {
   const token = c?.token ? String(c.token) : null;
   const email = c?.email ? String(c.email) : null;
   const phone = normalizePhoneForStorage(c?.phone);
-
   const completedAt = c?.completed_at ?? c?.completedAt ?? null;
 
   const customerName = buildCustomerName(c);
@@ -207,7 +211,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const prevStatus = String(existing?.status ?? "");
   const prevAbandonedAt = existing?.abandonedAt ?? null;
 
-  // κρατά ABANDONED αν είναι ήδη ABANDONED (για να μη “εξαφανίζεται” ο candidate)
+  // important: μην εξαφανίζεις ABANDONED candidate από update spam
   const nextStatus = completedAt
     ? "CONVERTED"
     : prevStatus === "RECOVERED"

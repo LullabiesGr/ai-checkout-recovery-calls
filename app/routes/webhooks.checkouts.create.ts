@@ -1,600 +1,277 @@
-import { useEffect, useState, useCallback } from 'react';
-import {
-  BarChart3,
-  TrendingUp,
-  Calendar,
-  Users,
-  CreditCard,
-  RefreshCw,
-  Clock3,
-  Wallet,
-  XCircle,
-} from 'lucide-react';
-import { useOrg } from '../contexts/OrgContext';
-import { TopBar } from '../layout/TopBar';
-import { PageLoader } from '../components/ui/Spinner';
-import { getPayments } from '../lib/queries/payments';
-import { getAppointmentsByDateRange } from '../lib/queries/appointments';
-import { getCustomers } from '../lib/queries/customers';
-import type { Payment, Appointment, AppointmentStatus } from '../types';
-import { FormField, Input } from '../components/ui/FormField';
-import { EmptyState } from '../components/ui/EmptyState';
+import type { ActionFunctionArgs } from "react-router";
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+import { ensureSettings } from "../callRecovery.server";
 
-const STATUS_LABELS: Record<AppointmentStatus, string> = {
-  pending: 'Σε αναμονή',
-  confirmed: 'Επιβεβαιωμένα',
-  arrived: 'Άφιξη',
-  in_service: 'Σε εξέλιξη',
-  completed: 'Ολοκληρωμένα',
-  canceled: 'Ακυρωμένα',
-  no_show: 'Δεν προσήλθε',
-};
-
-function getLocalDateString(offsetDays = 0) {
-  const d = new Date();
-  d.setHours(12, 0, 0, 0);
-  d.setDate(d.getDate() + offsetDays);
-
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-
-  return `${y}-${m}-${day}`;
+function safeJsonParse(s: string) {
+  try {
+    return s ? JSON.parse(s) : null;
+  } catch {
+    return null;
+  }
 }
 
-function formatDateLabel(date: string) {
-  if (!date) return '—';
-
-  return new Date(`${date}T12:00:00`).toLocaleDateString('el-GR', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-  });
+function keysOf(x: any) {
+  return x && typeof x === "object" ? Object.keys(x).slice(0, 60) : [];
 }
 
-function formatDayLabel(date: string) {
-  if (!date) return '—';
-
-  return new Date(`${date}T12:00:00`).toLocaleDateString('el-GR', {
-    weekday: 'short',
-    day: 'numeric',
-    month: 'short',
-  });
+function head(s: string, n = 1200) {
+  const t = String(s ?? "");
+  return t.length > n ? t.slice(0, n) + "…" : t;
 }
 
-function formatMethodLabel(method?: string | null) {
-  const key = String(method ?? '').toLowerCase();
+function normalizeCheckoutId(raw: any): { id: string; source: string } {
+  const s = String(raw ?? "").trim();
+  if (!s) return { id: "", source: "empty" };
 
-  if (key === 'cash') return 'Μετρητά';
-  if (key === 'card') return 'Κάρτα';
-  if (key === 'bank_transfer') return 'Τραπεζική μεταφορά';
-  if (key === 'pos') return 'POS';
-  if (!key) return 'Άγνωστο';
-
-  return key.replaceAll('_', ' ');
-}
-
-function groupByDay(
-  items: { created_at?: string; start_at?: string }[],
-  key: 'created_at' | 'start_at',
-) {
-  const map: Record<string, number> = {};
-
-  for (const item of items) {
-    const date = (item[key] ?? '').split('T')[0];
-    if (!date) continue;
-    map[date] = (map[date] || 0) + 1;
+  // gid://shopify/Checkout/123 or gid://shopify/AbandonedCheckout/123
+  if (s.startsWith("gid://")) {
+    const m = /\/(?:Checkout|AbandonedCheckout)\/(\d+)/.exec(s);
+    if (m?.[1]) return { id: String(m[1]), source: "gid_digits" };
+    return { id: s, source: "gid_full" };
   }
 
-  return map;
+  return { id: s, source: "plain" };
 }
 
-function StatRow({
-  label,
-  value,
-  sub,
-}: {
-  label: string;
-  value: string | number;
-  sub?: string;
-}) {
+function unwrapCheckout(root: any) {
+  if (!root || typeof root !== "object") return null;
   return (
-    <div className="flex items-center justify-between py-3 border-b border-charcoal-50 last:border-0 gap-4">
-      <span className="text-sm text-charcoal-600">{label}</span>
-
-      <div className="text-right">
-        <span className="text-sm font-semibold text-charcoal-900">{value}</span>
-        {sub && <p className="text-xs text-charcoal-400 mt-0.5">{sub}</p>}
-      </div>
-    </div>
+    root.checkout ??
+    root.abandoned_checkout ??
+    root.abandonedCheckout ??
+    root.data?.checkout ??
+    root.data ??
+    root.payload ??
+    root
   );
 }
 
-function MetricCard({
-  icon,
-  label,
-  value,
-  sub,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string | number;
-  sub?: string;
-}) {
-  return (
-    <div className="luxury-card">
-      <div className="flex items-start justify-between mb-4">
-        <div className="w-11 h-11 rounded-2xl bg-charcoal-100 flex items-center justify-center">
-          {icon}
-        </div>
-      </div>
+function extractCheckoutId(root: any, c: any) {
+  const candidates: Array<[string, any]> = [
+    ["c.id", c?.id],
+    ["c.checkout_id", c?.checkout_id],
+    ["c.checkoutId", c?.checkoutId],
+    ["c.admin_graphql_api_id", c?.admin_graphql_api_id],
+    ["c.adminGraphqlApiId", c?.adminGraphqlApiId],
 
-      <p className="text-3xl font-semibold text-charcoal-900">{value}</p>
-      <p className="text-xs text-charcoal-500 mt-1 font-medium uppercase tracking-wider">
-        {label}
-      </p>
-      {sub && <p className="text-xs text-charcoal-400 mt-1">{sub}</p>}
-    </div>
-  );
+    ["root.id", root?.id],
+    ["root.checkout_id", root?.checkout_id],
+    ["root.checkoutId", root?.checkoutId],
+    ["root.admin_graphql_api_id", root?.admin_graphql_api_id],
+  ];
+
+  for (const [src, v] of candidates) {
+    const n = normalizeCheckoutId(v);
+    if (n.id) return { checkoutId: n.id, source: `${src}:${n.source}` };
+  }
+  return { checkoutId: "", source: "none" };
 }
 
-function PresetButton({
-  active,
-  label,
-  onClick,
-}: {
-  active?: boolean;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${
-        active
-          ? 'border-charcoal-800 bg-charcoal-900 text-white'
-          : 'border-charcoal-200 text-charcoal-600 hover:border-charcoal-300 hover:text-charcoal-800'
-      }`}
-    >
-      {label}
-    </button>
-  );
+function toFloat(v: any) {
+  const n = Number.parseFloat(String(v ?? ""));
+  return Number.isFinite(n) ? n : null;
 }
 
-export default function Reports() {
-  const { selectedOrgId } = useOrg();
+function extractValueCurrency(c: any) {
+  const value =
+    toFloat(c?.total_price) ??
+    toFloat(c?.totalPrice) ??
+    toFloat(c?.total_price_set?.shop_money?.amount) ??
+    toFloat(c?.total_price_set?.shopMoney?.amount) ??
+    toFloat(c?.totalPriceSet?.shopMoney?.amount) ??
+    null;
 
-  const [from, setFrom] = useState(getLocalDateString(-29));
-  const [to, setTo] = useState(getLocalDateString(0));
-  const [loading, setLoading] = useState(true);
+  const currency = String(c?.currency || c?.currency_code || c?.currencyCode || "USD").toUpperCase();
+  return { value, currency };
+}
 
-  const [payments, setPayments] = useState<Payment[]>([]);
-  const [appointments, setAppointments] = useState<Appointment[]>([]);
-  const [customerCount, setCustomerCount] = useState(0);
+function normalizePhoneForStorage(raw: any): string | null {
+  const input = String(raw ?? "").trim();
+  if (!input) return null;
 
-  const isRangeInvalid = !!from && !!to && from > to;
+  let s = input.replace(/^tel:/i, "").trim();
+  if (s.startsWith("00")) s = "+" + s.slice(2);
+  if (s.startsWith("011")) s = "+" + s.slice(3);
 
-  const load = useCallback(async () => {
-    if (!selectedOrgId || isRangeInvalid) {
-      setLoading(false);
-      return;
-    }
+  const hasPlus = s.startsWith("+");
+  const digits = s.replace(/\D/g, "");
+  if (!digits) return null;
 
-    setLoading(true);
+  return hasPlus ? `+${digits}` : digits;
+}
 
-    try {
-      const [pmts, appts, custs] = await Promise.all([
-        getPayments(selectedOrgId, { from, to }),
-        getAppointmentsByDateRange(
-          selectedOrgId,
-          `${from}T00:00:00`,
-          `${to}T23:59:59`,
-        ),
-        getCustomers(selectedOrgId),
-      ]);
+function buildCustomerName(c: any): string | null {
+  const ship = c?.shipping_address ?? c?.shippingAddress ?? null;
+  const bill = c?.billing_address ?? c?.billingAddress ?? null;
+  const cust = c?.customer ?? null;
 
-      const sortedAppointments = [...appts].sort(
-        (a, b) =>
-          new Date(b.start_at).getTime() - new Date(a.start_at).getTime(),
-      );
+  const first =
+    ship?.first_name ??
+    ship?.firstName ??
+    bill?.first_name ??
+    bill?.firstName ??
+    cust?.first_name ??
+    cust?.firstName ??
+    null;
 
-      setPayments(pmts);
-      setAppointments(sortedAppointments);
-      setCustomerCount(custs.length);
-    } finally {
-      setLoading(false);
-    }
-  }, [selectedOrgId, from, to, isRangeInvalid]);
+  const last =
+    ship?.last_name ??
+    ship?.lastName ??
+    bill?.last_name ??
+    bill?.lastName ??
+    cust?.last_name ??
+    cust?.lastName ??
+    null;
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const full = `${String(first ?? "").trim()} ${String(last ?? "").trim()}`.trim();
+  return full ? full : null;
+}
 
-  const paidPayments = payments.filter((p) => p.status === 'paid');
-  const pendingPayments = payments.filter((p) => p.status !== 'paid');
+function buildItemsJson(c: any): string | null {
+  const arr = c?.line_items ?? c?.lineItems ?? c?.items ?? [];
+  if (!Array.isArray(arr) || arr.length === 0) return null;
 
-  const collectedRevenue = paidPayments.reduce(
-    (sum, p) => sum + Number(p.amount ?? 0),
-    0,
-  );
+  const items = arr
+    .map((it: any) => ({
+      title: it?.title ?? it?.name ?? null,
+      quantity: Number(it?.quantity ?? 1),
+    }))
+    .filter((x: any) => x.title);
 
-  const validAppointments = appointments.filter(
-    (a) => a.status !== 'canceled' && a.status !== 'no_show',
-  );
+  return items.length ? JSON.stringify(items) : null;
+}
 
-  const bookedValue = validAppointments.reduce(
-    (sum, a) => sum + Number(a.total_price ?? 0),
-    0,
-  );
+export async function action({ request }: ActionFunctionArgs) {
+  // 1) Read raw body FIRST (clone) for debugging + fallback parsing
+  const rawText = await request.clone().text().catch(() => "");
+  const rawJson = safeJsonParse(rawText);
 
-  const avgCollectedPerPayment =
-    paidPayments.length > 0 ? collectedRevenue / paidPayments.length : 0;
+  console.log("[CHECKOUTS_CREATE] hit", {
+    at: new Date().toISOString(),
+    rawLen: rawText.length,
+    rawParsed: Boolean(rawJson),
+    rawKeys: keysOf(rawJson),
+    rawHead: head(rawText, 500),
+  });
 
-  const avgPerAppointment =
-    validAppointments.length > 0 ? bookedValue / validAppointments.length : 0;
+  // 2) Authenticate webhook (HMAC)
+  let topic: any, shop: any, payload: any;
+  try {
+    const auth = await authenticate.webhook(request);
+    topic = (auth as any)?.topic;
+    shop = (auth as any)?.shop;
+    payload = (auth as any)?.payload;
+  } catch (e: any) {
+    console.error("[CHECKOUTS_CREATE] authenticate.webhook failed", String(e?.message ?? e));
+    return new Response("OK", { status: 200 });
+  }
 
-  const completedAppts = appointments.filter((a) => a.status === 'completed').length;
-  const canceledAppts = appointments.filter((a) => a.status === 'canceled').length;
-  const noShowAppts = appointments.filter((a) => a.status === 'no_show').length;
-  const pendingAppts = appointments.filter((a) => a.status === 'pending').length;
-  const confirmedAppts = appointments.filter((a) => a.status === 'confirmed').length;
-  const inServiceAppts = appointments.filter(
-    (a) => a.status === 'in_service' || a.status === 'arrived',
-  ).length;
+  console.log("[CHECKOUTS_CREATE] authed", {
+    topic: String(topic ?? ""),
+    shop: String(shop ?? ""),
+    payloadType: typeof payload,
+    payloadKeys: keysOf(payload),
+  });
 
-  const cancellationRate =
-    appointments.length > 0
-      ? ((canceledAppts + noShowAppts) / appointments.length) * 100
-      : 0;
+  if (String(topic ?? "") !== "CHECKOUTS_CREATE") return new Response("Ignored", { status: 200 });
 
-  const completionRate =
-    appointments.length > 0 ? (completedAppts / appointments.length) * 100 : 0;
+  // 3) Resolve effective root payload
+  const root =
+    (typeof payload === "string" ? safeJsonParse(payload) : payload) ??
+    rawJson ??
+    null;
 
-  const revenueByMethod = paidPayments.reduce((acc, p) => {
-    const key = String(p.method ?? 'unknown');
-    acc[key] = (acc[key] || 0) + Number(p.amount ?? 0);
-    return acc;
-  }, {} as Record<string, number>);
+  const c = unwrapCheckout(root);
 
-  const paymentMethods = Object.entries(revenueByMethod).sort(
-    (a, b) => b[1] - a[1],
-  );
+  console.log("[CHECKOUTS_CREATE] shape", {
+    rootType: typeof root,
+    rootKeys: keysOf(root),
+    checkoutKeys: keysOf(c),
+  });
 
-  const topDays = Object.entries(groupByDay(appointments, 'start_at'))
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5);
+  const { checkoutId, source } = extractCheckoutId(root, c);
+  if (!checkoutId) {
+    console.error("[CHECKOUTS_CREATE] missing checkoutId", { source });
+    return new Response("OK", { status: 200 });
+  }
 
-  const topDayCount = topDays[0]?.[1] ?? 1;
+  await ensureSettings(shop);
 
-  const activeCustomersInPeriod = new Set(
-    appointments.map((a) => a.customer_id).filter(Boolean),
-  ).size;
+  const token = c?.token ? String(c.token) : null;
+  const email = c?.email ? String(c.email) : null;
+  const phone = normalizePhoneForStorage(c?.phone);
 
-  const selectedDays =
-    Math.floor(
-      (new Date(`${to}T12:00:00`).getTime() -
-        new Date(`${from}T12:00:00`).getTime()) /
-        86400000,
-    ) + 1;
+  const customerName = buildCustomerName(c);
+  const itemsJson = buildItemsJson(c);
+  const { value: parsedValue, currency: parsedCurrency } = extractValueCurrency(c);
 
-  const setPreset = (days: number) => {
-    setFrom(getLocalDateString(-(days - 1)));
-    setTo(getLocalDateString(0));
-  };
+  const existing = await db.checkout.findUnique({
+    where: { shop_checkoutId: { shop, checkoutId } },
+    select: { status: true, abandonedAt: true, value: true, currency: true },
+  });
 
-  const isPresetActive = (days: number) =>
-    from === getLocalDateString(-(days - 1)) && to === getLocalDateString(0);
+  const prevStatus = String(existing?.status ?? "");
+  const prevAbandonedAt = existing?.abandonedAt ?? null;
 
-  const hasAnyData =
-    payments.length > 0 || appointments.length > 0 || customerCount > 0;
+  const preserveStatus =
+    prevStatus === "ABANDONED" || prevStatus === "RECOVERED" || prevStatus === "CONVERTED";
 
-  return (
-    <>
-      <TopBar
-        title="Αναφορές"
-        actions={
-          <button
-            onClick={() => {
-              void load();
-            }}
-            className="luxury-btn-secondary text-xs px-4 py-2"
-          >
-            <RefreshCw size={13} />
-            Ανανέωση
-          </button>
-        }
-      />
+  const nextStatus = preserveStatus ? prevStatus : "OPEN";
+  const nextAbandonedAt = preserveStatus ? prevAbandonedAt : null;
 
-      <div className="p-4 sm:p-6 space-y-6 animate-fade-in">
-        <div className="luxury-card">
-          <div className="space-y-4">
-            <div className="flex items-center gap-2">
-              <Calendar size={14} className="text-charcoal-400" />
-              <p className="text-sm font-medium text-charcoal-800">
-                Περίοδος αναφοράς
-              </p>
-            </div>
+  const value = parsedValue != null ? parsedValue : Number(existing?.value ?? 0);
+  const currency = parsedCurrency || String(existing?.currency ?? "USD");
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <FormField label="Από">
-                <Input
-                  type="date"
-                  value={from}
-                  onChange={(e) => setFrom(e.target.value)}
-                />
-              </FormField>
+  console.log("[CHECKOUTS_CREATE] upsert start", {
+    shop,
+    checkoutId,
+    idSource: source,
+    nextStatus,
+    nextAbandonedAt: nextAbandonedAt ? new Date(nextAbandonedAt).toISOString() : null,
+    hasPhone: Boolean(phone),
+    value,
+    currency,
+  });
 
-              <FormField label="Έως">
-                <Input
-                  type="date"
-                  value={to}
-                  onChange={(e) => setTo(e.target.value)}
-                />
-              </FormField>
-            </div>
+  try {
+    await db.checkout.upsert({
+      where: { shop_checkoutId: { shop, checkoutId } },
+      create: {
+        shop,
+        checkoutId,
+        token,
+        email,
+        phone,
+        value,
+        currency,
+        status: nextStatus as any,
+        abandonedAt: nextAbandonedAt,
+        customerName,
+        itemsJson,
+        raw: JSON.stringify(c ?? root ?? null),
+      },
+      update: {
+        token,
+        email,
+        phone,
+        value,
+        currency,
+        status: nextStatus as any,
+        abandonedAt: nextAbandonedAt,
+        customerName,
+        itemsJson,
+        raw: JSON.stringify(c ?? root ?? null),
+      },
+    });
+    console.log("[CHECKOUTS_CREATE] upsert OK", { shop, checkoutId });
+  } catch (e: any) {
+    console.error("[CHECKOUTS_CREATE] upsert FAILED", {
+      shop,
+      checkoutId,
+      err: String(e?.message ?? e),
+    });
+  }
 
-            <div className="flex flex-wrap gap-2">
-              <PresetButton
-                label="7 ημέρες"
-                active={isPresetActive(7)}
-                onClick={() => setPreset(7)}
-              />
-              <PresetButton
-                label="30 ημέρες"
-                active={isPresetActive(30)}
-                onClick={() => setPreset(30)}
-              />
-              <PresetButton
-                label="90 ημέρες"
-                active={isPresetActive(90)}
-                onClick={() => setPreset(90)}
-              />
-            </div>
-
-            <div className="pt-2 border-t border-charcoal-100">
-              <p className="text-xs text-charcoal-500">
-                {formatDateLabel(from)} → {formatDateLabel(to)} · {selectedDays} ημέρες
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {isRangeInvalid ? (
-          <div className="luxury-card">
-            <EmptyState
-              icon={<XCircle size={18} />}
-              title="Μη έγκυρη περίοδος"
-              description="Η ημερομηνία έναρξης δεν μπορεί να είναι μετά την ημερομηνία λήξης."
-            />
-          </div>
-        ) : loading ? (
-          <PageLoader />
-        ) : (
-          <>
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-              <MetricCard
-                icon={<CreditCard size={18} className="text-charcoal-600" />}
-                label="Εισπραγμένα"
-                value={`€${collectedRevenue.toFixed(2)}`}
-                sub={`${paidPayments.length} πληρωμένες συναλλαγές`}
-              />
-
-              <MetricCard
-                icon={<Wallet size={18} className="text-charcoal-600" />}
-                label="Αξία ραντεβού"
-                value={`€${bookedValue.toFixed(2)}`}
-                sub={`${validAppointments.length} έγκυρα ραντεβού`}
-              />
-
-              <MetricCard
-                icon={<Calendar size={18} className="text-charcoal-600" />}
-                label="Ραντεβού"
-                value={appointments.length}
-                sub={`${completedAppts} ολοκληρωμένα`}
-              />
-
-              <MetricCard
-                icon={<Users size={18} className="text-charcoal-600" />}
-                label="Ενεργοί πελάτες"
-                value={activeCustomersInPeriod}
-                sub={`Σύνολο πελατών: ${customerCount}`}
-              />
-            </div>
-
-            {!hasAnyData ? (
-              <div className="luxury-card">
-                <EmptyState
-                  icon={<BarChart3 size={20} />}
-                  title="Δεν υπάρχουν δεδομένα"
-                  description="Δεν βρέθηκαν πληρωμές ή ραντεβού για την επιλεγμένη περίοδο."
-                />
-              </div>
-            ) : (
-              <>
-                <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-                  <div className="luxury-card">
-                    <div className="flex items-center gap-2 mb-4">
-                      <CreditCard size={16} className="text-charcoal-500" />
-                      <h3 className="text-sm font-semibold text-charcoal-800">
-                        Πληρωμές
-                      </h3>
-                    </div>
-
-                    <p className="text-3xl font-semibold text-charcoal-900 mb-4">
-                      €{collectedRevenue.toFixed(2)}
-                    </p>
-
-                    <StatRow
-                      label="Πληρωμένες συναλλαγές"
-                      value={paidPayments.length}
-                    />
-                    <StatRow
-                      label="Εκκρεμείς / μη πληρωμένες"
-                      value={pendingPayments.length}
-                    />
-                    <StatRow
-                      label="Μέσο ποσό ανά πληρωμή"
-                      value={`€${avgCollectedPerPayment.toFixed(2)}`}
-                    />
-
-                    <div className="mt-4 pt-4 border-t border-charcoal-100">
-                      <p className="text-xs font-medium text-charcoal-500 uppercase tracking-wider mb-3">
-                        Ανάλυση ανά μέθοδο
-                      </p>
-
-                      {paymentMethods.length === 0 ? (
-                        <p className="text-xs text-charcoal-400">
-                          Δεν υπάρχουν πληρωμένες συναλλαγές.
-                        </p>
-                      ) : (
-                        paymentMethods.map(([method, amount]) => (
-                          <StatRow
-                            key={method}
-                            label={formatMethodLabel(method)}
-                            value={`€${amount.toFixed(2)}`}
-                          />
-                        ))
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="luxury-card">
-                    <div className="flex items-center gap-2 mb-4">
-                      <Clock3 size={16} className="text-charcoal-500" />
-                      <h3 className="text-sm font-semibold text-charcoal-800">
-                        Ραντεβού
-                      </h3>
-                    </div>
-
-                    <p className="text-3xl font-semibold text-charcoal-900 mb-4">
-                      {appointments.length}
-                    </p>
-
-                    <StatRow label="Ολοκληρωμένα" value={completedAppts} />
-                    <StatRow label="Σε αναμονή" value={pendingAppts} />
-                    <StatRow label="Επιβεβαιωμένα" value={confirmedAppts} />
-                    <StatRow label="Σε εξέλιξη / άφιξη" value={inServiceAppts} />
-                    <StatRow
-                      label="Ακυρώσεις + no show"
-                      value={canceledAppts + noShowAppts}
-                      sub={`${cancellationRate.toFixed(1)}% του συνόλου`}
-                    />
-                  </div>
-
-                  <div className="luxury-card">
-                    <div className="flex items-center gap-2 mb-4">
-                      <TrendingUp size={16} className="text-charcoal-500" />
-                      <h3 className="text-sm font-semibold text-charcoal-800">
-                        Σύνοψη
-                      </h3>
-                    </div>
-
-                    <StatRow label="Σύνολο πελατών" value={customerCount} />
-                    <StatRow
-                      label="Πελάτες με ραντεβού στην περίοδο"
-                      value={activeCustomersInPeriod}
-                    />
-                    <StatRow
-                      label="Μέση αξία ανά ραντεβού"
-                      value={`€${avgPerAppointment.toFixed(2)}`}
-                    />
-                    <StatRow
-                      label="Ποσοστό ολοκλήρωσης"
-                      value={`${completionRate.toFixed(1)}%`}
-                    />
-
-                    <div className="mt-4 pt-4 border-t border-charcoal-100">
-                      <p className="text-xs font-medium text-charcoal-500 uppercase tracking-wider mb-3">
-                        Πιο φορτωμένες ημέρες
-                      </p>
-
-                      {topDays.length === 0 ? (
-                        <p className="text-xs text-charcoal-400">Δεν υπάρχουν δεδομένα.</p>
-                      ) : (
-                        topDays.map(([date, count]) => (
-                          <div
-                            key={date}
-                            className="flex items-center justify-between py-1.5 gap-3"
-                          >
-                            <span className="text-xs text-charcoal-600">
-                              {formatDayLabel(date)}
-                            </span>
-
-                            <div className="flex items-center gap-2 min-w-[110px] justify-end">
-                              <div className="w-16 h-1.5 bg-charcoal-100 rounded-full overflow-hidden">
-                                <div
-                                  className="h-full bg-charcoal-700 rounded-full"
-                                  style={{
-                                    width: `${(count / topDayCount) * 100}%`,
-                                  }}
-                                />
-                              </div>
-
-                              <span className="text-xs font-medium text-charcoal-700 w-5 text-right">
-                                {count}
-                              </span>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="luxury-card">
-                  <div className="flex items-center gap-2 mb-2">
-                    <BarChart3 size={16} className="text-charcoal-500" />
-                    <h3 className="text-sm font-semibold text-charcoal-800">
-                      Κατανομή κατάστασης ραντεβού
-                    </h3>
-                  </div>
-
-                  <p className="text-xs text-charcoal-400 mb-4">
-                    Κατανομή των ραντεβού ανά κατάσταση για την επιλεγμένη περίοδο.
-                  </p>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-7 gap-3">
-                    {(
-                      [
-                        'pending',
-                        'confirmed',
-                        'arrived',
-                        'in_service',
-                        'completed',
-                        'canceled',
-                        'no_show',
-                      ] as const
-                    ).map((status) => {
-                      const count = appointments.filter((a) => a.status === status).length;
-                      const pct =
-                        appointments.length > 0
-                          ? (count / appointments.length) * 100
-                          : 0;
-
-                      return (
-                        <div
-                          key={status}
-                          className="text-center p-3 rounded-xl bg-cream-50"
-                        >
-                          <p className="text-xl font-semibold text-charcoal-900">
-                            {count}
-                          </p>
-                          <p className="text-xs text-charcoal-500 mt-0.5">
-                            {STATUS_LABELS[status]}
-                          </p>
-                          <p className="text-xs text-charcoal-400 mt-0.5">
-                            {pct.toFixed(0)}%
-                          </p>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </>
-            )}
-          </>
-        )}
-      </div>
-    </>
-  );
+  return new Response("OK", { status: 200 });
 }
