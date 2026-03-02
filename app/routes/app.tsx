@@ -4,7 +4,6 @@ import { Outlet, useLoaderData, useLocation, useNavigate, useRouteError } from "
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { authenticate } from "../shopify.server";
-import { isPlatformAdminEmail } from "../lib/support.server";
 import { SupportBubble } from "../components/SupportBubble";
 
 const EMBED_KEYS = ["shop", "host", "embedded", "locale"] as const;
@@ -39,15 +38,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
 
   const shop = String(session.shop ?? "").trim();
-  const email = session.email ?? null;
-
-  const isPlatformAdmin = isPlatformAdminEmail(email);
-  const isOwnerShop = shop === PLATFORM_ADMIN_SHOP;
 
   return {
     apiKey: String(process.env.SHOPIFY_API_KEY ?? "").trim(),
     shop,
-    showAdminInbox: Boolean(isPlatformAdmin && isOwnerShop),
+    showAdminInbox: shop === PLATFORM_ADMIN_SHOP,
   };
 }
 
@@ -101,7 +96,9 @@ export default function App() {
   return (
     <AppProvider embedded apiKey={apiKey}>
       <ui-nav-menu>
-        <a href={href("/app")} rel="home">Dashboard</a>
+        <a href={href("/app")} rel="home">
+          Dashboard
+        </a>
         <a href={href("/app/checkouts")}>Checkouts</a>
         <a href={href("/app/settings")}>Settings</a>
         <a href={href("/app/billing")}>Billing</a>

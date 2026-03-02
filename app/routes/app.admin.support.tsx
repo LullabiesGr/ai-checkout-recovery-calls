@@ -3,7 +3,6 @@ import type { LoaderFunctionArgs, HeadersFunction } from "react-router";
 import { useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
-import { isPlatformAdminEmail } from "../lib/support.server";
 import {
   Page,
   Card,
@@ -18,7 +17,7 @@ import {
 } from "@shopify/polaris";
 import { supabaseBrowser } from "../lib/supabase.client";
 
-
+const PLATFORM_ADMIN_SHOP = String(process.env.PLATFORM_ADMIN_SHOP ?? "afterwin.myshopify.com").trim();
 
 type Thread = {
   id: string;
@@ -37,13 +36,10 @@ type Msg = {
   created_at: string;
 };
 
-const PLATFORM_ADMIN_SHOP = String(process.env.PLATFORM_ADMIN_SHOP ?? "afterwin.myshopify.com").trim();
-
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
   const shop = String(session.shop ?? "").trim();
-  const ok = isPlatformAdminEmail(session.email ?? null) && shop === PLATFORM_ADMIN_SHOP;
-  if (!ok) throw new Response("Not Found", { status: 404 });
+  if (shop !== PLATFORM_ADMIN_SHOP) throw new Response("Not Found", { status: 404 });
   return { viewerShop: shop, viewerEmail: session.email ?? null };
 }
 
@@ -113,31 +109,33 @@ export default function AdminSupportInbox() {
     }
   }, []);
 
-  const loadThread = React.useCallback(async (threadId: string) => {
-    setLoadingMessages(true);
-    setMessagesError(null);
+  const loadThread = React.useCallback(
+    async (threadId: string) => {
+      setLoadingMessages(true);
+      setMessagesError(null);
 
-    try {
-      const r = await fetch(`/api/admin/support/thread/${threadId}`);
-      const j = await readJsonSafe<{ ok?: boolean; messages?: Msg[]; error?: string }>(r);
+      try {
+        const r = await fetch(`/api/admin/support/thread/${threadId}`);
+        const j = await readJsonSafe<{ ok?: boolean; messages?: Msg[]; error?: string }>(r);
 
-      if (!r.ok || j?.ok === false) {
+        if (!r.ok || j?.ok === false) {
+          setMessages([]);
+          setMessagesError(j?.error ?? r.statusText ?? "Failed to load thread");
+          return;
+        }
+
+        const list = Array.isArray(j?.messages) ? j!.messages : [];
+        setMessages(list);
+        requestAnimationFrame(() => scrollToBottom());
+      } catch (e) {
         setMessages([]);
-        setMessagesError(j?.error ?? r.statusText ?? "Failed to load thread");
-        return;
+        setMessagesError(e instanceof Error ? e.message : "Failed to load thread");
+      } finally {
+        setLoadingMessages(false);
       }
-
-      const list = Array.isArray(j?.messages) ? j!.messages : [];
-      setMessages(list);
-
-      requestAnimationFrame(() => scrollToBottom());
-    } catch (e) {
-      setMessages([]);
-      setMessagesError(e instanceof Error ? e.message : "Failed to load thread");
-    } finally {
-      setLoadingMessages(false);
-    }
-  }, [scrollToBottom]);
+    },
+    [scrollToBottom],
+  );
 
   React.useEffect(() => {
     void loadThreads();
@@ -148,7 +146,6 @@ export default function AdminSupportInbox() {
     void loadThread(active.id);
   }, [active?.id, loadThread]);
 
-  // Realtime: global channel for admins
   React.useEffect(() => {
     const sb = supabaseBrowser();
     if (!sb) return;
@@ -167,6 +164,7 @@ export default function AdminSupportInbox() {
 
         const current = prev ?? [];
         if (current.some((m) => m.id === p.message.id)) return current;
+
         const next = [...current, p.message];
         requestAnimationFrame(() => scrollToBottom());
         return next;
@@ -217,18 +215,24 @@ export default function AdminSupportInbox() {
       <BlockStack gap="300">
         <InlineStack align="space-between">
           <BlockStack gap="050">
-            <Text as="h2" variant="headingMd">Support Inbox</Text>
+            <Text as="h2" variant="headingMd">
+              Support Inbox
+            </Text>
             <Text as="p" variant="bodySm" tone="subdued">
-              Signed in as: {viewerEmail ?? "admin"} (installed on {viewerShop})
+              {viewerEmail ?? "admin"} • {viewerShop}
             </Text>
           </BlockStack>
-          <Button onClick={loadThreads} loading={loadingThreads}>Refresh</Button>
+          <Button onClick={loadThreads} loading={loadingThreads}>
+            Refresh
+          </Button>
         </InlineStack>
 
         <Divider />
 
         {threadsError ? (
-          <Text as="p" variant="bodyMd" tone="critical">{threadsError}</Text>
+          <Text as="p" variant="bodyMd" tone="critical">
+            {threadsError}
+          </Text>
         ) : null}
 
         {!threads ? (
@@ -236,7 +240,9 @@ export default function AdminSupportInbox() {
             <Spinner accessibilityLabel="Loading threads" size="small" />
           </InlineStack>
         ) : threads.length === 0 ? (
-          <Text as="p" variant="bodyMd">No conversations.</Text>
+          <Text as="p" variant="bodyMd">
+            No conversations.
+          </Text>
         ) : (
           <BlockStack gap="200">
             {threads.map((t) => {
@@ -256,7 +262,9 @@ export default function AdminSupportInbox() {
                   }}
                 >
                   <InlineStack align="space-between">
-                    <Text as="p" variant="bodyMd" fontWeight="semibold">{t.shop}</Text>
+                    <Text as="p" variant="bodyMd" fontWeight="semibold">
+                      {t.shop}
+                    </Text>
                     {t.unread_by_admin > 0 ? (
                       <Badge tone="attention">{t.unread_by_admin}</Badge>
                     ) : (
@@ -292,7 +300,9 @@ export default function AdminSupportInbox() {
         <Divider />
 
         {messagesError ? (
-          <Text as="p" variant="bodyMd" tone="critical">{messagesError}</Text>
+          <Text as="p" variant="bodyMd" tone="critical">
+            {messagesError}
+          </Text>
         ) : null}
 
         <div
@@ -307,13 +317,17 @@ export default function AdminSupportInbox() {
           }}
         >
           {!active ? (
-            <Text as="p" variant="bodyMd">Pick a thread.</Text>
-          ) : loadingMessages || !messages ? (
+            <Text as="p" variant="bodyMd">
+              Pick a thread.
+            </Text>
+          ) : loadingMessages || messages === null ? (
             <InlineStack align="center">
               <Spinner accessibilityLabel="Loading messages" size="small" />
             </InlineStack>
           ) : messages.length === 0 ? (
-            <Text as="p" variant="bodyMd">No messages yet.</Text>
+            <Text as="p" variant="bodyMd">
+              No messages yet.
+            </Text>
           ) : (
             <BlockStack gap="200">
               {messages.map((m) => (
@@ -327,13 +341,15 @@ export default function AdminSupportInbox() {
                 >
                   <InlineStack align="space-between">
                     <Text as="p" variant="bodySm" fontWeight="semibold">
-                      {m.sender_role === "admin" ? "Admin" : (m.sender_name ?? "Merchant")}
+                      {m.sender_role === "admin" ? "Admin" : m.sender_name ?? "Merchant"}
                     </Text>
                     <Text as="p" variant="bodySm" tone="subdued">
                       {new Date(m.created_at).toLocaleString()}
                     </Text>
                   </InlineStack>
-                  <Text as="p" variant="bodyMd">{m.body}</Text>
+                  <Text as="p" variant="bodyMd">
+                    {m.body}
+                  </Text>
                 </div>
               ))}
             </BlockStack>
@@ -350,15 +366,9 @@ export default function AdminSupportInbox() {
               autoComplete="off"
               multiline={3}
               disabled={!active}
-              helpText={!active ? "Select a thread to enable reply." : undefined}
             />
           </div>
-          <Button
-            variant="primary"
-            onClick={send}
-            loading={sending}
-            disabled={!active || !draft.trim()}
-          >
+          <Button variant="primary" onClick={send} loading={sending} disabled={!active || !draft.trim()}>
             Send
           </Button>
         </InlineStack>
