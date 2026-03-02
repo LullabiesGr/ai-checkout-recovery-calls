@@ -1,4 +1,3 @@
-// app/root.tsx
 import * as React from "react";
 import type { LinksFunction, LoaderFunctionArgs } from "react-router";
 import {
@@ -20,9 +19,9 @@ export const links: LinksFunction = () => [{ rel: "stylesheet", href: polarisSty
 
 export async function loader({ request }: LoaderFunctionArgs) {
   return {
-    shopifyApiKey: process.env.SHOPIFY_API_KEY ?? "",
-    supabaseUrl: process.env.SUPABASE_URL ?? "",
-    supabaseAnonKey: process.env.SUPABASE_ANON_KEY ?? "",
+    shopifyApiKey: String(process.env.SHOPIFY_API_KEY ?? "").trim(),
+    supabaseUrl: String(process.env.SUPABASE_URL ?? "").trim(),
+    supabaseAnonKey: String(process.env.SUPABASE_ANON_KEY ?? "").trim(),
   };
 }
 
@@ -80,6 +79,7 @@ function RouteProgressBar({ active }: { active: boolean }) {
         height: 2,
         zIndex: 2147483000,
         background: "linear-gradient(90deg, transparent, #111827, transparent)",
+        backgroundSize: "200px 100%",
         animation: "routebar 1s linear infinite",
       }}
     />
@@ -96,28 +96,38 @@ export default function Root() {
 
   React.useEffect(() => {
     const handleNavigate = (event: Event) => {
-      const el = event.target as HTMLElement | null;
-      const href = el?.getAttribute?.("href");
-      if (href) navigate(href);
+      const target = event.target instanceof Element ? event.target : null;
+      const hrefNode = target?.closest?.("[href]");
+      const href = hrefNode?.getAttribute("href")?.trim();
+
+      if (!href) return;
+      if (href.startsWith("http://") || href.startsWith("https://")) return;
+      if (href.startsWith("mailto:") || href.startsWith("tel:")) return;
+      if (href.startsWith("#")) return;
+
+      navigate(href);
     };
 
     document.addEventListener("shopify:navigate", handleNavigate as EventListener);
-    return () => document.removeEventListener("shopify:navigate", handleNavigate as EventListener);
+    return () => {
+      document.removeEventListener("shopify:navigate", handleNavigate as EventListener);
+    };
   }, [navigate]);
 
   React.useEffect(() => {
-    const t = window.setTimeout(() => {
+    const timeoutId = window.setTimeout(() => {
       setBootNote("Still loading… verifying Shopify session and network");
     }, 8000);
 
+    let raf2 = 0;
     const raf1 = requestAnimationFrame(() => {
-      const raf2 = requestAnimationFrame(() => setBootHidden(true));
-      return () => cancelAnimationFrame(raf2);
+      raf2 = requestAnimationFrame(() => setBootHidden(true));
     });
 
     return () => {
-      window.clearTimeout(t);
+      window.clearTimeout(timeoutId);
       cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
     };
   }, []);
 
@@ -150,7 +160,7 @@ export default function Root() {
         <Meta />
         <Links />
       </head>
-      <body>
+      <body style={{ margin: 0 }}>
         <BootLoader hidden={bootHidden} note={bootNote} />
         <RouteProgressBar active={routeBusy} />
 

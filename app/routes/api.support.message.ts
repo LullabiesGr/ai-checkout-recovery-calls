@@ -11,33 +11,52 @@ function required(name: string) {
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  const { session } = await authenticate.admin(request);
-  const shop = session.shop;
+  try {
+    const { session } = await authenticate.admin(request);
+    const shop = session.shop;
 
-  const bodyJson = await request.json().catch(() => null) as { body?: string } | null;
-  const body = String(bodyJson?.body ?? "").trim();
-  if (!body) return json({ ok: false, error: "Empty message" }, { status: 400 });
+    const bodyJson = (await request.json().catch(() => null)) as { body?: string } | null;
+    const body = String(bodyJson?.body ?? "").trim();
 
-  const thread = await getOrCreateThread(shop);
+    if (!body) {
+      return json({ ok: false, error: "Empty message" }, { status: 400 });
+    }
 
-  const msg = await insertMessage({
-    threadId: thread.id,
-    role: "merchant",
-    name: session.email ?? shop,
-    body,
-  });
+    const thread = await getOrCreateThread(shop);
 
-  // realtime broadcast (no DB realtime auth needed)
-  const sb = createClient(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY"), {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+    const message = await insertMessage({
+      threadId: thread.id,
+      role: "merchant",
+      name: session.email ?? shop,
+      body,
+    });
 
-  const channel = supportChannelForShop(shop);
-  await sb.channel(channel).send({
-    type: "broadcast",
-    event: "support:new_message",
-    payload: { threadId: thread.id, message: msg, shop },
-  });
+    const sb = createClient(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY"), {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
 
-  return json({ ok: true, threadId: thread.id, message: msg });
+    const channel = supportChannelForShop(shop);
+
+    await sb.channel(channel).send({
+      type: "broadcast",
+      event: "support:new_message",
+      payload: { threadId: thread.id, message, shop },
+    });
+
+    return json({
+      ok: true,
+      threadId: thread.id,
+      message,
+    });
+  } catch (error) {
+    console.error("[api.support.message]", error);
+
+    return json(
+      {
+        ok: false,
+        error: error instanceof Error ? error.message : "Internal server error",
+      },
+      { status: 500 }
+    );
+  }
 }

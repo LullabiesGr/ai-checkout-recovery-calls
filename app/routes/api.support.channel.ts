@@ -4,13 +4,27 @@ import { authenticate } from "../shopify.server";
 import { supportChannelForShop, isPlatformAdminEmail } from "../lib/support.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  const { session } = await authenticate.admin(request);
-  const shop = session.shop;
-  const email = session.email ?? null;
+  try {
+    const { session } = await authenticate.admin(request);
+    const shop = session.shop;
+    const email = session.email ?? null;
 
-  return json({
-    shop,
-    channel: supportChannelForShop(shop),
-    role: isPlatformAdminEmail(email) ? "platform_admin" : "merchant",
-  });
+    return json({
+      ok: true,
+      shop,
+      channel: supportChannelForShop(shop),
+      role: isPlatformAdminEmail(email) ? "platform_admin" : "merchant",
+    });
+  } catch (error) {
+    console.error("[api.support.channel]", error);
+
+    return json(
+      {
+        ok: false,
+        error: error instanceof Error ? error.message : "Internal server error",
+        channel: "",
+      },
+      { status: 500 }
+    );
+  }
 }

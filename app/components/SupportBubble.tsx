@@ -1,8 +1,23 @@
 import * as React from "react";
-import { Card, Text, InlineStack, BlockStack, TextField, Button, Badge, Spinner } from "@shopify/polaris";
+import {
+  Card,
+  Text,
+  InlineStack,
+  BlockStack,
+  TextField,
+  Button,
+  Badge,
+  Spinner,
+} from "@shopify/polaris";
 import { supabaseBrowser } from "../lib/supabase.client";
 
-type Thread = { id: string; shop: string; status: string; unread_by_merchant: number };
+type Thread = {
+  id: string;
+  shop: string;
+  status: string;
+  unread_by_merchant: number;
+};
+
 type Msg = {
   id: string;
   thread_id: string;
@@ -12,6 +27,17 @@ type Msg = {
   created_at: string;
 };
 
+async function readJsonSafe<T = any>(response: Response): Promise<T | null> {
+  const text = await response.text().catch(() => "");
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
 export function SupportBubble({ shop }: { shop: string }) {
   const [open, setOpen] = React.useState(false);
   const [thread, setThread] = React.useState<Thread | null>(null);
@@ -20,76 +46,131 @@ export function SupportBubble({ shop }: { shop: string }) {
   const [loading, setLoading] = React.useState(false);
   const [sending, setSending] = React.useState(false);
 
+  const appendMessage = React.useCallback((message: Msg) => {
+    setMessages((prev) => {
+      const current = prev ?? [];
+      if (current.some((m) => m.id === message.id)) return current;
+      return [...current, message];
+    });
+  }, []);
+
   const load = React.useCallback(async () => {
     setLoading(true);
+
     try {
-      const r = await fetch("/api/support/thread");
-      const j = await r.json();
-      setThread(j.thread ?? null);
-      setMessages(j.messages ?? []);
+      const response = await fetch("/api/support/thread");
+      const payload = await readJsonSafe<{ ok?: boolean; thread?: Thread; messages?: Msg[]; error?: string }>(
+        response
+      );
+
+      if (!response.ok || payload?.ok === false) {
+        console.error("[support] thread load failed", payload?.error ?? response.statusText);
+        setThread(null);
+        setMessages([]);
+        return;
+      }
+
+      setThread(payload?.thread ?? null);
+      setMessages(Array.isArray(payload?.messages) ? payload!.messages : []);
+    } catch (error) {
+      console.error("[support] thread load failed", error);
+      setThread(null);
+      setMessages([]);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  React.useEffect(() => { if (open) load(); }, [open, load]);
+  React.useEffect(() => {
+    if (!open) return;
+    void load();
+  }, [open, load]);
 
-  // Subscribe to shop channel once (only when bubble opens)
   React.useEffect(() => {
     if (!open) return;
 
-    let active = true;
     const sb = supabaseBrowser();
+    if (!sb) return;
 
-    (async () => {
-      const r = await fetch("/api/support/channel");
-      const j = await r.json();
-      const channelName = String(j?.channel ?? "");
-      if (!channelName) return;
+    let active = true;
+    let cleanup: (() => void) | null = null;
 
-      const ch = sb.channel(channelName);
+    void (async () => {
+      try {
+        const response = await fetch("/api/support/channel");
+        const payload = await readJsonSafe<{ ok?: boolean; channel?: string; error?: string }>(response);
 
-      ch.on("broadcast", { event: "support:new_message" }, (payload) => {
         if (!active) return;
-        const p = (payload as any)?.payload;
-        if (!p?.message) return;
-        setMessages((prev) => (prev ? [...prev, p.message] : [p.message]));
-      });
+        if (!response.ok || payload?.ok === false) {
+          console.error("[support] channel load failed", payload?.error ?? response.statusText);
+          return;
+        }
 
-      ch.subscribe();
+        const channelName = String(payload?.channel ?? "").trim();
+        if (!channelName) return;
 
-      return () => {
-        sb.removeChannel(ch);
-      };
+        const ch = sb.channel(channelName);
+
+        ch.on("broadcast", { event: "support:new_message" }, (payload) => {
+          if (!active) return;
+          const message = (payload as any)?.payload?.message as Msg | undefined;
+          if (!message?.id) return;
+          appendMessage(message);
+        });
+
+        ch.subscribe();
+
+        cleanup = () => {
+          void sb.removeChannel(ch);
+        };
+      } catch (error) {
+        console.error("[support] realtime subscription failed", error);
+      }
     })();
 
-    return () => { active = false; };
-  }, [open]);
+    return () => {
+      active = false;
+      cleanup?.();
+    };
+  }, [open, appendMessage]);
 
   const send = React.useCallback(async () => {
     const body = draft.trim();
-    if (!body) return;
+    if (!body || sending) return;
 
     setSending(true);
+
     try {
-      const r = await fetch("/api/support/message", {
+      const response = await fetch("/api/support/message", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ body }),
       });
-      const j = await r.json();
-      if (j?.ok && j?.message) {
-        setDraft("");
-        setMessages((prev) => (prev ? [...prev, j.message] : [j.message]));
+
+      const payload = await readJsonSafe<{ ok?: boolean; message?: Msg; error?: string }>(response);
+
+      if (!response.ok || payload?.ok === false) {
+        console.error("[support] send failed", payload?.error ?? response.statusText);
+        return;
       }
+
+      if (payload?.message) {
+        setDraft("");
+        appendMessage(payload.message);
+      }
+    } catch (error) {
+      console.error("[support] send failed", error);
     } finally {
       setSending(false);
     }
-  }, [draft]);
+  }, [appendMessage, draft, sending]);
+
+  const unread = Number(thread?.unread_by_merchant ?? 0) > 0;
 
   return (
     <>
       <button
+        type="button"
         onClick={() => setOpen((v) => !v)}
         style={{
           position: "fixed",
@@ -103,11 +184,13 @@ export function SupportBubble({ shop }: { shop: string }) {
           color: "#fff",
           cursor: "pointer",
           zIndex: 2147482000,
+          fontSize: 20,
+          fontWeight: 700,
         }}
         aria-label="Support chat"
         title="Support"
       >
-        {thread?.unread_by_merchant ? (
+        {unread ? (
           <span
             style={{
               position: "absolute",
@@ -125,36 +208,77 @@ export function SupportBubble({ shop }: { shop: string }) {
       </button>
 
       {open ? (
-        <div style={{ position: "fixed", right: 18, bottom: 86, width: 360, zIndex: 2147482000 }}>
+        <div
+          style={{
+            position: "fixed",
+            right: 18,
+            bottom: 86,
+            width: 360,
+            zIndex: 2147482000,
+          }}
+        >
           <Card>
             <BlockStack gap="300">
               <InlineStack align="space-between">
                 <BlockStack gap="050">
-                  <Text as="h3" variant="headingMd">Support</Text>
+                  <Text as="h3" variant="headingMd">
+                    Support
+                  </Text>
+
                   <InlineStack gap="200">
                     <Badge tone="success">Live</Badge>
-                    <Text as="p" variant="bodySm" tone="subdued">{shop}</Text>
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      {shop}
+                    </Text>
                   </InlineStack>
                 </BlockStack>
+
                 <Button onClick={() => setOpen(false)}>Close</Button>
               </InlineStack>
 
-              <div style={{ height: 340, overflow: "auto", border: "1px solid #e5e7eb", borderRadius: 12, padding: 12 }}>
-                {loading || !messages ? (
-                  <InlineStack align="center"><Spinner accessibilityLabel="Loading" size="small" /></InlineStack>
+              <div
+                style={{
+                  height: 340,
+                  overflow: "auto",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 12,
+                  padding: 12,
+                }}
+              >
+                {loading || messages === null ? (
+                  <InlineStack align="center">
+                    <Spinner accessibilityLabel="Loading" size="small" />
+                  </InlineStack>
                 ) : messages.length === 0 ? (
-                  <Text as="p" variant="bodyMd">Write your first message.</Text>
+                  <Text as="p" variant="bodyMd">
+                    Write your first message.
+                  </Text>
                 ) : (
                   <BlockStack gap="200">
                     {messages.map((m) => (
-                      <div key={m.id} style={{ padding: 10, borderRadius: 12, background: m.sender_role === "admin" ? "#eef2ff" : "#f9fafb" }}>
+                      <div
+                        key={m.id}
+                        style={{
+                          padding: 10,
+                          borderRadius: 12,
+                          background: m.sender_role === "admin" ? "#eef2ff" : "#f9fafb",
+                        }}
+                      >
                         <InlineStack align="space-between">
                           <Text as="p" variant="bodySm" fontWeight="semibold">
                             {m.sender_role === "admin" ? "Support" : "You"}
                           </Text>
-                          <Text as="p" variant="bodySm" tone="subdued">{new Date(m.created_at).toLocaleTimeString()}</Text>
+                          <Text as="p" variant="bodySm" tone="subdued">
+                            {new Date(m.created_at).toLocaleTimeString([], {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </Text>
                         </InlineStack>
-                        <Text as="p" variant="bodyMd">{m.body}</Text>
+
+                        <Text as="p" variant="bodyMd">
+                          {m.body}
+                        </Text>
                       </div>
                     ))}
                   </BlockStack>
@@ -172,7 +296,10 @@ export function SupportBubble({ shop }: { shop: string }) {
                     multiline={3}
                   />
                 </div>
-                <Button variant="primary" onClick={send} loading={sending}>Send</Button>
+
+                <Button variant="primary" onClick={send} loading={sending}>
+                  Send
+                </Button>
               </InlineStack>
             </BlockStack>
           </Card>
