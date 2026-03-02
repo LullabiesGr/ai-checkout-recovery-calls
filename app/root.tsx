@@ -21,6 +21,8 @@ export const links: LinksFunction = () => [{ rel: "stylesheet", href: polarisSty
 export async function loader({ request }: LoaderFunctionArgs) {
   return {
     shopifyApiKey: process.env.SHOPIFY_API_KEY ?? "",
+    supabaseUrl: process.env.SUPABASE_URL ?? "",
+    supabaseAnonKey: process.env.SUPABASE_ANON_KEY ?? "",
   };
 }
 
@@ -85,7 +87,7 @@ function RouteProgressBar({ active }: { active: boolean }) {
 }
 
 export default function Root() {
-  const { shopifyApiKey } = useLoaderData<typeof loader>();
+  const { shopifyApiKey, supabaseUrl, supabaseAnonKey } = useLoaderData<typeof loader>();
   const navigate = useNavigate();
   const navigation = useNavigation();
 
@@ -103,7 +105,6 @@ export default function Root() {
     return () => document.removeEventListener("shopify:navigate", handleNavigate as EventListener);
   }, [navigate]);
 
-  // Hide initial overlay only after the client has mounted (prevents blank screen perception).
   React.useEffect(() => {
     const t = window.setTimeout(() => {
       setBootNote("Still loading… verifying Shopify session and network");
@@ -129,6 +130,9 @@ export default function Root() {
         <meta name="viewport" content="width=device-width,initial-scale=1" />
 
         <meta name="shopify-api-key" content={shopifyApiKey} />
+        <meta name="supabase-url" content={supabaseUrl} />
+        <meta name="supabase-anon-key" content={supabaseAnonKey} />
+
         <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
         <script src="https://cdn.shopify.com/shopifycloud/polaris.js"></script>
 

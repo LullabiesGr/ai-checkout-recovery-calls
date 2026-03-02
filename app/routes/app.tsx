@@ -1,10 +1,11 @@
-// app/routes/app.tsx
 import * as React from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { Outlet, useLoaderData, useLocation, useNavigate, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { authenticate } from "../shopify.server";
+import { isPlatformAdminEmail } from "../lib/support.server";
+import { SupportBubble } from "../components/SupportBubble";
 
 const EMBED_KEYS = ["shop", "host", "embedded", "locale"] as const;
 const EMBED_STORAGE_KEY = "__shopify_embed_params_v1";
@@ -33,23 +34,26 @@ function mergeSearch(path: string, keep: URLSearchParams) {
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  // Protect all /app/* routes and ensure embedded auth is valid
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+
+  const shop = session.shop;
+  const email = session.email ?? null;
 
   return {
     apiKey: process.env.SHOPIFY_API_KEY ?? "",
+    shop,
+    isPlatformAdmin: isPlatformAdminEmail(email),
   };
 }
 
 export default function App() {
-  const { apiKey } = useLoaderData<typeof loader>();
+  const { apiKey, shop, isPlatformAdmin } = useLoaderData<typeof loader>();
   const location = useLocation();
   const navigate = useNavigate();
 
   const embeddedParams = React.useMemo(() => pickEmbeddedParams(location.search), [location.search]);
 
   React.useEffect(() => {
-    // Persist embed params once, then restore them if any navigation drops them.
     if (typeof window === "undefined") return;
 
     const current = pickEmbeddedParams(window.location.search);
@@ -95,15 +99,16 @@ export default function App() {
   return (
     <AppProvider embedded apiKey={apiKey}>
       <ui-nav-menu>
-        <a href={href("/app")} rel="home">
-          Dashboard
-        </a>
+        <a href={href("/app")} rel="home">Dashboard</a>
         <a href={href("/app/checkouts")}>Checkouts</a>
         <a href={href("/app/settings")}>Settings</a>
         <a href={href("/app/billing")}>Billing</a>
+        {isPlatformAdmin ? <a href={href("/app/admin/support")}>Support Inbox</a> : null}
       </ui-nav-menu>
 
       <Outlet />
+
+      <SupportBubble shop={shop} />
     </AppProvider>
   );
 }
