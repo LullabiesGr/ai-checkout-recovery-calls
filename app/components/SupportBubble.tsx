@@ -11,10 +11,6 @@ import {
 } from "@shopify/polaris";
 import { supabaseBrowser } from "../lib/supabase.client";
 
-const [mounted, setMounted] = React.useState(false);
-React.useEffect(() => setMounted(true), []);
-if (!mounted) return null;
-
 type Thread = {
   id: string;
   shop: string;
@@ -43,12 +39,17 @@ async function readJsonSafe<T = any>(response: Response): Promise<T | null> {
 }
 
 export function SupportBubble({ shop }: { shop: string }) {
+  const [mounted, setMounted] = React.useState(false);
   const [open, setOpen] = React.useState(false);
   const [thread, setThread] = React.useState<Thread | null>(null);
   const [messages, setMessages] = React.useState<Msg[] | null>(null);
   const [draft, setDraft] = React.useState("");
   const [loading, setLoading] = React.useState(false);
   const [sending, setSending] = React.useState(false);
+
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const appendMessage = React.useCallback((message: Msg) => {
     setMessages((prev) => {
@@ -63,9 +64,12 @@ export function SupportBubble({ shop }: { shop: string }) {
 
     try {
       const response = await fetch("/api/support/thread");
-      const payload = await readJsonSafe<{ ok?: boolean; thread?: Thread; messages?: Msg[]; error?: string }>(
-        response
-      );
+      const payload = await readJsonSafe<{
+        ok?: boolean;
+        thread?: Thread;
+        messages?: Msg[];
+        error?: string;
+      }>(response);
 
       if (!response.ok || payload?.ok === false) {
         console.error("[support] thread load failed", payload?.error ?? response.statusText);
@@ -75,7 +79,7 @@ export function SupportBubble({ shop }: { shop: string }) {
       }
 
       setThread(payload?.thread ?? null);
-      setMessages(Array.isArray(payload?.messages) ? payload!.messages : []);
+      setMessages(Array.isArray(payload?.messages) ? payload.messages : []);
     } catch (error) {
       console.error("[support] thread load failed", error);
       setThread(null);
@@ -168,6 +172,8 @@ export function SupportBubble({ shop }: { shop: string }) {
       setSending(false);
     }
   }, [appendMessage, draft, sending]);
+
+  if (!mounted) return null;
 
   const unread = Number(thread?.unread_by_merchant ?? 0) > 0;
 
@@ -269,7 +275,7 @@ export function SupportBubble({ shop }: { shop: string }) {
                         }}
                       >
                         <InlineStack align="space-between">
-                          <Text as="p" variant="bodySm" fontWeight="semibold">
+                          <Text as="p" variant="bodySm">
                             {m.sender_role === "admin" ? "Support" : "You"}
                           </Text>
                           <Text as="p" variant="bodySm" tone="subdued">
