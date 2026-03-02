@@ -2,16 +2,21 @@ import crypto from "node:crypto";
 import { supabaseAdmin } from "./supabase.server";
 
 function required(name: string) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env: ${name}`);
-  return v;
+  const value = String(process.env[name] ?? "").trim();
+  if (!value) throw new Error(`Missing env: ${name}`);
+  return value;
 }
 
 export function isPlatformAdminEmail(email?: string | null) {
   const raw = String(process.env.SUPPORT_ADMIN_EMAILS ?? "").trim();
   if (!raw) return false;
-  const allow = raw.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
-  return !!email && allow.includes(String(email).toLowerCase());
+
+  const allow = raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+
+  return !!email && allow.includes(String(email).trim().toLowerCase());
 }
 
 export function supportChannelForShop(shop: string) {
@@ -32,9 +37,17 @@ export async function getOrCreateThread(shop: string) {
   if (existing.error) throw existing.error;
   if (existing.data) return existing.data;
 
+  const now = new Date().toISOString();
+
   const created = await sb
     .from("support_threads")
-    .insert({ shop, status: "open" })
+    .insert({
+      shop,
+      status: "open",
+      unread_by_admin: 0,
+      unread_by_merchant: 0,
+      last_message_at: now,
+    })
     .select("*")
     .single();
 
@@ -44,6 +57,7 @@ export async function getOrCreateThread(shop: string) {
 
 export async function listThreads(limit = 100) {
   const sb = supabaseAdmin();
+
   const res = await sb
     .from("support_threads")
     .select("*")
@@ -56,6 +70,7 @@ export async function listThreads(limit = 100) {
 
 export async function getMessages(threadId: string, limit = 200) {
   const sb = supabaseAdmin();
+
   const res = await sb
     .from("support_messages")
     .select("*")
@@ -74,7 +89,8 @@ export async function insertMessage(args: {
   body: string;
 }) {
   const sb = supabaseAdmin();
-  const res = await sb
+
+  const inserted = await sb
     .from("support_messages")
     .insert({
       thread_id: args.threadId,
@@ -85,16 +101,46 @@ export async function insertMessage(args: {
     .select("*")
     .single();
 
-  if (res.error) throw res.error;
-  return res.data;
+  if (inserted.error) throw inserted.error;
+
+  const message = inserted.data;
+
+  const threadRes = await sb
+    .from("support_threads")
+    .select("unread_by_admin, unread_by_merchant")
+    .eq("id", args.threadId)
+    .single();
+
+  if (threadRes.error) throw threadRes.error;
+
+  const currentAdminUnread = Number(threadRes.data.unread_by_admin ?? 0);
+  const currentMerchantUnread = Number(threadRes.data.unread_by_merchant ?? 0);
+
+  const patch =
+    args.role === "admin"
+      ? {
+          unread_by_merchant: currentMerchantUnread + 1,
+          last_message_at: message.created_at,
+        }
+      : {
+          unread_by_admin: currentAdminUnread + 1,
+          last_message_at: message.created_at,
+        };
+
+  const threadUpdate = await sb
+    .from("support_threads")
+    .update(patch)
+    .eq("id", args.threadId);
+
+  if (threadUpdate.error) throw threadUpdate.error;
+
+  return message;
 }
 
 export async function markRead(threadId: string, side: "admin" | "merchant") {
   const sb = supabaseAdmin();
-  const patch =
-    side === "admin"
-      ? { unread_by_admin: 0 }
-      : { unread_by_merchant: 0 };
+
+  const patch = side === "admin" ? { unread_by_admin: 0 } : { unread_by_merchant: 0 };
 
   const res = await sb.from("support_threads").update(patch).eq("id", threadId);
   if (res.error) throw res.error;
@@ -102,6 +148,7 @@ export async function markRead(threadId: string, side: "admin" | "merchant") {
 
 export async function setThreadStatus(threadId: string, status: "open" | "closed" | "pending") {
   const sb = supabaseAdmin();
+
   const res = await sb.from("support_threads").update({ status }).eq("id", threadId);
   if (res.error) throw res.error;
 }

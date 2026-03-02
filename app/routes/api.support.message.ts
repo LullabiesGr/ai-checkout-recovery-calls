@@ -5,9 +5,9 @@ import { getOrCreateThread, insertMessage, supportChannelForShop } from "../lib/
 import { createClient } from "@supabase/supabase-js";
 
 function required(name: string) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env: ${name}`);
-  return v;
+  const value = String(process.env[name] ?? "").trim();
+  if (!value) throw new Error(`Missing env: ${name}`);
+  return value;
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -35,9 +35,13 @@ export async function action({ request }: ActionFunctionArgs) {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
-    const channel = supportChannelForShop(shop);
+    await sb.channel(supportChannelForShop(shop)).send({
+      type: "broadcast",
+      event: "support:new_message",
+      payload: { threadId: thread.id, message, shop },
+    });
 
-    await sb.channel(channel).send({
+    await sb.channel("support-admin-global").send({
       type: "broadcast",
       event: "support:new_message",
       payload: { threadId: thread.id, message, shop },

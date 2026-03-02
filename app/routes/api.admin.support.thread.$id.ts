@@ -4,13 +4,36 @@ import { authenticate } from "../shopify.server";
 import { isPlatformAdminEmail, getMessages, markRead } from "../lib/support.server";
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { session } = await authenticate.admin(request);
-  if (!isPlatformAdminEmail(session.email ?? null)) return json({ messages: [] }, { status: 404 });
+  try {
+    const { session } = await authenticate.admin(request);
 
-  const id = String(params.id ?? "");
-  if (!id) return json({ messages: [] }, { status: 400 });
+    if (!isPlatformAdminEmail(session.email ?? null)) {
+      return json({ ok: false, error: "Not found", messages: [] }, { status: 404 });
+    }
 
-  const messages = await getMessages(id, 400);
-  await markRead(id, "admin");
-  return json({ messages });
+    const id = String(params.id ?? "").trim();
+
+    if (!id) {
+      return json({ ok: false, error: "Missing thread id", messages: [] }, { status: 400 });
+    }
+
+    const messages = await getMessages(id, 400);
+    await markRead(id, "admin");
+
+    return json({
+      ok: true,
+      messages,
+    });
+  } catch (error) {
+    console.error("[api.admin.support.thread.$id]", error);
+
+    return json(
+      {
+        ok: false,
+        error: error instanceof Error ? error.message : "Internal server error",
+        messages: [],
+      },
+      { status: 500 }
+    );
+  }
 }
