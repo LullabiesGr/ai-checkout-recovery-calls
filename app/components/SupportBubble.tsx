@@ -11,6 +11,10 @@ import {
 } from "@shopify/polaris";
 import { supabaseBrowser } from "../lib/supabase.client";
 
+const [mounted, setMounted] = React.useState(false);
+React.useEffect(() => setMounted(true), []);
+if (!mounted) return null;
+
 type Thread = {
   id: string;
   shop: string;
