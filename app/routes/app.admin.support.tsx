@@ -39,7 +39,9 @@ type Msg = {
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
   const shop = String(session.shop ?? "").trim();
+
   if (shop !== PLATFORM_ADMIN_SHOP) throw new Response("Not Found", { status: 404 });
+
   return { viewerShop: shop, viewerEmail: session.email ?? null };
 }
 
@@ -56,9 +58,8 @@ async function readJsonSafe<T = any>(res: Response): Promise<T | null> {
 export default function AdminSupportInbox() {
   const { viewerShop, viewerEmail } = useLoaderData<typeof loader>();
 
+  // IMPORTANT: ΟΛΑ τα hooks δηλώνονται ΠΑΝΤΑ, σε κάθε render.
   const [mounted, setMounted] = React.useState(false);
-  React.useEffect(() => setMounted(true), []);
-  if (!mounted) return null;
 
   const [threads, setThreads] = React.useState<Thread[] | null>(null);
   const [active, setActive] = React.useState<Thread | null>(null);
@@ -73,6 +74,10 @@ export default function AdminSupportInbox() {
   const [messagesError, setMessagesError] = React.useState<string | null>(null);
 
   const scrollerRef = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const scrollToBottom = React.useCallback(() => {
     const el = scrollerRef.current;
@@ -138,15 +143,19 @@ export default function AdminSupportInbox() {
   );
 
   React.useEffect(() => {
+    if (!mounted) return;
     void loadThreads();
-  }, [loadThreads]);
+  }, [mounted, loadThreads]);
 
   React.useEffect(() => {
+    if (!mounted) return;
     if (!active?.id) return;
     void loadThread(active.id);
-  }, [active?.id, loadThread]);
+  }, [mounted, active?.id, loadThread]);
 
   React.useEffect(() => {
+    if (!mounted) return;
+
     const sb = supabaseBrowser();
     if (!sb) return;
 
@@ -176,7 +185,7 @@ export default function AdminSupportInbox() {
     return () => {
       sb.removeChannel(channel);
     };
-  }, [active?.id, loadThreads, scrollToBottom]);
+  }, [mounted, active?.id, loadThreads, scrollToBottom]);
 
   const send = React.useCallback(async () => {
     if (!active?.id) return;
@@ -376,14 +385,14 @@ export default function AdminSupportInbox() {
     </Card>
   );
 
-  return (
+  return mounted ? (
     <Page>
       <InlineStack gap="400" align="start">
         <div style={{ width: 360, flexShrink: 0 }}>{left}</div>
         <div style={{ flex: 1 }}>{right}</div>
       </InlineStack>
     </Page>
-  );
+  ) : null;
 }
 
 export function ErrorBoundary() {
