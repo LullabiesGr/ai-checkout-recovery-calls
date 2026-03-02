@@ -4,6 +4,13 @@ import { authenticate } from "../shopify.server";
 import { isPlatformAdminEmail, insertMessage, supportChannelForShop } from "../lib/support.server";
 import { createClient } from "@supabase/supabase-js";
 
+const PLATFORM_ADMIN_SHOP = String(process.env.PLATFORM_ADMIN_SHOP ?? "afterwin.myshopify.com").trim();
+
+const { session } = await authenticate.admin(request);
+const shop = String(session.shop ?? "").trim();
+const ok = isPlatformAdminEmail(session.email ?? null) && shop === PLATFORM_ADMIN_SHOP;
+if (!ok) return new Response("Not Found", { status: 404 });
+
 function required(name: string) {
   const value = String(process.env[name] ?? "").trim();
   if (!value) throw new Error(`Missing env: ${name}`);

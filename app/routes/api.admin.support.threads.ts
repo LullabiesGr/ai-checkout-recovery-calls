@@ -3,6 +3,13 @@ import { json } from "react-router";
 import { authenticate } from "../shopify.server";
 import { isPlatformAdminEmail, listThreads } from "../lib/support.server";
 
+const PLATFORM_ADMIN_SHOP = String(process.env.PLATFORM_ADMIN_SHOP ?? "afterwin.myshopify.com").trim();
+
+const { session } = await authenticate.admin(request);
+const shop = String(session.shop ?? "").trim();
+const ok = isPlatformAdminEmail(session.email ?? null) && shop === PLATFORM_ADMIN_SHOP;
+if (!ok) return new Response("Not Found", { status: 404 });
+
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
     const { session } = await authenticate.admin(request);

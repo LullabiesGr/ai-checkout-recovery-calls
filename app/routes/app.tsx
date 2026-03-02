@@ -10,6 +10,8 @@ import { SupportBubble } from "../components/SupportBubble";
 const EMBED_KEYS = ["shop", "host", "embedded", "locale"] as const;
 const EMBED_STORAGE_KEY = "__shopify_embed_params_v1";
 
+const PLATFORM_ADMIN_SHOP = String(process.env.PLATFORM_ADMIN_SHOP ?? "afterwin.myshopify.com").trim();
+
 function pickEmbeddedParams(search: string) {
   const src = new URLSearchParams(search);
   const keep = new URLSearchParams();
@@ -36,18 +38,21 @@ function mergeSearch(path: string, keep: URLSearchParams) {
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
 
-  const shop = session.shop;
+  const shop = String(session.shop ?? "").trim();
   const email = session.email ?? null;
 
+  const isPlatformAdmin = isPlatformAdminEmail(email);
+  const isOwnerShop = shop === PLATFORM_ADMIN_SHOP;
+
   return {
-    apiKey: process.env.SHOPIFY_API_KEY ?? "",
+    apiKey: String(process.env.SHOPIFY_API_KEY ?? "").trim(),
     shop,
-    isPlatformAdmin: isPlatformAdminEmail(email),
+    showAdminInbox: Boolean(isPlatformAdmin && isOwnerShop),
   };
 }
 
 export default function App() {
-  const { apiKey, shop, isPlatformAdmin } = useLoaderData<typeof loader>();
+  const { apiKey, shop, showAdminInbox } = useLoaderData<typeof loader>();
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -91,10 +96,7 @@ export default function App() {
     if (nextUrl !== currentUrl) navigate(nextUrl, { replace: true });
   }, [location.pathname, location.search, navigate]);
 
-  const href = React.useCallback(
-    (path: string) => mergeSearch(path, embeddedParams),
-    [embeddedParams],
-  );
+  const href = React.useCallback((path: string) => mergeSearch(path, embeddedParams), [embeddedParams]);
 
   return (
     <AppProvider embedded apiKey={apiKey}>
@@ -103,11 +105,13 @@ export default function App() {
         <a href={href("/app/checkouts")}>Checkouts</a>
         <a href={href("/app/settings")}>Settings</a>
         <a href={href("/app/billing")}>Billing</a>
-        {isPlatformAdmin ? <a href={href("/app/admin/support")}>Support Inbox</a> : null}
+
+        {showAdminInbox ? <a href={href("/app/admin/support")}>Support Inbox</a> : null}
       </ui-nav-menu>
 
       <Outlet />
 
+      {/* Support chat σε ΟΛΟΥΣ */}
       <SupportBubble shop={shop} />
     </AppProvider>
   );
