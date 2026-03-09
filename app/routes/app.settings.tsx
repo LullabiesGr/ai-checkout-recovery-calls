@@ -6,6 +6,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { ensureSettings } from "../callRecovery.server";
+import { getShopPlan, hasSmsFeature } from "../lib/planFeatures.server";
 
 import {
   Page,
@@ -51,12 +52,13 @@ type ExtrasRow = {
   sms_template_offer: string | null;
   sms_template_no_offer: string | null;
 
-  // NEW: per-shop sender for Brevo SMS
   brevoSmsSender: string | null;
 };
 
 type LoaderData = {
   shop: string;
+  billingPlan: string;
+  smsFeatureAllowed: boolean;
   saved: boolean;
   settings: {
     enabled: boolean;
@@ -90,7 +92,6 @@ type LoaderData = {
     smsTemplateOffer: string;
     smsTemplateNoOffer: string;
 
-    // NEW
     brevoSmsSender: string;
   };
 };
@@ -137,8 +138,9 @@ function pickGoal(v: any): Goal {
 }
 function pickOfferRule(v: any): OfferRule {
   const s = String(v ?? "").trim().toLowerCase();
-  if (s === "price_objection" || s === "after_first_objection" || s === "always" || s === "ask_only")
+  if (s === "price_objection" || s === "after_first_objection" || s === "always" || s === "ask_only") {
     return s as OfferRule;
+  }
   return "ask_only";
 }
 function pickCurrency(v: any): string {
@@ -153,7 +155,7 @@ function pickPromptMode(v: any): PromptMode {
 }
 
 /**
- * NEW: normalize per-shop Brevo sender input
+ * normalize per-shop Brevo sender input
  * - numeric: keep digits only, max 15
  * - alphanumeric: keep A-Z0-9 only, max 11
  */
@@ -164,19 +166,17 @@ function normalizeBrevoSenderInput(v: any): string | null {
   const noSpace = raw.replace(/\s+/g, "");
   if (!noSpace) return null;
 
-  // numeric sender (allow + but store without +)
   if (/^\+?\d+$/.test(noSpace)) {
     const digits = noSpace.replace(/^\+/, "").slice(0, 15);
     return digits ? digits : null;
   }
 
-  // alphanumeric sender
   const alpha = noSpace.replace(/[^A-Za-z0-9]/g, "").slice(0, 11);
   return alpha ? alpha : null;
 }
 
 /**
- * FIX: merge Shopify embedded params with target params so redirect stays embedded.
+ * merge Shopify embedded params with target params so redirect stays embedded
  */
 function withSearchMerged(path: string, request: Request) {
   const req = new URL(request.url);
@@ -192,7 +192,6 @@ function withSearchMerged(path: string, request: Request) {
 }
 
 async function readSettingsExtras(shop: string): Promise<ExtrasRow | null> {
-  // Backward-safe: if column doesn't exist yet, fall back.
   try {
     const rows = await (db as any).$queryRaw<ExtrasRow[]>`
       select
@@ -267,11 +266,9 @@ async function writeSettingsExtras(
     smsTemplateOffer: string | null;
     smsTemplateNoOffer: string | null;
 
-    // NEW
     brevoSmsSender: string | null;
   }
 ) {
-  // Backward-safe: if column doesn't exist yet, update without it.
   try {
     await (db as any).$executeRaw`
       update public."Settings"
@@ -325,6 +322,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
+  const billingPlan = await getShopPlan(shop);
+  const smsFeatureAllowed = hasSmsFeature(billingPlan);
+
   const base = await ensureSettings(shop);
   const b: any = base as any;
   const extras = await readSettingsExtras(shop);
@@ -332,7 +332,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const saved = url.searchParams.get("saved") === "1";
 
-    const defaultOfferTemplate = "Checkout: {{checkout_link}} Code: {{offer_code}}";
+  const defaultOfferTemplate = "Checkout: {{checkout_link}} Code: {{offer_code}}";
   const defaultNoOfferTemplate = "Checkout: {{checkout_link}}";
 
   const settings: LoaderData["settings"] = {
@@ -360,9 +360,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     freeShippingEnabled: Boolean(extras?.free_shipping_enabled ?? false),
 
     followupEmailEnabled: Boolean(extras?.followup_email_enabled ?? true),
-    followupSmsEnabled: Boolean(extras?.followup_sms_enabled ?? false),
+    followupSmsEnabled: smsFeatureAllowed ? Boolean(extras?.followup_sms_enabled ?? false) : false,
 
-        promptMode: pickPromptMode((base as any).promptMode ?? "replace"),
+    promptMode: pickPromptMode((base as any).promptMode ?? "replace"),
     userPrompt: String((base as any).userPrompt ?? ""),
 
     smsTemplateOffer: String(extras?.sms_template_offer ?? "").trim()
@@ -372,15 +372,24 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       ? String(extras?.sms_template_no_offer)
       : defaultNoOfferTemplate,
 
-    brevoSmsSender: String(extras?.brevoSmsSender ?? "").trim(),
+    brevoSmsSender: smsFeatureAllowed ? String(extras?.brevoSmsSender ?? "").trim() : "",
   };
 
-  return { shop, saved, settings } satisfies LoaderData;
+  return {
+    shop,
+    billingPlan,
+    smsFeatureAllowed,
+    saved,
+    settings,
+  } satisfies LoaderData;
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
+
+  const billingPlan = await getShopPlan(shop);
+  const smsFeatureAllowed = hasSmsFeature(billingPlan);
 
   const base = await ensureSettings(shop);
   const b: any = base as any;
@@ -407,18 +416,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   );
 
   const discountEnabled = toBool(fd.get("discountEnabled"));
-  const maxDiscountPercent = clamp(toInt(fd.get("maxDiscountPercent"), Number(extras?.max_discount_percent ?? 10)), 0, 50);
+  const maxDiscountPercent = clamp(
+    toInt(fd.get("maxDiscountPercent"), Number(extras?.max_discount_percent ?? 10)),
+    0,
+    50
+  );
   const offerRule = pickOfferRule(fd.get("offerRule") ?? extras?.offer_rule ?? "ask_only");
   const minCartValueForDiscount = toFloatOrNull(fd.get("minCartValueForDiscount"));
   const couponPrefixRaw = String(fd.get("couponPrefix") ?? "").trim();
   const couponPrefix = couponPrefixRaw ? couponPrefixRaw.slice(0, 12) : null;
-  const couponValidityHours = clamp(toInt(fd.get("couponValidityHours"), Number(extras?.coupon_validity_hours ?? 24)), 1, 168);
+  const couponValidityHours = clamp(
+    toInt(fd.get("couponValidityHours"), Number(extras?.coupon_validity_hours ?? 24)),
+    1,
+    168
+  );
   const freeShippingEnabled = toBool(fd.get("freeShippingEnabled"));
 
   const followupEmailEnabled = toBool(fd.get("followupEmailEnabled"));
-  const followupSmsEnabled = toBool(fd.get("followupSmsEnabled"));
+  const requestedFollowupSmsEnabled = toBool(fd.get("followupSmsEnabled"));
+  const followupSmsEnabled = smsFeatureAllowed ? requestedFollowupSmsEnabled : false;
 
-    const promptMode = pickPromptMode(fd.get("promptMode") ?? (base as any).promptMode ?? "replace");
+  const promptMode = pickPromptMode(fd.get("promptMode") ?? (base as any).promptMode ?? "replace");
   const userPrompt = String(fd.get("userPrompt") ?? "").trim();
 
   const smsTemplateOfferRaw = String(fd.get("smsTemplateOffer") ?? "").trim();
@@ -427,6 +445,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const smsTemplateNoOffer = smsTemplateNoOfferRaw ? smsTemplateNoOfferRaw : null;
 
   const brevoSmsSender = normalizeBrevoSenderInput(fd.get("brevoSmsSender"));
+
+  const finalBrevoSmsSender = smsFeatureAllowed ? brevoSmsSender : null;
+  const finalSmsTemplateOffer = smsFeatureAllowed ? smsTemplateOffer : null;
+  const finalSmsTemplateNoOffer = smsFeatureAllowed ? smsTemplateNoOffer : null;
 
   await db.settings.update({
     where: { shop },
@@ -460,9 +482,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     freeShippingEnabled,
     followupEmailEnabled,
     followupSmsEnabled,
-    smsTemplateOffer,
-    smsTemplateNoOffer,
-    brevoSmsSender,
+    smsTemplateOffer: finalSmsTemplateOffer,
+    smsTemplateNoOffer: finalSmsTemplateNoOffer,
+    brevoSmsSender: finalBrevoSmsSender,
   });
 
   return new Response(null, {
@@ -475,7 +497,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
    UI (Polaris)
    ========================= */
 export default function Settings() {
-  const { shop, saved, settings } = useLoaderData<typeof loader>();
+  const { shop, billingPlan, smsFeatureAllowed, saved, settings } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
 
   const [enabled, setEnabled] = React.useState(settings.enabled);
@@ -766,6 +788,12 @@ export default function Settings() {
                     Follow-ups
                   </Text>
 
+                  {!smsFeatureAllowed ? (
+                    <Banner tone="warning" title="SMS is locked on your current plan">
+                      <p>SMS follow-ups are available only on Pro and Business plans. Your current plan is {billingPlan}.</p>
+                    </Banner>
+                  ) : null}
+
                   <InlineStack gap="600">
                     <Checkbox
                       label="Allow follow-up email suggestion"
@@ -776,6 +804,7 @@ export default function Settings() {
                       label="Allow follow-up SMS suggestion"
                       checked={followupSmsEnabled}
                       onChange={setFollowupSmsEnabled}
+                      disabled={!smsFeatureAllowed}
                     />
                   </InlineStack>
 
@@ -798,7 +827,7 @@ export default function Settings() {
                       onChange={setBrevoSmsSender}
                       autoComplete="off"
                       helpText="Alphanumeric up to 11 chars (A-Z,0-9) or numeric up to 15 digits. Spaces/symbols are removed."
-                      disabled={!followupSmsEnabled}
+                      disabled={!smsFeatureAllowed || !followupSmsEnabled}
                     />
                   </FormLayout>
 
@@ -827,6 +856,7 @@ export default function Settings() {
                       multiline={6}
                       autoComplete="off"
                       helpText="Used when an offer code exists. Use {{discount_link}} so the discount applies automatically."
+                      disabled={!smsFeatureAllowed || !followupSmsEnabled}
                     />
 
                     <TextField
@@ -837,6 +867,7 @@ export default function Settings() {
                       multiline={4}
                       autoComplete="off"
                       helpText="Used when no offer code exists. Use {{checkout_link}}."
+                      disabled={!smsFeatureAllowed || !followupSmsEnabled}
                     />
                   </FormLayout>
                 </BlockStack>
