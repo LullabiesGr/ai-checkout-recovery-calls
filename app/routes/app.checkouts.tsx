@@ -80,7 +80,6 @@ export function normalizeOutcome(outcome: string | null): NormalizedOutcome {
 
   if (!norm) return "none";
 
-  // Strict mapping (no substring checks)
   switch (norm) {
     case "recovered":
       return "recovered";
@@ -131,11 +130,6 @@ export function normalizeOutcome(outcome: string | null): NormalizedOutcome {
     default:
       return "other";
   }
-}
-
-function isRecoveredOutcome(outcome: string | null): boolean {
-  const n = normalizeOutcome(outcome);
-  return n === "recovered" || n === "converted";
 }
 
 /* ---------------- Tones ---------------- */
@@ -224,12 +218,11 @@ type Row = {
   thumbUrl: string | null;
   itemsCount: number;
 
-  // recovery fields (DB)
   recoveredAt: string | null;
   recoveredOrderId: string | null;
   recoveredAmount: number | null;
+  recoveredFinancial: string | null;
 
-  // eligibility (computed server-side using settings.minOrderValue, fallback 0)
   eligibleAtRisk: boolean;
 
   callStatus: string | null;
@@ -239,7 +232,6 @@ type Row = {
   recordingUrl: string | null;
   logUrl: string | null;
 
-  // from outcomes table (use them everywhere)
   nextBestAction: string | null;
   followUpMessage: string | null;
   summaryClean: string | null;
@@ -252,7 +244,6 @@ type Row = {
   answered: boolean | null;
   voicemail: boolean | null;
 
-  // optional discount fields (present only if columns exist)
   discountSuggest?: boolean | null;
   discountPercent?: number | null;
 
@@ -342,12 +333,53 @@ function clip(text: string) {
   } catch {}
 }
 
+function pickLatestRecoveredOrderByCheckout(
+  orders: Array<{
+    checkoutId: string | null;
+    orderId: string;
+    total: number | null;
+    currency: string | null;
+    financial: string | null;
+    createdAt: Date;
+  }>
+) {
+  const map = new Map<
+    string,
+    {
+      checkoutId: string;
+      orderId: string;
+      total: number | null;
+      currency: string | null;
+      financial: string | null;
+      createdAt: Date;
+    }
+  >();
+
+  for (const o of orders) {
+    const checkoutId = safeStr(o.checkoutId).trim();
+    if (!checkoutId) continue;
+
+    const prev = map.get(checkoutId);
+    if (!prev || new Date(o.createdAt).getTime() >= new Date(prev.createdAt).getTime()) {
+      map.set(checkoutId, {
+        checkoutId,
+        orderId: String(o.orderId),
+        total: o.total == null ? null : Number(o.total),
+        currency: o.currency ?? null,
+        financial: o.financial ?? null,
+        createdAt: o.createdAt,
+      });
+    }
+  }
+
+  return map;
+}
+
 /* ---------------- Loader ---------------- */
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  // keep ensureSettings
   const settings: any = await ensureSettings(shop);
   const minOrderValue =
     typeof settings?.minOrderValue === "number"
@@ -373,11 +405,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         value: true,
         currency: true,
         itemsJson: true,
-
-        // ✅ required for recovered metrics/list
-        recoveredAt: true,
-        recoveredOrderId: true,
-        recoveredAmount: true,
       },
     }),
     db.callJob.findMany({
@@ -397,15 +424,40 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
   ]);
 
-  const latestJobMap = pickLatestJobByCheckout(jobs);
+  const checkoutIds = Array.from(
+    new Set(checkouts.map((c) => safeStr(c.checkoutId).trim()).filter(Boolean))
+  );
 
-  const checkoutIds = checkouts.map((c) => String(c.checkoutId)).filter(Boolean);
+  const orders =
+    checkoutIds.length > 0
+      ? await db.order.findMany({
+          where: {
+            shop,
+            checkoutId: { in: checkoutIds },
+          },
+          orderBy: { createdAt: "desc" },
+          take: 1000,
+          select: {
+            checkoutId: true,
+            orderId: true,
+            total: true,
+            currency: true,
+            financial: true,
+            createdAt: true,
+          },
+        })
+      : [];
+
+  const latestJobMap = pickLatestJobByCheckout(jobs);
+  const latestRecoveredOrderMap = pickLatestRecoveredOrderByCheckout(orders);
+
   const callIds = checkouts
     .map((c) => {
       const j = latestJobMap.get(String(c.checkoutId)) ?? null;
       return j?.providerCallId ? String(j.providerCallId) : "";
     })
     .filter(Boolean);
+
   const jobIds = checkouts
     .map((c) => {
       const j = latestJobMap.get(String(c.checkoutId)) ?? null;
@@ -485,7 +537,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       "payload",
     ];
 
-    // Try extended select for discount chip; fall back if columns don't exist.
     const extendedSelectFields = [...baseSelectFields, "discount_suggest", "discount_percent"];
 
     const orParts: string[] = [];
@@ -533,13 +584,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       return res;
     }
 
-    // attempt extended select first
     let res = await fetchWithSelect(extendedSelectFields);
     if (!res.ok) {
       const msg = (res.text || "").toLowerCase();
       const looksLikeMissingColumn =
         res.status === 400 &&
-        (msg.includes("discount_suggest") || msg.includes("discount_percent") || msg.includes("column") || msg.includes("does not exist"));
+        (msg.includes("discount_suggest") ||
+          msg.includes("discount_percent") ||
+          msg.includes("column") ||
+          msg.includes("does not exist"));
 
       if (looksLikeMissingColumn) {
         res = await fetchWithSelect(baseSelectFields);
@@ -582,6 +635,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const rows: Row[] = checkouts.map((c) => {
     const checkoutId = String(c.checkoutId);
     const j = latestJobMap.get(checkoutId) ?? null;
+    const order = latestRecoveredOrderMap.get(checkoutId) ?? null;
 
     const callId = j?.providerCallId ? String(j.providerCallId) : "";
     const jobId = j?.id ? String(j.id) : "";
@@ -602,36 +656,35 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const cartPreview = buildCartPreview(c.itemsJson ?? null);
     const { thumbUrl, count } = getThumbAndCount(c.itemsJson ?? null);
 
-    const raRaw = (c as any).recoveredAmount;
-    const recoveredAmount = raRaw == null ? null : Number(raRaw);
-    const recoveredAmountSafe = Number.isFinite(recoveredAmount as any) ? (recoveredAmount as number) : null;
+    const recoveredAtIso = order ? new Date(order.createdAt).toISOString() : null;
+    const recoveredOrderId = order?.orderId ?? null;
+    const recoveredAmount =
+      order?.total == null ? null : Number.isFinite(Number(order.total)) ? Number(order.total) : null;
+    const recoveredFinancial = order?.financial ?? null;
 
-    const recoveredAtIso = (c as any).recoveredAt ? new Date((c as any).recoveredAt).toISOString() : null;
-    const recoveredOrderId = safeStr((c as any).recoveredOrderId).trim() ? String((c as any).recoveredOrderId) : null;
+    const effectiveStatus = recoveredOrderId ? "RECOVERED" : String(c.status);
+    const statusUpper = safeStr(effectiveStatus).toUpperCase();
 
-    const statusUpper = safeStr(c.status).toUpperCase();
     const hasContact = !!safeStr(c.phone).trim() || !!safeStr(c.email).trim();
-    const eligibleAtRisk = statusUpper === "ABANDONED" && Number(c.value ?? 0) >= Number(minOrderValue || 0) && hasContact;
+    const eligibleAtRisk =
+      !recoveredOrderId &&
+      statusUpper === "ABANDONED" &&
+      Number(c.value ?? 0) >= Number(minOrderValue || 0) &&
+      hasContact;
 
-    // optional discount fields (only if columns exist / selected)
-    const hasDiscountSuggest =
-      sb && Object.prototype.hasOwnProperty.call(sb as any, "discount_suggest");
-    const hasDiscountPercent =
-      sb && Object.prototype.hasOwnProperty.call(sb as any, "discount_percent");
+    const hasDiscountSuggest = sb && Object.prototype.hasOwnProperty.call(sb as any, "discount_suggest");
+    const hasDiscountPercent = sb && Object.prototype.hasOwnProperty.call(sb as any, "discount_percent");
 
     const discountSuggest = hasDiscountSuggest
       ? ((sb as any).discount_suggest == null ? null : Boolean((sb as any).discount_suggest))
       : undefined;
 
     const dpRaw = hasDiscountPercent ? (sb as any).discount_percent : undefined;
-    const discountPercent =
-      hasDiscountPercent
-        ? (dpRaw == null ? null : Number(dpRaw))
-        : undefined;
+    const discountPercent = hasDiscountPercent ? (dpRaw == null ? null : Number(dpRaw)) : undefined;
 
     return {
       checkoutId,
-      status: String(c.status),
+      status: effectiveStatus,
       createdAt: new Date(c.createdAt).toISOString(),
       updatedAt: new Date(c.updatedAt).toISOString(),
       abandonedAt: c.abandonedAt ? new Date(c.abandonedAt).toISOString() : null,
@@ -639,7 +692,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       phone: c.phone ?? null,
       email: c.email ?? null,
       value: Number(c.value ?? 0),
-      currency: String(c.currency ?? "USD"),
+      currency: String(c.currency ?? order?.currency ?? "USD"),
 
       itemsJson: c.itemsJson ?? null,
       cartPreview,
@@ -648,7 +701,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
       recoveredAt: recoveredAtIso,
       recoveredOrderId,
-      recoveredAmount: recoveredAmountSafe,
+      recoveredAmount,
+      recoveredFinancial,
 
       eligibleAtRisk,
 
@@ -657,26 +711,31 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       aiStatus: (sb as any)?.ai_status ? String((sb as any).ai_status) : null,
       buyProbabilityPct,
       recordingUrl,
-      logUrl: safeStr((sb as any)?.log_url).trim() ? String((sb as any).log_url) : null,
+      logUrl: safeStr((sb as any)?.log_url).trim() ? String((sb as any)?.log_url) : null,
 
       nextBestAction: safeStr((sb as any)?.next_best_action || (sb as any)?.best_next_action).trim()
         ? String((sb as any)?.next_best_action || (sb as any)?.best_next_action)
         : null,
-      followUpMessage: safeStr((sb as any)?.follow_up_message).trim() ? String((sb as any)?.follow_up_message) : null,
+      followUpMessage: safeStr((sb as any)?.follow_up_message).trim()
+        ? String((sb as any)?.follow_up_message)
+        : null,
       summaryClean: safeStr((sb as any)?.summary_clean || (sb as any)?.summary).trim()
         ? String((sb as any)?.summary_clean || (sb as any)?.summary)
         : null,
 
       sentiment: safeStr((sb as any)?.sentiment).trim() ? String((sb as any)?.sentiment) : null,
       tone: safeStr((sb as any)?.tone).trim() ? String((sb as any)?.tone) : null,
-      customerIntent: safeStr((sb as any)?.customer_intent).trim() ? String((sb as any)?.customer_intent) : null,
+      customerIntent: safeStr((sb as any)?.customer_intent).trim()
+        ? String((sb as any)?.customer_intent)
+        : null,
       latestStatus: safeStr((sb as any)?.latest_status).trim() ? String((sb as any)?.latest_status) : null,
       endedReason: safeStr((sb as any)?.ended_reason).trim() ? String((sb as any)?.ended_reason) : null,
       answered: typeof (sb as any)?.answered === "boolean" ? Boolean((sb as any)?.answered) : null,
       voicemail: typeof (sb as any)?.voicemail === "boolean" ? Boolean((sb as any)?.voicemail) : null,
 
       discountSuggest,
-      discountPercent: discountPercent == null ? discountPercent : Number.isFinite(discountPercent) ? discountPercent : null,
+      discountPercent:
+        discountPercent == null ? discountPercent : Number.isFinite(discountPercent) ? discountPercent : null,
 
       latestJobId: j?.id ? String(j.id) : null,
       latestProviderCallId: j?.providerCallId ? String(j.providerCallId) : null,
@@ -692,11 +751,7 @@ function hasContact(r: Row) {
 }
 
 function isRecovered(r: Row) {
-  const s = safeStr(r.status).toUpperCase();
-  if (s === "RECOVERED" || s === "CONVERTED") return true;
-  if (r.recoveredAt != null) return true;
-  if (r.recoveredOrderId != null) return true;
-  return isRecoveredOutcome(r.callOutcome);
+  return !!safeStr(r.recoveredOrderId).trim() || r.recoveredAt != null;
 }
 
 function recoveredRowRevenue(r: Row) {
@@ -706,7 +761,6 @@ function recoveredRowRevenue(r: Row) {
 }
 
 function urgencyScore(r: Row) {
-  // higher score = higher urgency
   let score = 0;
 
   const status = safeStr(r.status).toUpperCase();
@@ -731,7 +785,6 @@ function urgencyScore(r: Row) {
   const val = Number(r.value || 0);
   score += Math.min(30, Math.round(val / 100));
 
-  // stale work gets pushed down slightly; recent gets a bump
   const t = Date.parse(r.updatedAt);
   if (Number.isFinite(t)) {
     const ageHours = Math.max(0, (Date.now() - t) / (1000 * 60 * 60));
@@ -822,7 +875,6 @@ export default function Checkouts() {
       .slice(0, 6);
   }, [recoveredRows]);
 
-  // base work list (non-recovered), urgency-sorted
   const baseWorkSorted = React.useMemo(() => {
     return rows
       .filter((r) => !isRecovered(r))
@@ -882,7 +934,6 @@ export default function Checkouts() {
     return tableRows[0]?.checkoutId ?? baseWorkSorted[0]?.checkoutId ?? latest?.checkoutId ?? null;
   });
 
-  // keep selection valid, prefer current filtered set
   React.useEffect(() => {
     const preferred = tableRows[0]?.checkoutId ?? baseWorkSorted[0]?.checkoutId ?? latest?.checkoutId ?? null;
     if (!selectedId) {
@@ -894,7 +945,6 @@ export default function Checkouts() {
       setSelectedId(preferred);
       return;
     }
-    // if selected is not in filtered set and there is a filtered set, snap to top
     if (filteredWorkRows.length > 0 && !filteredWorkRows.some((r) => r.checkoutId === selectedId)) {
       setSelectedId(preferred);
     }
@@ -902,7 +952,6 @@ export default function Checkouts() {
 
   const selected = React.useMemo(() => rows.find((r) => r.checkoutId === selectedId) ?? null, [rows, selectedId]);
 
-  // right-panel details fetch (full sb fields)
   const detailsFetcher = useFetcher<any>();
   React.useEffect(() => {
     if (!selected?.checkoutId) return;
@@ -945,12 +994,10 @@ export default function Checkouts() {
     <>
       {/* @ts-ignore */}
       <s-page heading="Checkouts" inlineSize="large">
-        {/* TOP VALUE STRIP */}
         {/* @ts-ignore */}
         <s-section>
           {/* @ts-ignore */}
           <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 1.2fr 0.8fr">
-            {/* PERFORMANCE */}
             {/* @ts-ignore */}
             <s-box border="base" borderRadius="base" padding="base">
               {/* @ts-ignore */}
@@ -972,7 +1019,6 @@ export default function Checkouts() {
 
                 {/* @ts-ignore */}
                 <s-grid gap="base" gridTemplateColumns="@container (inline-size < 860px) 1fr, 1fr 1fr 1fr">
-                  {/* Recovered revenue */}
                   {/* @ts-ignore */}
                   <s-box border="base" borderRadius="base" padding="base" background="subdued">
                     {/* @ts-ignore */}
@@ -983,12 +1029,11 @@ export default function Checkouts() {
                       <s-text variant="headingLg">{fmtMoney(recoveredRevenue, currency)}</s-text>
                       {/* @ts-ignore */}
                       <s-text tone="subdued" variant="bodySm">
-                        Uses recovered amount when available
+                        Uses Order.total as source of truth
                       </s-text>
                     </s-stack>
                   </s-box>
 
-                  {/* At-risk revenue */}
                   {/* @ts-ignore */}
                   <s-box border="base" borderRadius="base" padding="base" background="subdued">
                     {/* @ts-ignore */}
@@ -1004,7 +1049,6 @@ export default function Checkouts() {
                     </s-stack>
                   </s-box>
 
-                  {/* Win rate */}
                   {/* @ts-ignore */}
                   <s-box border="base" borderRadius="base" padding="base" background="subdued">
                     {/* @ts-ignore */}
@@ -1020,7 +1064,6 @@ export default function Checkouts() {
                     </s-stack>
                   </s-box>
 
-                  {/* Compact recency */}
                   {/* @ts-ignore */}
                   <s-box border="base" borderRadius="base" padding="base" background="subdued">
                     {/* @ts-ignore */}
@@ -1051,7 +1094,6 @@ export default function Checkouts() {
               </s-stack>
             </s-box>
 
-            {/* RECOVERED WINS – SPECIAL BOX */}
             {/* @ts-ignore */}
             <s-box border="base" borderRadius="base" padding="base" style={{ background: "rgba(0,128,96,0.08)" }}>
               {/* @ts-ignore */}
@@ -1115,7 +1157,7 @@ export default function Checkouts() {
                                 </s-link>
                                 {/* @ts-ignore */}
                                 <s-text tone="subdued" variant="bodySm">
-                                  {outcomeLabel(r.callOutcome)}
+                                  {safeStr(r.recoveredOrderId) ? `ORDER ${r.recoveredOrderId}` : "RECOVERED"}
                                 </s-text>
                               </s-table-cell>
                               {/* @ts-ignore */}
@@ -1134,12 +1176,10 @@ export default function Checkouts() {
           </s-grid>
         </s-section>
 
-        {/* MAIN: WORK LIST + DETAILS */}
         {/* @ts-ignore */}
         <s-section>
           {/* @ts-ignore */}
           <s-grid gap="base" gridTemplateColumns="@container (inline-size < 1100px) 1fr, 1.15fr 0.85fr">
-            {/* LEFT: ACTION QUEUE */}
             {/* @ts-ignore */}
             <s-section>
               {/* @ts-ignore */}
@@ -1157,7 +1197,6 @@ export default function Checkouts() {
                   </s-stack>
                 </s-stack>
 
-                {/* FILTER CHIPS */}
                 {/* @ts-ignore */}
                 <s-box border="base" borderRadius="base" padding="base" background="subdued">
                   {/* @ts-ignore */}
@@ -1179,7 +1218,6 @@ export default function Checkouts() {
                   </s-stack>
                 </s-box>
 
-                {/* TABLE */}
                 {/* @ts-ignore */}
                 <s-box border="base" borderRadius="base" style={{ overflow: "hidden" }}>
                   {/* @ts-ignore */}
@@ -1363,7 +1401,6 @@ export default function Checkouts() {
               </s-stack>
             </s-section>
 
-            {/* RIGHT: DETAILS (STICKY) */}
             {/* @ts-ignore */}
             <s-box style={{ position: "sticky", top: 16, alignSelf: "start" }}>
               {/* @ts-ignore */}
@@ -1372,7 +1409,6 @@ export default function Checkouts() {
                 <s-box border="base" borderRadius="base" padding="base">
                   {/* @ts-ignore */}
                   <s-stack gap="base">
-                    {/* Header */}
                     {/* @ts-ignore */}
                     <s-stack direction="inline" align="space-between" gap="base" style={{ flexWrap: "wrap", alignItems: "center" }}>
                       {/* @ts-ignore */}
@@ -1402,12 +1438,11 @@ export default function Checkouts() {
                     ) : (
                       // @ts-ignore
                       <s-stack gap="base">
-                        {/* 1) Status badges row */}
                         {/* @ts-ignore */}
                         <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
                           {/* @ts-ignore */}
-                          <s-badge tone={toneForCheckoutStatus(details?.checkout?.status ?? selected.status)}>
-                            {safeStr(details?.checkout?.status ?? selected.status).toUpperCase()}
+                          <s-badge tone={toneForCheckoutStatus(selected.status)}>
+                            {safeStr(selected.status).toUpperCase()}
                           </s-badge>
 
                           {details?.latestJob?.status ? (
@@ -1465,9 +1500,13 @@ export default function Checkouts() {
                             // @ts-ignore
                             <s-badge tone="neutral">VOICEMAIL —</s-badge>
                           )}
+
+                          {selected.recoveredOrderId ? (
+                            // @ts-ignore
+                            <s-badge tone="success">{`ORDER ${selected.recoveredOrderId}`}</s-badge>
+                          ) : null}
                         </s-stack>
 
-                        {/* 2) Customer + Cart total box */}
                         {/* @ts-ignore */}
                         <s-box padding="base" border="base" borderRadius="base" background="subdued">
                           {/* @ts-ignore */}
@@ -1487,25 +1526,34 @@ export default function Checkouts() {
                             {/* @ts-ignore */}
                             <s-stack gap="tight">
                               {/* @ts-ignore */}
-                              <s-text tone="subdued" variant="bodySm">Cart total</s-text>
+                              <s-text tone="subdued" variant="bodySm">
+                                {selected.recoveredOrderId ? "Recovered order total" : "Cart total"}
+                              </s-text>
                               {/* @ts-ignore */}
                               <s-text fontWeight="semibold">
                                 {fmtMoney(
-                                  Number(details?.checkout?.value ?? selected.value ?? 0),
-                                  String(details?.checkout?.currency ?? selected.currency),
+                                  Number(selected.recoveredAmount ?? details?.checkout?.value ?? selected.value ?? 0),
+                                  String(selected.currency),
                                 )}
                               </s-text>
                               {/* @ts-ignore */}
-                              <s-text tone="subdued" variant="bodySm">Updated {formatWhen(details?.checkout?.updatedAt ?? selected.updatedAt)}</s-text>
+                              <s-text tone="subdued" variant="bodySm">
+                                Updated {formatWhen(details?.checkout?.updatedAt ?? selected.updatedAt)}
+                              </s-text>
                               {/* @ts-ignore */}
                               <s-text tone="subdued" variant="bodySm">
-                                Abandoned {details?.checkout?.abandonedAt ? formatWhen(details.checkout.abandonedAt) : selected.abandonedAt ? formatWhen(selected.abandonedAt) : "—"}
+                                {selected.recoveredAt
+                                  ? `Recovered ${formatWhen(selected.recoveredAt)}`
+                                  : details?.checkout?.abandonedAt
+                                    ? `Abandoned ${formatWhen(details.checkout.abandonedAt)}`
+                                    : selected.abandonedAt
+                                      ? `Abandoned ${formatWhen(selected.abandonedAt)}`
+                                      : "Abandoned —"}
                               </s-text>
                             </s-stack>
                           </s-grid>
                         </s-box>
 
-                        {/* 3) Primary actions row */}
                         {/* @ts-ignore */}
                         <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
                           {/* @ts-ignore */}
@@ -1546,7 +1594,6 @@ export default function Checkouts() {
                           </s-button>
                         </s-stack>
 
-                        {/* 4) Next best action focus box */}
                         {/* @ts-ignore */}
                         <s-box border="base" borderRadius="base" padding="base" style={{ background: "rgba(0,91,211,0.06)" }}>
                           {/* @ts-ignore */}
@@ -1567,7 +1614,6 @@ export default function Checkouts() {
                           </s-stack>
                         </s-box>
 
-                        {/* 5) Follow-up message box with Copy */}
                         {/* @ts-ignore */}
                         <s-box border="base" borderRadius="base" padding="base">
                           {/* @ts-ignore */}
@@ -1592,7 +1638,6 @@ export default function Checkouts() {
                           </s-stack>
                         </s-box>
 
-                        {/* 6) Conversation signals grid */}
                         {/* @ts-ignore */}
                         <s-box border="base" borderRadius="base" padding="base">
                           {/* @ts-ignore */}
@@ -1652,7 +1697,6 @@ export default function Checkouts() {
                           </s-stack>
                         </s-box>
 
-                        {/* 7) Items table */}
                         {/* @ts-ignore */}
                         <s-box border="base" borderRadius="base" style={{ overflow: "hidden" }}>
                           {/* @ts-ignore */}
@@ -1723,7 +1767,6 @@ export default function Checkouts() {
         </s-section>
       </s-page>
 
-      {/* MODAL: transcript / evidence / raw */}
       {/* @ts-ignore */}
       <s-modal
         id="checkouts-modal"
@@ -1739,7 +1782,6 @@ export default function Checkouts() {
         ) : modalKind === "evidence" ? (
           // @ts-ignore
           <s-stack gap="base">
-            {/* Summary + next action + follow-up */}
             {/* @ts-ignore */}
             <s-grid gap="base" gridTemplateColumns="@container (inline-size < 900px) 1fr, 1fr 1fr">
               {/* @ts-ignore */}
@@ -1764,7 +1806,6 @@ export default function Checkouts() {
               </s-box>
             </s-grid>
 
-            {/* Key evidence fields */}
             {/* @ts-ignore */}
             <s-grid gap="base" gridTemplateColumns="@container (inline-size < 900px) 1fr, 1fr 1fr">
               {/* @ts-ignore */}
@@ -1821,6 +1862,7 @@ export default function Checkouts() {
                     sb: sb ?? null,
                     checkout: details?.checkout ?? null,
                     latestJob: details?.latestJob ?? null,
+                    selectedRow: selected ?? null,
                   },
                   null,
                   2,
