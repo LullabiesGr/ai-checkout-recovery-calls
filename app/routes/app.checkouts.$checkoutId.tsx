@@ -104,7 +104,13 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       },
     }),
     db.order.findFirst({
-      where: { shop, checkoutId },
+      where: {
+        shop,
+        OR: [
+          { checkoutId },
+          { checkoutToken: checkoutId },
+        ],
+      },
       orderBy: { createdAt: "desc" },
       select: {
         orderId: true,
@@ -150,7 +156,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       phone: checkout.phone ?? null,
       email: checkout.email ?? null,
       value: Number(checkout.value ?? 0),
-      currency: String(checkout.currency ?? "USD"),
+      currency: String(recoveredOrder?.currency ?? checkout.currency ?? "USD"),
       itemsJson: checkout.itemsJson ?? null,
     },
     recoveredOrder: recoveredOrder

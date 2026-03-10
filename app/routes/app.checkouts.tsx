@@ -1,4 +1,3 @@
-// app/routes/app.checkouts.tsx
 import * as React from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useRouteError } from "react-router";
@@ -43,7 +42,6 @@ declare global {
   }
 }
 
-/* ---------------- URL helpers (keep embedded params) ---------------- */
 function safeSearch(): string {
   if (typeof window === "undefined") return "";
   const s = window.location.search || "";
@@ -56,7 +54,6 @@ function withSearch(path: string): string {
   return `${path}${s}`;
 }
 
-/* ---------------- Outcome normalization (strict) ---------------- */
 export type NormalizedOutcome =
   | "recovered"
   | "converted"
@@ -87,43 +84,30 @@ export function normalizeOutcome(outcome: string | null): NormalizedOutcome {
       return "converted";
 
     case "not_recovered":
-      return "not_recovered";
     case "notrecovered":
-      return "not_recovered";
     case "no_recovery":
       return "not_recovered";
 
     case "no_answer":
-      return "no_answer";
     case "noanswer":
-      return "no_answer";
     case "not_answered":
       return "no_answer";
 
     case "voicemail":
-      return "voicemail";
     case "left_voicemail":
-      return "voicemail";
     case "voicemail_left":
       return "voicemail";
 
     case "needs_followup":
-      return "needs_followup";
     case "needs_follow_up":
-      return "needs_followup";
     case "follow_up_needed":
-      return "needs_followup";
     case "followup_needed":
-      return "needs_followup";
     case "followup":
-      return "needs_followup";
     case "follow_up":
       return "needs_followup";
 
     case "not_interested":
-      return "not_interested";
     case "notinterested":
-      return "not_interested";
     case "no_interest":
       return "not_interested";
 
@@ -132,7 +116,6 @@ export function normalizeOutcome(outcome: string | null): NormalizedOutcome {
   }
 }
 
-/* ---------------- Tones ---------------- */
 type BadgeTone = "success" | "critical" | "warning" | "info" | "neutral";
 
 function toneForCheckoutStatus(status: string): BadgeTone {
@@ -186,7 +169,6 @@ function outcomeLabel(outcome: string | null): string {
   }
 }
 
-/* ---------------- Types ---------------- */
 type CartItemLite = {
   title?: string | null;
   name?: string | null;
@@ -256,7 +238,6 @@ type LoaderData = {
   rows: Row[];
 };
 
-/* ---------------- Cart parsing helpers ---------------- */
 function safeJsonParse<T = any>(v: any): T | null {
   if (v == null) return null;
   if (typeof v === "object") return v as T;
@@ -304,7 +285,6 @@ function getThumbAndCount(itemsJson: any): { thumbUrl: string | null; count: num
   return { thumbUrl: null, count };
 }
 
-/* ---------------- Formatting ---------------- */
 function fmtMoney(amount: number, currency: string) {
   const v = Number.isFinite(amount) ? amount : 0;
   const cur = (currency || "USD").toUpperCase();
@@ -333,9 +313,19 @@ function clip(text: string) {
   } catch {}
 }
 
-function pickLatestRecoveredOrderByCheckout(
+type RecoveredOrderLite = {
+  matchKey: string;
+  orderId: string;
+  total: number | null;
+  currency: string | null;
+  financial: string | null;
+  createdAt: Date;
+};
+
+function buildRecoveredOrderMap(
   orders: Array<{
     checkoutId: string | null;
+    checkoutToken: string | null;
     orderId: string;
     total: number | null;
     currency: string | null;
@@ -343,39 +333,31 @@ function pickLatestRecoveredOrderByCheckout(
     createdAt: Date;
   }>
 ) {
-  const map = new Map<
-    string,
-    {
-      checkoutId: string;
-      orderId: string;
-      total: number | null;
-      currency: string | null;
-      financial: string | null;
-      createdAt: Date;
-    }
-  >();
+  const map = new Map<string, RecoveredOrderLite>();
 
   for (const o of orders) {
-    const checkoutId = safeStr(o.checkoutId).trim();
-    if (!checkoutId) continue;
+    const directKey = safeStr(o.checkoutId).trim();
+    const tokenKey = safeStr(o.checkoutToken).trim();
+    const keys = [directKey, tokenKey].filter(Boolean);
 
-    const prev = map.get(checkoutId);
-    if (!prev || new Date(o.createdAt).getTime() >= new Date(prev.createdAt).getTime()) {
-      map.set(checkoutId, {
-        checkoutId,
-        orderId: String(o.orderId),
-        total: o.total == null ? null : Number(o.total),
-        currency: o.currency ?? null,
-        financial: o.financial ?? null,
-        createdAt: o.createdAt,
-      });
+    for (const k of keys) {
+      const prev = map.get(k);
+      if (!prev || new Date(o.createdAt).getTime() >= new Date(prev.createdAt).getTime()) {
+        map.set(k, {
+          matchKey: k,
+          orderId: String(o.orderId),
+          total: o.total == null ? null : Number(o.total),
+          currency: o.currency ?? null,
+          financial: o.financial ?? null,
+          createdAt: o.createdAt,
+        });
+      }
     }
   }
 
   return map;
 }
 
-/* ---------------- Loader ---------------- */
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
@@ -424,21 +406,23 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
   ]);
 
-  const checkoutIds = Array.from(
-    new Set(checkouts.map((c) => safeStr(c.checkoutId).trim()).filter(Boolean))
-  );
+  const checkoutIds = Array.from(new Set(checkouts.map((c) => safeStr(c.checkoutId).trim()).filter(Boolean)));
 
   const orders =
     checkoutIds.length > 0
       ? await db.order.findMany({
           where: {
             shop,
-            checkoutId: { in: checkoutIds },
+            OR: [
+              { checkoutId: { in: checkoutIds } },
+              { checkoutToken: { in: checkoutIds } },
+            ],
           },
           orderBy: { createdAt: "desc" },
           take: 1000,
           select: {
             checkoutId: true,
+            checkoutToken: true,
             orderId: true,
             total: true,
             currency: true,
@@ -449,7 +433,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       : [];
 
   const latestJobMap = pickLatestJobByCheckout(jobs);
-  const latestRecoveredOrderMap = pickLatestRecoveredOrderByCheckout(orders);
+  const recoveredOrderMap = buildRecoveredOrderMap(orders);
 
   const callIds = checkouts
     .map((c) => {
@@ -635,7 +619,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const rows: Row[] = checkouts.map((c) => {
     const checkoutId = String(c.checkoutId);
     const j = latestJobMap.get(checkoutId) ?? null;
-    const order = latestRecoveredOrderMap.get(checkoutId) ?? null;
+    const order = recoveredOrderMap.get(checkoutId) ?? null;
 
     const callId = j?.providerCallId ? String(j.providerCallId) : "";
     const jobId = j?.id ? String(j.id) : "";
@@ -692,7 +676,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       phone: c.phone ?? null,
       email: c.email ?? null,
       value: Number(c.value ?? 0),
-      currency: String(c.currency ?? order?.currency ?? "USD"),
+      currency: String(order?.currency ?? c.currency ?? "USD"),
 
       itemsJson: c.itemsJson ?? null,
       cartPreview,
@@ -745,11 +729,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return { shop, rows } satisfies LoaderData;
 };
 
-/* ---------------- Core derived rules ---------------- */
-function hasContact(r: Row) {
-  return !!safeStr(r.phone).trim() || !!safeStr(r.email).trim();
-}
-
 function isRecovered(r: Row) {
   return !!safeStr(r.recoveredOrderId).trim() || r.recoveredAt != null;
 }
@@ -796,12 +775,6 @@ function urgencyScore(r: Row) {
   return score;
 }
 
-/* ---------------- UI helpers ---------------- */
-function Badge({ tone, children, label }: { tone: BadgeTone; children: React.ReactNode; label?: string }) {
-  // @ts-ignore
-  return <s-badge tone={tone} accessibilityLabel={label || ""}>{children}</s-badge>;
-}
-
 type FilterKey = "all" | "abandoned" | "followups" | "high_intent" | "no_answer" | "discounts";
 
 function isFollowUpCandidate(r: Row) {
@@ -823,7 +796,7 @@ function isDiscountCandidate(r: Row) {
 }
 
 export default function Checkouts() {
-  const { shop, rows } = useLoaderData<typeof loader>();
+  const { rows } = useLoaderData<typeof loader>();
 
   const currency = (rows.find((r) => safeStr(r.currency))?.currency ?? "USD").toUpperCase();
 
@@ -992,87 +965,56 @@ export default function Checkouts() {
 
   return (
     <>
-      {/* @ts-ignore */}
       <s-page heading="Checkouts" inlineSize="large">
-        {/* @ts-ignore */}
         <s-section>
-          {/* @ts-ignore */}
           <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 1.2fr 0.8fr">
-            {/* @ts-ignore */}
             <s-box border="base" borderRadius="base" padding="base">
-              {/* @ts-ignore */}
               <s-stack gap="tight">
-                {/* @ts-ignore */}
                 <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center", flexWrap: "wrap" }}>
-                  {/* @ts-ignore */}
                   <s-text variant="headingMd">Performance</s-text>
-                  {/* @ts-ignore */}
                   <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap", alignItems: "center" }}>
-                    {/* @ts-ignore */}
                     <s-badge tone="success">{recoveredCount} wins</s-badge>
-                    {/* @ts-ignore */}
                     <s-badge tone="warning">{eligibleAtRiskCount} at-risk</s-badge>
-                    {/* @ts-ignore */}
                     <s-badge tone="info">{winRate}% win rate</s-badge>
                   </s-stack>
                 </s-stack>
 
-                {/* @ts-ignore */}
                 <s-grid gap="base" gridTemplateColumns="@container (inline-size < 860px) 1fr, 1fr 1fr 1fr">
-                  {/* @ts-ignore */}
                   <s-box border="base" borderRadius="base" padding="base" background="subdued">
-                    {/* @ts-ignore */}
                     <s-stack gap="tight">
-                      {/* @ts-ignore */}
                       <s-text tone="subdued" variant="bodySm">Recovered revenue</s-text>
-                      {/* @ts-ignore */}
                       <s-text variant="headingLg">{fmtMoney(recoveredRevenue, currency)}</s-text>
-                      {/* @ts-ignore */}
                       <s-text tone="subdued" variant="bodySm">
                         Uses Order.total as source of truth
                       </s-text>
                     </s-stack>
                   </s-box>
 
-                  {/* @ts-ignore */}
                   <s-box border="base" borderRadius="base" padding="base" background="subdued">
-                    {/* @ts-ignore */}
                     <s-stack gap="tight">
-                      {/* @ts-ignore */}
                       <s-text tone="subdued" variant="bodySm">At-risk revenue</s-text>
-                      {/* @ts-ignore */}
                       <s-text variant="headingLg">{fmtMoney(atRiskRevenue, currency)}</s-text>
-                      {/* @ts-ignore */}
                       <s-text tone="subdued" variant="bodySm">
                         Eligible abandoned (min value + contact)
                       </s-text>
                     </s-stack>
                   </s-box>
 
-                  {/* @ts-ignore */}
                   <s-box border="base" borderRadius="base" padding="base" background="subdued">
-                    {/* @ts-ignore */}
                     <s-stack gap="tight">
-                      {/* @ts-ignore */}
                       <s-text tone="subdued" variant="bodySm">Win rate</s-text>
-                      {/* @ts-ignore */}
                       <s-text variant="headingLg">{winRate}%</s-text>
-                      {/* @ts-ignore */}
                       <s-text tone="subdued" variant="bodySm">
                         wins / (wins + eligible at-risk)
                       </s-text>
                     </s-stack>
                   </s-box>
 
-                  {/* @ts-ignore */}
                   <s-box border="base" borderRadius="base" padding="base" background="subdued">
-                    {/* @ts-ignore */}
                     <s-stack gap="tight">
-                      {/* @ts-ignore */}
                       <s-text tone="subdued" variant="bodySm">
                         {mostUrgentAtRisk ? "Most urgent at-risk" : "Most recent update"}
                       </s-text>
-                      {/* @ts-ignore */}
                       <s-text variant="headingMd">
                         {mostUrgentAtRisk
                           ? fmtMoney(Number(mostUrgentAtRisk.value || 0), mostUrgentAtRisk.currency)
@@ -1080,7 +1022,6 @@ export default function Checkouts() {
                             ? fmtMoney(Number(latest.value || 0), latest.currency)
                             : "—"}
                       </s-text>
-                      {/* @ts-ignore */}
                       <s-text tone="subdued" variant="bodySm" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {mostUrgentAtRisk
                           ? `${safeStr(mostUrgentAtRisk.customerName) || `Checkout #${mostUrgentAtRisk.checkoutId}`} • ${formatWhen(mostUrgentAtRisk.updatedAt)}`
@@ -1094,40 +1035,25 @@ export default function Checkouts() {
               </s-stack>
             </s-box>
 
-            {/* @ts-ignore */}
             <s-box border="base" borderRadius="base" padding="base" style={{ background: "rgba(0,128,96,0.08)" }}>
-              {/* @ts-ignore */}
               <s-stack gap="tight">
-                {/* @ts-ignore */}
                 <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center" }}>
-                  {/* @ts-ignore */}
                   <s-text variant="headingMd">Recovered wins</s-text>
-                  {/* @ts-ignore */}
                   <s-badge tone="success">{recoveredCount}</s-badge>
                 </s-stack>
 
-                {/* @ts-ignore */}
                 <s-box border="base" borderRadius="base" style={{ overflow: "hidden", background: "rgba(255,255,255,0.7)" }}>
-                  {/* @ts-ignore */}
                   <s-table style={{ tableLayout: "fixed", width: "100%" }}>
-                    {/* @ts-ignore */}
                     <s-table-header-row>
-                      {/* @ts-ignore */}
                       <s-table-header>Customer</s-table-header>
-                      {/* @ts-ignore */}
                       <s-table-header format="numeric" style={{ width: 130 }}>Amount</s-table-header>
-                      {/* @ts-ignore */}
                       <s-table-header style={{ width: 140 }}>When</s-table-header>
                     </s-table-header-row>
 
-                    {/* @ts-ignore */}
                     <s-table-body>
                       {recoveredRecent.length === 0 ? (
-                        // @ts-ignore
                         <s-table-row>
-                          {/* @ts-ignore */}
                           <s-table-cell colSpan={3}>
-                            {/* @ts-ignore */}
                             <s-text tone="subdued">No recovered checkouts yet.</s-text>
                           </s-table-cell>
                         </s-table-row>
@@ -1137,11 +1063,8 @@ export default function Checkouts() {
                           const whenIso = r.recoveredAt || r.updatedAt;
                           const amt = recoveredRowRevenue(r);
                           return (
-                            // @ts-ignore
                             <s-table-row key={id} clickDelegate={`win-${id}`}>
-                              {/* @ts-ignore */}
                               <s-table-cell style={compactCell}>
-                                {/* @ts-ignore */}
                                 <s-link
                                   id={`win-${id}`}
                                   href="#"
@@ -1150,19 +1073,15 @@ export default function Checkouts() {
                                     setSelectedId(id);
                                   }}
                                 >
-                                  {/* @ts-ignore */}
                                   <s-text fontWeight="semibold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                                     {safeStr(r.customerName) || `Checkout #${id}`}
                                   </s-text>
                                 </s-link>
-                                {/* @ts-ignore */}
                                 <s-text tone="subdued" variant="bodySm">
                                   {safeStr(r.recoveredOrderId) ? `ORDER ${r.recoveredOrderId}` : "RECOVERED"}
                                 </s-text>
                               </s-table-cell>
-                              {/* @ts-ignore */}
                               <s-table-cell style={compactCell}>{fmtMoney(amt, r.currency)}</s-table-cell>
-                              {/* @ts-ignore */}
                               <s-table-cell style={compactCell}>{formatWhen(whenIso)}</s-table-cell>
                             </s-table-row>
                           );
@@ -1176,74 +1095,43 @@ export default function Checkouts() {
           </s-grid>
         </s-section>
 
-        {/* @ts-ignore */}
         <s-section>
-          {/* @ts-ignore */}
           <s-grid gap="base" gridTemplateColumns="@container (inline-size < 1100px) 1fr, 1.15fr 0.85fr">
-            {/* @ts-ignore */}
             <s-section>
-              {/* @ts-ignore */}
               <s-stack gap="tight">
-                {/* @ts-ignore */}
                 <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center", flexWrap: "wrap" }}>
-                  {/* @ts-ignore */}
                   <s-text variant="headingMd">Action queue</s-text>
-                  {/* @ts-ignore */}
                   <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap", alignItems: "center" }}>
-                    {/* @ts-ignore */}
                     <s-badge tone="info">{toReviewCount} to review</s-badge>
-                    {/* @ts-ignore */}
                     <s-badge tone="neutral">Urgency sorted</s-badge>
                   </s-stack>
                 </s-stack>
 
-                {/* @ts-ignore */}
                 <s-box border="base" borderRadius="base" padding="base" background="subdued">
-                  {/* @ts-ignore */}
                   <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap", alignItems: "center" }}>
-                    {/* @ts-ignore */}
                     <s-chip {...chipProps("all")}>All ({counts.all})</s-chip>
-                    {/* @ts-ignore */}
                     <s-chip {...chipProps("abandoned")}>Abandoned ({counts.abandoned})</s-chip>
-                    {/* @ts-ignore */}
                     <s-chip {...chipProps("followups")}>Follow-ups ({counts.followups})</s-chip>
-                    {/* @ts-ignore */}
                     <s-chip {...chipProps("high_intent")}>High intent ({counts.high_intent})</s-chip>
-                    {/* @ts-ignore */}
                     <s-chip {...chipProps("no_answer")}>No answer ({counts.no_answer})</s-chip>
-                    {hasDiscountFields ? (
-                      // @ts-ignore
-                      <s-chip {...chipProps("discounts")}>Discounts ({counts.discounts})</s-chip>
-                    ) : null}
+                    {hasDiscountFields ? <s-chip {...chipProps("discounts")}>Discounts ({counts.discounts})</s-chip> : null}
                   </s-stack>
                 </s-box>
 
-                {/* @ts-ignore */}
                 <s-box border="base" borderRadius="base" style={{ overflow: "hidden" }}>
-                  {/* @ts-ignore */}
                   <s-table style={{ tableLayout: "fixed", width: "100%" }}>
-                    {/* @ts-ignore */}
                     <s-table-header-row>
-                      {/* @ts-ignore */}
                       <s-table-header style={{ width: 60 }}>Img</s-table-header>
-                      {/* @ts-ignore */}
                       <s-table-header>Customer / Cart</s-table-header>
-                      {/* @ts-ignore */}
                       <s-table-header format="numeric" style={{ width: 120 }}>Value</s-table-header>
-                      {/* @ts-ignore */}
                       <s-table-header style={{ width: 200 }}>Signals</s-table-header>
-                      {/* @ts-ignore */}
                       <s-table-header style={{ width: 260 }}>Next step</s-table-header>
                     </s-table-header-row>
 
-                    {/* @ts-ignore */}
                     <s-table-body>
                       {tableRows.length === 0 ? (
-                        // @ts-ignore
                         <s-table-row>
-                          {/* @ts-ignore */}
                           <s-table-cell colSpan={5}>
-                            {/* @ts-ignore */}
                             <s-text tone="subdued">Nothing to work right now.</s-text>
                           </s-table-cell>
                         </s-table-row>
@@ -1267,15 +1155,12 @@ export default function Checkouts() {
                             typeof r.buyProbabilityPct === "number" ? `BUY ${r.buyProbabilityPct}%` : "BUY —";
 
                           return (
-                            // @ts-ignore
                             <s-table-row
                               key={id}
                               clickDelegate={`open-${id}`}
                               style={isSel ? { background: "var(--p-color-bg-surface-secondary)" } : undefined}
                             >
-                              {/* @ts-ignore */}
                               <s-table-cell style={compactCell}>
-                                {/* @ts-ignore */}
                                 <s-thumbnail
                                   src={r.thumbUrl || undefined}
                                   alt={r.thumbUrl ? "Item" : "No image"}
@@ -1283,13 +1168,9 @@ export default function Checkouts() {
                                 />
                               </s-table-cell>
 
-                              {/* @ts-ignore */}
                               <s-table-cell style={compactCell}>
-                                {/* @ts-ignore */}
                                 <s-stack gap="tight">
-                                  {/* @ts-ignore */}
                                   <s-stack direction="inline" gap="tight" style={{ alignItems: "center", flexWrap: "wrap" }}>
-                                    {/* @ts-ignore */}
                                     <s-link
                                       id={`open-${id}`}
                                       href="#"
@@ -1298,18 +1179,12 @@ export default function Checkouts() {
                                         setSelectedId(id);
                                       }}
                                     >
-                                      {/* @ts-ignore */}
                                       <s-text fontWeight="semibold">{customer}</s-text>
                                     </s-link>
-                                    {/* @ts-ignore */}
                                     <s-text tone="subdued" variant="bodySm">#{id}</s-text>
-                                    {r.eligibleAtRisk ? (
-                                      // @ts-ignore
-                                      <s-badge tone="warning">AT-RISK</s-badge>
-                                    ) : null}
+                                    {r.eligibleAtRisk ? <s-badge tone="warning">AT-RISK</s-badge> : null}
                                   </s-stack>
 
-                                  {/* @ts-ignore */}
                                   <s-text
                                     tone="subdued"
                                     variant="bodySm"
@@ -1319,41 +1194,28 @@ export default function Checkouts() {
                                     {cartLine || "—"}
                                   </s-text>
 
-                                  {/* @ts-ignore */}
                                   <s-text tone="subdued" variant="bodySm">
                                     Updated {formatWhen(r.updatedAt)}
                                   </s-text>
                                 </s-stack>
                               </s-table-cell>
 
-                              {/* @ts-ignore */}
                               <s-table-cell style={compactCell}>
-                                {/* @ts-ignore */}
                                 <s-text fontWeight="semibold">{fmtMoney(Number(r.value || 0), r.currency)}</s-text>
-                                {/* @ts-ignore */}
                                 <s-text tone="subdued" variant="bodySm">{r.itemsCount ? `${r.itemsCount} items` : "0 items"}</s-text>
                               </s-table-cell>
 
-                              {/* @ts-ignore */}
                               <s-table-cell style={compactCell}>
-                                {/* @ts-ignore */}
                                 <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
-                                  {/* @ts-ignore */}
                                   <s-badge tone={checkoutTone}>{safeStr(r.status).toUpperCase()}</s-badge>
-                                  {/* @ts-ignore */}
                                   <s-badge tone={callTone}>{r.callStatus ? safeStr(r.callStatus).toUpperCase() : "NO CALL"}</s-badge>
-                                  {/* @ts-ignore */}
                                   <s-badge tone={outcomeTone}>{outcomeLabel(r.callOutcome)}</s-badge>
-                                  {/* @ts-ignore */}
                                   <s-badge tone={typeof r.buyProbabilityPct === "number" ? "info" : "neutral"}>{buyBadge}</s-badge>
                                 </s-stack>
                               </s-table-cell>
 
-                              {/* @ts-ignore */}
                               <s-table-cell style={compactCell}>
-                                {/* @ts-ignore */}
                                 <s-stack gap="tight">
-                                  {/* @ts-ignore */}
                                   <s-text
                                     tone={nextStep === "—" ? "subdued" : "base"}
                                     style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
@@ -1362,13 +1224,10 @@ export default function Checkouts() {
                                     {nextStep}
                                   </s-text>
 
-                                  {/* @ts-ignore */}
                                   <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
-                                    {/* @ts-ignore */}
                                     <s-button variant="secondary" onClick={() => setSelectedId(id)}>
                                       Open
                                     </s-button>
-                                    {/* @ts-ignore */}
                                     <s-button
                                       variant="tertiary"
                                       disabled={!r.recordingUrl}
@@ -1378,7 +1237,6 @@ export default function Checkouts() {
                                     >
                                       Recording
                                     </s-button>
-                                    {/* @ts-ignore */}
                                     <s-button
                                       variant="tertiary"
                                       disabled={!r.logUrl}
@@ -1401,146 +1259,100 @@ export default function Checkouts() {
               </s-stack>
             </s-section>
 
-            {/* @ts-ignore */}
             <s-box style={{ position: "sticky", top: 16, alignSelf: "start" }}>
-              {/* @ts-ignore */}
               <s-section>
-                {/* @ts-ignore */}
                 <s-box border="base" borderRadius="base" padding="base">
-                  {/* @ts-ignore */}
                   <s-stack gap="base">
-                    {/* @ts-ignore */}
                     <s-stack direction="inline" align="space-between" gap="base" style={{ flexWrap: "wrap", alignItems: "center" }}>
-                      {/* @ts-ignore */}
                       <s-stack gap="tight">
-                        {/* @ts-ignore */}
                         <s-text variant="headingMd">Details</s-text>
-                        {/* @ts-ignore */}
                         <s-text tone="subdued" variant="bodySm">
                           {selected ? `Checkout #${selected.checkoutId}` : "Select a checkout"}
                         </s-text>
                       </s-stack>
-                      {loadingDetails ? (
-                        // @ts-ignore
-                        <s-spinner size="small" />
-                      ) : null}
+                      {loadingDetails ? <s-spinner size="small" /> : null}
                     </s-stack>
 
-                    {/* @ts-ignore */}
                     <s-divider />
 
                     {!selected ? (
-                      // @ts-ignore
                       <s-text tone="subdued">—</s-text>
                     ) : loadingDetails ? (
-                      // @ts-ignore
                       <s-text tone="subdued">Loading…</s-text>
                     ) : (
-                      // @ts-ignore
                       <s-stack gap="base">
-                        {/* @ts-ignore */}
                         <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
-                          {/* @ts-ignore */}
                           <s-badge tone={toneForCheckoutStatus(selected.status)}>
                             {safeStr(selected.status).toUpperCase()}
                           </s-badge>
 
                           {details?.latestJob?.status ? (
-                            // @ts-ignore
                             <s-badge tone={toneForJobStatus(details.latestJob.status)}>
                               {safeStr(details.latestJob.status).toUpperCase()}
                             </s-badge>
                           ) : (
-                            // @ts-ignore
                             <s-badge tone="neutral">NO JOB</s-badge>
                           )}
 
-                          {/* @ts-ignore */}
                           <s-badge tone={toneForOutcome(sb?.call_outcome ?? selected.callOutcome)}>
                             {outcomeLabel(sb?.call_outcome ?? selected.callOutcome)}
                           </s-badge>
 
                           {sb?.ai_status ? (
-                            // @ts-ignore
                             <s-badge tone="info">{`AI ${safeStr(sb.ai_status).toUpperCase()}`}</s-badge>
                           ) : (
-                            // @ts-ignore
                             <s-badge tone="neutral">AI —</s-badge>
                           )}
 
                           {typeof sb?.buy_probability === "number" ? (
-                            // @ts-ignore
                             <s-badge tone="info">{`BUY ${Math.round(sb.buy_probability)}%`}</s-badge>
                           ) : typeof selected.buyProbabilityPct === "number" ? (
-                            // @ts-ignore
                             <s-badge tone="info">{`BUY ${selected.buyProbabilityPct}%`}</s-badge>
                           ) : (
-                            // @ts-ignore
                             <s-badge tone="neutral">BUY —</s-badge>
                           )}
 
                           {sb?.answered != null ? (
-                            // @ts-ignore
                             <s-badge tone={sb.answered ? "success" : "warning"}>{sb.answered ? "ANSWERED" : "NO ANSWER"}</s-badge>
                           ) : selected.answered != null ? (
-                            // @ts-ignore
                             <s-badge tone={selected.answered ? "success" : "warning"}>{selected.answered ? "ANSWERED" : "NO ANSWER"}</s-badge>
                           ) : (
-                            // @ts-ignore
                             <s-badge tone="neutral">ANSWER —</s-badge>
                           )}
 
                           {sb?.voicemail != null ? (
-                            // @ts-ignore
                             <s-badge tone={sb.voicemail ? "warning" : "neutral"}>{sb.voicemail ? "VOICEMAIL" : "NO VOICEMAIL"}</s-badge>
                           ) : selected.voicemail != null ? (
-                            // @ts-ignore
                             <s-badge tone={selected.voicemail ? "warning" : "neutral"}>{selected.voicemail ? "VOICEMAIL" : "NO VOICEMAIL"}</s-badge>
                           ) : (
-                            // @ts-ignore
                             <s-badge tone="neutral">VOICEMAIL —</s-badge>
                           )}
 
-                          {selected.recoveredOrderId ? (
-                            // @ts-ignore
-                            <s-badge tone="success">{`ORDER ${selected.recoveredOrderId}`}</s-badge>
-                          ) : null}
+                          {selected.recoveredOrderId ? <s-badge tone="success">{`ORDER ${selected.recoveredOrderId}`}</s-badge> : null}
                         </s-stack>
 
-                        {/* @ts-ignore */}
                         <s-box padding="base" border="base" borderRadius="base" background="subdued">
-                          {/* @ts-ignore */}
                           <s-grid gap="base" gridTemplateColumns="1fr 1fr">
-                            {/* @ts-ignore */}
                             <s-stack gap="tight">
-                              {/* @ts-ignore */}
                               <s-text tone="subdued" variant="bodySm">Customer</s-text>
-                              {/* @ts-ignore */}
                               <s-text fontWeight="semibold">{tiny(details?.checkout?.customerName ?? selected.customerName)}</s-text>
-                              {/* @ts-ignore */}
                               <s-text tone="subdued" variant="bodySm">{tiny(details?.checkout?.phone ?? selected.phone)}</s-text>
-                              {/* @ts-ignore */}
                               <s-text tone="subdued" variant="bodySm">{tiny(details?.checkout?.email ?? selected.email)}</s-text>
                             </s-stack>
 
-                            {/* @ts-ignore */}
                             <s-stack gap="tight">
-                              {/* @ts-ignore */}
                               <s-text tone="subdued" variant="bodySm">
                                 {selected.recoveredOrderId ? "Recovered order total" : "Cart total"}
                               </s-text>
-                              {/* @ts-ignore */}
                               <s-text fontWeight="semibold">
                                 {fmtMoney(
                                   Number(selected.recoveredAmount ?? details?.checkout?.value ?? selected.value ?? 0),
                                   String(selected.currency),
                                 )}
                               </s-text>
-                              {/* @ts-ignore */}
                               <s-text tone="subdued" variant="bodySm">
                                 Updated {formatWhen(details?.checkout?.updatedAt ?? selected.updatedAt)}
                               </s-text>
-                              {/* @ts-ignore */}
                               <s-text tone="subdued" variant="bodySm">
                                 {selected.recoveredAt
                                   ? `Recovered ${formatWhen(selected.recoveredAt)}`
@@ -1554,9 +1366,7 @@ export default function Checkouts() {
                           </s-grid>
                         </s-box>
 
-                        {/* @ts-ignore */}
                         <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
-                          {/* @ts-ignore */}
                           <s-button
                             variant="primary"
                             disabled={!effectiveRecordingUrl}
@@ -1567,7 +1377,6 @@ export default function Checkouts() {
                             Recording
                           </s-button>
 
-                          {/* @ts-ignore */}
                           <s-button
                             variant="secondary"
                             disabled={!effectiveLogUrl}
@@ -1578,34 +1387,25 @@ export default function Checkouts() {
                             Logs
                           </s-button>
 
-                          {/* @ts-ignore */}
                           <s-button variant="secondary" disabled={!safeStr(sb?.transcript).trim()} onClick={() => setModalKind("transcript")}>
                             Transcript
                           </s-button>
 
-                          {/* @ts-ignore */}
                           <s-button variant="secondary" onClick={() => setModalKind("evidence")}>
                             Evidence
                           </s-button>
 
-                          {/* @ts-ignore */}
                           <s-button variant="secondary" onClick={() => setModalKind("raw")}>
                             Raw
                           </s-button>
                         </s-stack>
 
-                        {/* @ts-ignore */}
                         <s-box border="base" borderRadius="base" padding="base" style={{ background: "rgba(0,91,211,0.06)" }}>
-                          {/* @ts-ignore */}
                           <s-stack gap="tight">
-                            {/* @ts-ignore */}
                             <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center", flexWrap: "wrap" }}>
-                              {/* @ts-ignore */}
                               <s-text variant="headingSm">Next best action</s-text>
-                              {/* @ts-ignore */}
                               <s-badge tone="info">AI</s-badge>
                             </s-stack>
-                            {/* @ts-ignore */}
                             <s-text>
                               {safeStr(sb?.next_best_action || sb?.best_next_action).trim() ||
                                 safeStr(selected.nextBestAction).trim() ||
@@ -1614,15 +1414,10 @@ export default function Checkouts() {
                           </s-stack>
                         </s-box>
 
-                        {/* @ts-ignore */}
                         <s-box border="base" borderRadius="base" padding="base">
-                          {/* @ts-ignore */}
                           <s-stack gap="tight">
-                            {/* @ts-ignore */}
                             <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center", flexWrap: "wrap" }}>
-                              {/* @ts-ignore */}
                               <s-text variant="headingSm">Follow-up message</s-text>
-                              {/* @ts-ignore */}
                               <s-button
                                 variant="tertiary"
                                 disabled={!safeStr(sb?.follow_up_message || selected.followUpMessage).trim()}
@@ -1638,87 +1433,55 @@ export default function Checkouts() {
                           </s-stack>
                         </s-box>
 
-                        {/* @ts-ignore */}
                         <s-box border="base" borderRadius="base" padding="base">
-                          {/* @ts-ignore */}
                           <s-stack gap="tight">
-                            {/* @ts-ignore */}
                             <s-text variant="headingSm">Conversation signals</s-text>
-                            {/* @ts-ignore */}
                             <s-grid gap="base" gridTemplateColumns="1fr 1fr">
-                              {/* @ts-ignore */}
                               <s-stack gap="tight">
-                                {/* @ts-ignore */}
                                 <s-text tone="subdued" variant="bodySm">Intent</s-text>
-                                {/* @ts-ignore */}
                                 <s-text>{tiny(sb?.customer_intent || selected.customerIntent)}</s-text>
                               </s-stack>
 
-                              {/* @ts-ignore */}
                               <s-stack gap="tight">
-                                {/* @ts-ignore */}
                                 <s-text tone="subdued" variant="bodySm">Sentiment</s-text>
-                                {/* @ts-ignore */}
                                 <s-text>{tiny(sb?.sentiment || selected.sentiment)}</s-text>
                               </s-stack>
 
-                              {/* @ts-ignore */}
                               <s-stack gap="tight">
-                                {/* @ts-ignore */}
                                 <s-text tone="subdued" variant="bodySm">Tone</s-text>
-                                {/* @ts-ignore */}
                                 <s-text>{tiny(sb?.tone || selected.tone)}</s-text>
                               </s-stack>
 
-                              {/* @ts-ignore */}
                               <s-stack gap="tight">
-                                {/* @ts-ignore */}
                                 <s-text tone="subdued" variant="bodySm">End reason</s-text>
-                                {/* @ts-ignore */}
                                 <s-text>{tiny(sb?.ended_reason || selected.endedReason)}</s-text>
                               </s-stack>
 
-                              {/* @ts-ignore */}
                               <s-stack gap="tight">
-                                {/* @ts-ignore */}
                                 <s-text tone="subdued" variant="bodySm">Latest status</s-text>
-                                {/* @ts-ignore */}
                                 <s-text>{tiny(sb?.latest_status || selected.latestStatus)}</s-text>
                               </s-stack>
 
-                              {/* @ts-ignore */}
                               <s-stack gap="tight">
-                                {/* @ts-ignore */}
                                 <s-text tone="subdued" variant="bodySm">AI status</s-text>
-                                {/* @ts-ignore */}
                                 <s-text>{tiny(sb?.ai_status || selected.aiStatus)}</s-text>
                               </s-stack>
                             </s-grid>
                           </s-stack>
                         </s-box>
 
-                        {/* @ts-ignore */}
                         <s-box border="base" borderRadius="base" style={{ overflow: "hidden" }}>
-                          {/* @ts-ignore */}
                           <s-table style={{ tableLayout: "fixed", width: "100%" }}>
-                            {/* @ts-ignore */}
                             <s-table-header-row>
-                              {/* @ts-ignore */}
                               <s-table-header style={{ width: 60 }}>Img</s-table-header>
-                              {/* @ts-ignore */}
                               <s-table-header>Item</s-table-header>
-                              {/* @ts-ignore */}
                               <s-table-header style={{ width: 80 }} format="numeric">Qty</s-table-header>
                             </s-table-header-row>
 
-                            {/* @ts-ignore */}
                             <s-table-body>
                               {itemsForDetails.length === 0 ? (
-                                // @ts-ignore
                                 <s-table-row>
-                                  {/* @ts-ignore */}
                                   <s-table-cell colSpan={3}>
-                                    {/* @ts-ignore */}
                                     <s-text tone="subdued">—</s-text>
                                   </s-table-cell>
                                 </s-table-row>
@@ -1730,25 +1493,18 @@ export default function Checkouts() {
                                   const img = pickThumbFromItem(it);
 
                                   return (
-                                    // @ts-ignore
                                     <s-table-row key={`${title}-${idx}`}>
-                                      {/* @ts-ignore */}
                                       <s-table-cell style={compactCell}>
-                                        {/* @ts-ignore */}
                                         <s-thumbnail src={img || undefined} alt={img ? title : "No image"} size="small-200" />
                                       </s-table-cell>
-                                      {/* @ts-ignore */}
                                       <s-table-cell style={compactCell}>
-                                        {/* @ts-ignore */}
                                         <s-text fontWeight="semibold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                                           {title}
                                         </s-text>
                                         {safeStr(it.variantTitle) ? (
-                                          // @ts-ignore
                                           <s-text tone="subdued" variant="bodySm">{safeStr(it.variantTitle)}</s-text>
                                         ) : null}
                                       </s-table-cell>
-                                      {/* @ts-ignore */}
                                       <s-table-cell style={compactCell}>{qty}</s-table-cell>
                                     </s-table-row>
                                   );
@@ -1767,7 +1523,6 @@ export default function Checkouts() {
         </s-section>
       </s-page>
 
-      {/* @ts-ignore */}
       <s-modal
         id="checkouts-modal"
         heading={
@@ -1780,74 +1535,53 @@ export default function Checkouts() {
         {modalKind === "transcript" ? (
           <pre style={mono}>{safeStr(sb?.transcript) || "—"}</pre>
         ) : modalKind === "evidence" ? (
-          // @ts-ignore
           <s-stack gap="base">
-            {/* @ts-ignore */}
             <s-grid gap="base" gridTemplateColumns="@container (inline-size < 900px) 1fr, 1fr 1fr">
-              {/* @ts-ignore */}
               <s-box border="base" borderRadius="base" padding="base">
-                {/* @ts-ignore */}
                 <s-text variant="headingSm">Summary</s-text>
                 <pre style={mono}>{safeStr(sb?.summary_clean || sb?.summary) || "—"}</pre>
               </s-box>
 
-              {/* @ts-ignore */}
               <s-box border="base" borderRadius="base" padding="base">
-                {/* @ts-ignore */}
                 <s-text variant="headingSm">Next best action</s-text>
                 <pre style={mono}>{safeStr(sb?.next_best_action || sb?.best_next_action) || "—"}</pre>
               </s-box>
 
-              {/* @ts-ignore */}
               <s-box border="base" borderRadius="base" padding="base">
-                {/* @ts-ignore */}
                 <s-text variant="headingSm">Follow-up message</s-text>
                 <pre style={mono}>{safeStr(sb?.follow_up_message) || "—"}</pre>
               </s-box>
             </s-grid>
 
-            {/* @ts-ignore */}
             <s-grid gap="base" gridTemplateColumns="@container (inline-size < 900px) 1fr, 1fr 1fr">
-              {/* @ts-ignore */}
               <s-box border="base" borderRadius="base" padding="base">
-                {/* @ts-ignore */}
                 <s-text variant="headingSm">Key quotes</s-text>
                 <pre style={mono}>{safeStr(sb?.key_quotes_text || sb?.key_quotes) || "—"}</pre>
               </s-box>
 
-              {/* @ts-ignore */}
               <s-box border="base" borderRadius="base" padding="base">
-                {/* @ts-ignore */}
                 <s-text variant="headingSm">Objections</s-text>
                 <pre style={mono}>{safeStr(sb?.objections_text || sb?.objections) || "—"}</pre>
               </s-box>
 
-              {/* @ts-ignore */}
               <s-box border="base" borderRadius="base" padding="base">
-                {/* @ts-ignore */}
                 <s-text variant="headingSm">Issues to fix</s-text>
                 <pre style={mono}>{safeStr(sb?.issues_to_fix_text || sb?.issues_to_fix) || "—"}</pre>
               </s-box>
 
-              {/* @ts-ignore */}
               <s-box border="base" borderRadius="base" padding="base">
-                {/* @ts-ignore */}
                 <s-text variant="headingSm">Tags</s-text>
                 <pre style={mono}>
                   {safeStr(sb?.tagcsv || (Array.isArray(sb?.tags) ? sb.tags.join(", ") : "")) || "—"}
                 </pre>
               </s-box>
 
-              {/* @ts-ignore */}
               <s-box border="base" borderRadius="base" padding="base">
-                {/* @ts-ignore */}
                 <s-text variant="headingSm">Ended reason</s-text>
                 <pre style={mono}>{safeStr(sb?.ended_reason) || "—"}</pre>
               </s-box>
 
-              {/* @ts-ignore */}
               <s-box border="base" borderRadius="base" padding="base">
-                {/* @ts-ignore */}
                 <s-text variant="headingSm">Latest status</s-text>
                 <pre style={mono}>{safeStr(sb?.latest_status) || "—"}</pre>
               </s-box>
@@ -1874,7 +1608,6 @@ export default function Checkouts() {
           </pre>
         ) : null}
 
-        {/* @ts-ignore */}
         <s-button slot="secondary-actions" variant="secondary" onClick={() => setModalKind(null)}>
           Close
         </s-button>

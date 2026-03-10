@@ -7,6 +7,11 @@ function toFloat(v: any) {
   return Number.isFinite(n) ? n : null;
 }
 
+function clean(v: any): string | null {
+  const s = String(v ?? "").trim();
+  return s ? s : null;
+}
+
 export async function action({ request }: ActionFunctionArgs) {
   const { topic, shop, payload } = await authenticate.webhook(request);
 
@@ -14,11 +19,11 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const o = payload as any;
 
-  const orderId = o?.id != null ? String(o.id) : "";
+  const orderId = clean(o?.id);
   if (!orderId) return new Response("Invalid payload", { status: 200 });
 
-  const checkoutId = o?.checkout_id != null ? String(o.checkout_id) : null;
-  const checkoutToken = o?.checkout_token != null ? String(o.checkout_token) : null;
+  const checkoutId = clean(o?.checkout_id);
+  const checkoutToken = clean(o?.checkout_token);
 
   const total =
     toFloat(
@@ -29,7 +34,7 @@ export async function action({ request }: ActionFunctionArgs) {
     ) ?? null;
 
   const currency = String(o?.currency || o?.currency_code || "USD").toUpperCase();
-  const financial = o?.financial_status ? String(o.financial_status) : null;
+  const financial = clean(o?.financial_status);
 
   await db.order.upsert({
     where: { shop_orderId: { shop, orderId } },
@@ -53,53 +58,72 @@ export async function action({ request }: ActionFunctionArgs) {
     },
   });
 
-  // Attribution only.
-  // Order table is now the source of truth for recovered state.
-  if (checkoutId) {
-    const lastJob = await db.callJob.findFirst({
-      where: {
-        shop,
-        checkoutId,
-        provider: "vapi",
-      },
-      orderBy: { createdAt: "desc" },
-      select: { id: true },
-    });
+  // Canonical mapping rule:
+  // 1) match by checkoutId
+  // 2) else match by checkoutToken -> Checkout.checkoutId
+  const matchedCheckout = await db.checkout.findFirst({
+    where: {
+      shop,
+      OR: [
+        ...(checkoutId ? [{ checkoutId }] : []),
+        ...(!checkoutId && checkoutToken ? [{ checkoutId: checkoutToken }] : []),
+      ],
+    },
+    select: {
+      checkoutId: true,
+    },
+  });
 
-    if (lastJob) {
-      await db.callJob.update({
-        where: { id: lastJob.id },
-        data: {
-          attributedAt: new Date(),
-          attributedOrderId: orderId,
-          attributedAmount: total ?? undefined,
-        },
-      });
-    }
+  if (!matchedCheckout) {
+    return new Response("OK", { status: 200 });
+  }
 
-    await db.callJob.updateMany({
-      where: {
-        shop,
-        checkoutId,
-        status: { in: ["QUEUED", "CALLING"] },
-      },
+  const matchedCheckoutId = String(matchedCheckout.checkoutId);
+
+  const lastJob = await db.callJob.findFirst({
+    where: {
+      shop,
+      checkoutId: matchedCheckoutId,
+      provider: "vapi",
+    },
+    orderBy: { createdAt: "desc" },
+    select: { id: true },
+  });
+
+  if (lastJob) {
+    await db.callJob.update({
+      where: { id: lastJob.id },
       data: {
-        status: "CANCELED",
-        outcome: "ORDER_PLACED",
-      },
-    });
-
-    // Optional display-only sync:
-    // keep checkout no longer abandoned once order exists,
-    // but do NOT write recovered amount/order fields as truth.
-    await db.checkout.updateMany({
-      where: { shop, checkoutId },
-      data: {
-        status: "CONVERTED",
-        abandonedAt: null,
+        attributedAt: new Date(),
+        attributedOrderId: orderId,
+        attributedAmount: total ?? undefined,
       },
     });
   }
+
+  await db.callJob.updateMany({
+    where: {
+      shop,
+      checkoutId: matchedCheckoutId,
+      status: { in: ["QUEUED", "CALLING"] },
+    },
+    data: {
+      status: "CANCELED",
+      outcome: "ORDER_PLACED",
+    },
+  });
+
+  // Display/cache sync only. Order remains source of truth.
+  await db.checkout.updateMany({
+    where: { shop, checkoutId: matchedCheckoutId },
+    data: {
+      status: "CONVERTED",
+      abandonedAt: null,
+      recoveredAt: new Date(),
+      recoveredOrderId: orderId,
+      recoveredAmount: total ?? undefined,
+    },
+  });
 
   return new Response("OK", { status: 200 });
 }
