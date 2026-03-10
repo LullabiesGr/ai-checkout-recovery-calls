@@ -58,6 +58,7 @@ function asErrorMessage(e: unknown) {
       return "GraphQL error";
     }
   }
+
   if (anyE?.response?.errors) {
     try {
       return JSON.stringify(anyE.response.errors);
@@ -74,9 +75,6 @@ function asErrorMessage(e: unknown) {
   }
 }
 
-/**
- * Keep ONLY embedded params (shop/host/embedded/locale). Drop id_token/hmac/session/etc.
- */
 function embeddedPath(pathname: string, request: Request, extra?: Record<string, string>) {
   const req = new URL(request.url);
   const out = new URL(pathname, req.origin);
@@ -85,6 +83,7 @@ function embeddedPath(pathname: string, request: Request, extra?: Record<string,
     const v = req.searchParams.get(k);
     if (v) out.searchParams.set(k, v);
   }
+
   if (extra) {
     for (const [k, v] of Object.entries(extra)) {
       if (v != null && String(v).length) out.searchParams.set(k, String(v));
@@ -95,24 +94,19 @@ function embeddedPath(pathname: string, request: Request, extra?: Record<string,
   return qs ? `${out.pathname}?${qs}` : out.pathname;
 }
 
-/**
- * Admin embedded URL (Shopify will iframe your app).
- */
 function billingAdminUrl(shop: string, extra?: Record<string, string>) {
   const apiKey = requiredEnv("SHOPIFY_API_KEY");
   const u = new URL(`https://${shop}/admin/apps/${apiKey}/app/billing`);
+
   if (extra) {
     for (const [k, v] of Object.entries(extra)) {
       if (v != null && String(v).length) u.searchParams.set(k, String(v));
     }
   }
+
   return u.toString();
 }
 
-/**
- * Return URL for Billing confirmation (MUST be on your app domain).
- * Keep it short to avoid the 255-char limit.
- */
 function billingReturnUrlOnApp(request: Request, shop: string) {
   const base =
     (process.env.SHOPIFY_APP_URL ?? process.env.APP_URL ?? new URL(request.url).origin).replace(/\/+$/, "");
@@ -172,20 +166,22 @@ export async function action({ request }: ActionFunctionArgs) {
   const couponCode = String(fd.get("coupon") || "").trim();
 
   const backToBilling = (extra?: Record<string, string>) => {
-    const location = wantsTop
-      ? billingAdminUrl(shop, extra)
-      : embeddedPath("/app/billing", request, extra);
+    const location = wantsTop ? billingAdminUrl(shop, extra) : embeddedPath("/app/billing", request, extra);
 
     return new Response(null, { status: 303, headers: { Location: location } });
   };
 
   const fail = (msg: string) => backToBilling({ billing_error: msg });
 
-  // If a non-_top submit ever hits this, still try to bust out safely.
   const redirectTopHtml = (url: string) => {
-    const html = `<!doctype html><html><head><meta charset="utf-8" /></head>
-<body><script>window.top.location.href=${JSON.stringify(url)};</script></body></html>`;
-    return new Response(html, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+    const html = `<!doctype html><html><head><meta charset="utf-8" /></head><body><script>window.top.location.href=${JSON.stringify(
+      url
+    )};</script></body></html>`;
+
+    return new Response(html, {
+      status: 200,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
   };
 
   try {
@@ -197,8 +193,19 @@ export async function action({ request }: ActionFunctionArgs) {
         await cancelActiveSubscription({ shop, admin, prorate: false });
         await db.shopBilling.update({
           where: { shop },
-          data: { plan: "FREE", status: "NONE", pendingPlan: null, pendingCouponId: null, pendingCouponCode: null },
+          data: {
+            plan: "FREE",
+            status: "NONE",
+            subscriptionId: null,
+            usageLineItemId: null,
+            recurringLineItemId: null,
+            pendingPlan: null,
+            pendingCouponId: null,
+            pendingCouponCode: null,
+            appliedCouponCode: null,
+          },
         });
+
         return backToBilling({ ok: "1" });
       }
 
@@ -256,13 +263,26 @@ export default function BillingRoute() {
   const activeIntent = navigation.formData?.get("intent")?.toString() ?? "";
   const activePlan = navigation.formData?.get("plan")?.toString() ?? "";
 
-  const activePlanKey = String(billing?.plan || "FREE") as PlanKey;
-  const status = String(billing?.status || "NONE");
+  const rawPlanKey: PlanKey = isPlanKey(billing?.plan) ? (billing.plan as PlanKey) : "FREE";
+  const pendingPlanKey: PlanKey | null = isPlanKey(billing?.pendingPlan)
+    ? (billing.pendingPlan as PlanKey)
+    : null;
+
+  const status = String(billing?.status || "NONE").toUpperCase();
+
+  const effectivePlanKey: PlanKey =
+    status === "ACTIVE"
+      ? rawPlanKey
+      : status === "PENDING" && pendingPlanKey
+        ? pendingPlanKey
+        : "FREE";
+
+  const hasActivePaidPlan = status === "ACTIVE" && effectivePlanKey !== "FREE";
+  const plan = PLANS[effectivePlanKey] ?? PLANS.FREE;
 
   const freeRemainingSec = Math.max(0, 10 * 60 - Number(billing?.freeSecondsUsed || 0));
   const freeRemainingMin = Math.floor(freeRemainingSec / 60);
 
-  const plan = PLANS[activePlanKey] ?? PLANS.FREE;
   const includedUsedSec = Number(billing?.includedSecondsUsed || 0);
   const includedTotalSec = plan.includedMinutes * 60;
   const includedRemainingMin = Math.max(0, Math.floor((includedTotalSec - includedUsedSec) / 60));
@@ -270,8 +290,20 @@ export default function BillingRoute() {
   const balanceUsed = usage?.balanceUsed ? Number(usage.balanceUsed.amount) : null;
   const capAmount = usage?.cappedAmount ? Number(usage.cappedAmount.amount) : null;
 
-  const prefillCoupon = String(billing?.pendingCouponCode || billing?.appliedCouponCode || "");
+  const prefillCoupon = String(
+    status === "PENDING"
+      ? billing?.pendingCouponCode || billing?.appliedCouponCode || ""
+      : billing?.appliedCouponCode || ""
+  );
+
   const [coupon, setCoupon] = React.useState(prefillCoupon);
+
+  React.useEffect(() => {
+    setCoupon(prefillCoupon);
+  }, [prefillCoupon]);
+
+  const currentCouponLabel =
+    status === "PENDING" && billing?.pendingCouponCode ? "Pending coupon" : "Coupon";
 
   return (
     <Page title="Billing" subtitle={shop}>
@@ -293,16 +325,16 @@ export default function BillingRoute() {
               </InlineStack>
 
               <Text as="p">
-                Plan: <b>{activePlanKey}</b>
+                Plan: <b>{effectivePlanKey}</b>
               </Text>
 
-              {billing?.appliedCouponCode ? (
+              {prefillCoupon ? (
                 <Text as="p">
-                  Coupon: <b>{String(billing.appliedCouponCode)}</b>
+                  {currentCouponLabel}: <b>{prefillCoupon}</b>
                 </Text>
               ) : null}
 
-              {activePlanKey === "FREE" ? (
+              {effectivePlanKey === "FREE" ? (
                 <Text as="p">
                   Free minutes remaining: <b>{freeRemainingMin} min</b>
                 </Text>
@@ -311,9 +343,11 @@ export default function BillingRoute() {
                   <Text as="p">
                     Included minutes remaining (this cycle): <b>{includedRemainingMin} min</b>
                   </Text>
+
                   {balanceUsed != null && capAmount != null ? (
                     <Text as="p">
-                      Usage spend (this cycle): <b>{formatEUR(balanceUsed)}</b> / cap <b>{formatEUR(capAmount)}</b>
+                      Usage spend (this cycle): <b>{formatEUR(balanceUsed)}</b> / cap{" "}
+                      <b>{formatEUR(capAmount)}</b>
                     </Text>
                   ) : null}
                 </>
@@ -322,7 +356,7 @@ export default function BillingRoute() {
               <Divider />
 
               <InlineStack gap="200">
-                {activePlanKey !== "FREE" ? (
+                {hasActivePaidPlan ? (
                   <Form method="post">
                     <input type="hidden" name="intent" value="cancel" />
                     <Button tone="critical" submit loading={isBusy && activeIntent === "cancel"}>
@@ -331,7 +365,7 @@ export default function BillingRoute() {
                   </Form>
                 ) : null}
 
-                {activePlanKey !== "FREE" ? (
+                {hasActivePaidPlan ? (
                   <Form method="post" reloadDocument target="_top">
                     <input type="hidden" name="intent" value="increase_cap" />
                     <input type="hidden" name="top" value="1" />
@@ -367,20 +401,37 @@ export default function BillingRoute() {
 
               {(["FREE", "STARTER", "PRO", "SCALE", "PAYG"] as PlanKey[]).map((k) => {
                 const p = PLANS[k];
-                const isActive = k === activePlanKey;
-                const isThisSubmitting = isBusy && activeIntent === "select_plan" && activePlan === k;
+                const isSelected =
+                  status === "ACTIVE"
+                    ? k === rawPlanKey
+                    : status === "PENDING" && pendingPlanKey
+                      ? k === pendingPlanKey
+                      : k === "FREE";
 
+                const badgeText =
+                  status === "PENDING" && pendingPlanKey === k
+                    ? "Pending"
+                    : status === "ACTIVE" && rawPlanKey === k
+                      ? "Active"
+                      : null;
+
+                const badgeTone =
+                  status === "PENDING" && pendingPlanKey === k
+                    ? ("attention" as const)
+                    : ("success" as const);
+
+                const isThisSubmitting = isBusy && activeIntent === "select_plan" && activePlan === k;
                 const needsConfirmation = k !== "FREE";
                 const formProps: any = needsConfirmation ? { reloadDocument: true, target: "_top" } : {};
 
                 return (
-                  <Card key={k} sectioned>
+                  <Card key={k}>
                     <BlockStack gap="200">
                       <InlineStack align="space-between">
                         <Text as="h3" variant="headingSm">
                           {p.title} ({k})
                         </Text>
-                        {isActive ? <Badge tone="success">Active</Badge> : null}
+                        {badgeText ? <Badge tone={badgeTone}>{badgeText}</Badge> : null}
                       </InlineStack>
 
                       {k === "FREE" ? (
@@ -401,8 +452,8 @@ export default function BillingRoute() {
                         <input type="hidden" name="plan" value={k} />
                         <input type="hidden" name="coupon" value={coupon.trim()} />
                         {needsConfirmation ? <input type="hidden" name="top" value="1" /> : null}
-                        <Button submit disabled={isActive} loading={isThisSubmitting}>
-                          {isActive ? "Selected" : "Select"}
+                        <Button submit disabled={isSelected} loading={isThisSubmitting}>
+                          {isSelected ? "Selected" : "Select"}
                         </Button>
                       </Form>
                     </BlockStack>

@@ -4,7 +4,7 @@ import { sessionStorage } from "../shopify.server";
 import { BILLING_CURRENCY, PLANS, type PlanKey, isPlanKey } from "./billingPlans.server";
 
 type AdminLike = {
-  graphql: (query: string, options?: any) => Promise<any>; // Shopify templates may return a Response
+  graphql: (query: string, options?: any) => Promise<any>;
 };
 
 const API_VERSION = process.env.SHOPIFY_API_VERSION ?? "2025-07";
@@ -25,7 +25,8 @@ function asErrorMessage(e: unknown) {
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
   try {
-    return JSON.stringify(e);
+    const s = JSON.stringify(e);
+    return s === "{}" ? "Unknown error" : s;
   } catch {
     return String(e);
   }
@@ -33,6 +34,59 @@ function asErrorMessage(e: unknown) {
 
 function normalizeCouponCode(v: unknown) {
   return String(v ?? "").trim().toUpperCase();
+}
+
+function extractPlanFromSubscriptionName(name: unknown): PlanKey | null {
+  const s = String(name ?? "").trim().toUpperCase();
+  if (!s) return null;
+
+  const prefixed = "AI CHECKOUT CALLS - ";
+  if (s.startsWith(prefixed)) {
+    const maybePlan = s.slice(prefixed.length).trim();
+    return isPlanKey(maybePlan) ? maybePlan : null;
+  }
+
+  const match = s.match(/\b(FREE|STARTER|PRO|SCALE|PAYG)\b/);
+  if (!match) return null;
+
+  const maybePlan = match[1];
+  return isPlanKey(maybePlan) ? maybePlan : null;
+}
+
+function getSubscriptionLineItems(subscription: any) {
+  const lineItems = Array.isArray(subscription?.lineItems) ? subscription.lineItems : [];
+
+  const usageLine =
+    lineItems.find((li: any) => li?.plan?.pricingDetails?.__typename === "AppUsagePricing") ?? null;
+
+  const recurringLine =
+    lineItems.find((li: any) => li?.plan?.pricingDetails?.__typename === "AppRecurringPricing") ?? null;
+
+  return { usageLine, recurringLine };
+}
+
+function pickCurrentSubscription(subs: any[]) {
+  const list = Array.isArray(subs) ? subs.filter(Boolean) : [];
+  if (!list.length) return null;
+
+  const score = (s: any) => {
+    const status = String(s?.status ?? "").toUpperCase();
+    const { usageLine, recurringLine } = getSubscriptionLineItems(s);
+    const planFromName = extractPlanFromSubscriptionName(s?.name);
+
+    let total = 0;
+    if (status === "ACTIVE") total += 100;
+    else if (status === "PENDING") total += 80;
+    else if (status === "ACCEPTED") total += 60;
+
+    if (planFromName) total += 20;
+    if (usageLine) total += 10;
+    if (recurringLine) total += 5;
+
+    return total;
+  };
+
+  return [...list].sort((a, b) => score(b) - score(a))[0] ?? null;
 }
 
 async function graphqlShop(shop: string, query: string, variables: any, admin?: AdminLike) {
@@ -71,7 +125,7 @@ export async function ensureBillingRow(shop: string) {
 type CouponResolve = {
   couponId: string;
   code: string;
-  discountInput: any; // AppSubscriptionDiscountInput
+  discountInput: any;
 };
 
 async function resolveCouponForPlan(args: { shop: string; plan: PlanKey; couponCode: string }) {
@@ -110,8 +164,9 @@ async function resolveCouponForPlan(args: { shop: string; plan: PlanKey; couponC
 
   if (type === "PERCENT") {
     const percentage = Number(coupon.percentage ?? 0);
-    // Shopify expects decimal fraction (0.20 = 20%)
-    if (!(percentage > 0 && percentage < 1)) throw new Error("Coupon misconfigured (percentage)");
+    if (!(percentage > 0 && percentage < 1)) {
+      throw new Error("Coupon misconfigured (percentage)");
+    }
     value = { percentage };
   } else if (type === "AMOUNT") {
     const amount = Number(coupon.amountOffEUR ?? 0);
@@ -160,16 +215,16 @@ query BillingState {
 }`;
 
   const json = await graphqlShop(shop, q, {}, admin);
-  if (json?.errors?.length) throw new Error(json.errors.map((e: any) => e.message).join(" | "));
+  if (json?.errors?.length) {
+    throw new Error(json.errors.map((e: any) => e.message).join(" | "));
+  }
 
   const subs = json?.data?.currentAppInstallation?.activeSubscriptions ?? [];
-  const ours = subs.find((s: any) => String(s?.name ?? "").startsWith("AI Checkout Calls - "));
+  const ours = pickCurrentSubscription(subs);
 
   const usageDetails = (() => {
     if (!ours) return null;
-    const usageLine = (ours.lineItems ?? []).find(
-      (li: any) => li?.plan?.pricingDetails?.__typename === "AppUsagePricing"
-    );
+    const { usageLine } = getSubscriptionLineItems(ours);
     return usageLine?.plan?.pricingDetails ?? null;
   })();
 
@@ -184,6 +239,7 @@ query BillingState {
       await tx.shopBilling.update({
         where: { shop },
         data: {
+          plan: "FREE",
           status: "NONE",
           subscriptionId: null,
           usageLineItemId: null,
@@ -191,22 +247,27 @@ query BillingState {
           pendingPlan: null,
           pendingCouponId: null,
           pendingCouponCode: null,
+          appliedCouponCode: null,
         },
       });
       return;
     }
 
-    const planKey = String(ours.name).replace("AI Checkout Calls - ", "").trim().toUpperCase();
-    const normalizedPlan: PlanKey = isPlanKey(planKey) ? (planKey as PlanKey) : "STARTER";
-
-    const usageLine = (ours.lineItems ?? []).find(
-      (li: any) => li?.plan?.pricingDetails?.__typename === "AppUsagePricing"
-    );
-    const recurLine = (ours.lineItems ?? []).find(
-      (li: any) => li?.plan?.pricingDetails?.__typename === "AppRecurringPricing"
-    );
-
+    const { usageLine, recurringLine } = getSubscriptionLineItems(ours);
     const status = String(ours.status ?? "ACTIVE").toUpperCase();
+
+    const detectedPlan = extractPlanFromSubscriptionName(ours.name);
+    const currentRowPlan = isPlanKey(row.plan) ? (row.plan as PlanKey) : "FREE";
+
+    const normalizedPlan: PlanKey =
+      detectedPlan ??
+      (currentRowPlan !== "FREE"
+        ? currentRowPlan
+        : recurringLine
+          ? "STARTER"
+          : usageLine
+            ? "PAYG"
+            : "FREE");
 
     await tx.shopBilling.update({
       where: { shop },
@@ -216,11 +277,10 @@ query BillingState {
         status: status as any,
         subscriptionId: ours.id,
         usageLineItemId: usageLine?.id ?? null,
-        recurringLineItemId: recurLine?.id ?? null,
+        recurringLineItemId: recurringLine?.id ?? null,
       },
     });
 
-    // Finalize coupon redemption only once the subscription is ACTIVE.
     if (status === "ACTIVE" && row.pendingCouponId) {
       const already = await tx.billingCouponRedemption.findUnique({
         where: { couponId_shop: { couponId: row.pendingCouponId, shop } },
@@ -280,7 +340,10 @@ export async function createSubscriptionForPlan(args: {
       interval: "EVERY_30_DAYS",
       price: { amount: p.recurringMonthlyEUR, currencyCode: BILLING_CURRENCY },
     };
-    if (coupon) recurring.discount = coupon.discountInput;
+
+    if (coupon) {
+      recurring.discount = coupon.discountInput;
+    }
 
     lineItems.push({
       plan: {
@@ -342,19 +405,18 @@ mutation AppSubscriptionCreate(
   };
 
   const json = await graphqlShop(shop, m, vars, admin);
-  if (json?.errors?.length) throw new Error(json.errors.map((e: any) => e.message).join(" | "));
+  if (json?.errors?.length) {
+    throw new Error(json.errors.map((e: any) => e.message).join(" | "));
+  }
 
   const payload = json?.data?.appSubscriptionCreate;
   const errs = payload?.userErrors ?? [];
-  if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
+  if (errs.length) {
+    throw new Error(errs.map((e: any) => e.message).join(" | "));
+  }
 
   const sub = payload?.appSubscription;
-  const usageLine = (sub?.lineItems ?? []).find(
-    (li: any) => li?.plan?.pricingDetails?.__typename === "AppUsagePricing"
-  );
-  const recurLine = (sub?.lineItems ?? []).find(
-    (li: any) => li?.plan?.pricingDetails?.__typename === "AppRecurringPricing"
-  );
+  const { usageLine, recurringLine } = getSubscriptionLineItems(sub);
 
   await db.shopBilling.update({
     where: { shop },
@@ -363,8 +425,7 @@ mutation AppSubscriptionCreate(
       status: "PENDING",
       subscriptionId: sub?.id ?? null,
       usageLineItemId: usageLine?.id ?? null,
-      recurringLineItemId: recurLine?.id ?? null,
-
+      recurringLineItemId: recurringLine?.id ?? null,
       pendingCouponId: coupon?.couponId ?? null,
       pendingCouponCode: coupon?.code ?? null,
     },
@@ -372,6 +433,7 @@ mutation AppSubscriptionCreate(
 
   const confirmationUrl = payload?.confirmationUrl as string | undefined;
   if (!confirmationUrl) throw new Error("Missing confirmationUrl");
+
   return { confirmationUrl };
 }
 
@@ -380,7 +442,20 @@ export async function cancelActiveSubscription(args: { shop: string; admin: Admi
 
   const billing = await ensureBillingRow(shop);
   if (!billing.subscriptionId) {
-    await db.shopBilling.update({ where: { shop }, data: { status: "NONE" } });
+    await db.shopBilling.update({
+      where: { shop },
+      data: {
+        plan: "FREE",
+        status: "NONE",
+        subscriptionId: null,
+        usageLineItemId: null,
+        recurringLineItemId: null,
+        pendingPlan: null,
+        pendingCouponId: null,
+        pendingCouponCode: null,
+        appliedCouponCode: null,
+      },
+    });
     return;
   }
 
@@ -393,30 +468,53 @@ mutation CancelSub($id: ID!, $prorate: Boolean) {
 }`;
 
   const json = await graphqlShop(shop, m, { id: billing.subscriptionId, prorate: !!prorate }, admin);
-  if (json?.errors?.length) throw new Error(json.errors.map((e: any) => e.message).join(" | "));
+  if (json?.errors?.length) {
+    throw new Error(json.errors.map((e: any) => e.message).join(" | "));
+  }
 
   const payload = json?.data?.appSubscriptionCancel;
   const errs = payload?.userErrors ?? [];
-  if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
+  if (errs.length) {
+    throw new Error(errs.map((e: any) => e.message).join(" | "));
+  }
 
-  await db.shopBilling.update({
-    where: { shop },
-    data: {
-      status: "CANCELLED",
-      subscriptionId: null,
-      usageLineItemId: null,
-      recurringLineItemId: null,
-      pendingPlan: null,
-      pendingCouponId: null,
-      pendingCouponCode: null,
-    },
-  });
+  try {
+    await syncBillingFromShopify({ shop, admin });
+  } catch {
+    await db.shopBilling.update({
+      where: { shop },
+      data: {
+        plan: "FREE",
+        status: "CANCELLED",
+        subscriptionId: null,
+        usageLineItemId: null,
+        recurringLineItemId: null,
+        pendingPlan: null,
+        pendingCouponId: null,
+        pendingCouponCode: null,
+        appliedCouponCode: null,
+      },
+    });
+  }
 }
 
 export async function requestCapIncrease(args: { shop: string; admin: AdminLike; newCapEUR: number }) {
   const { shop, admin, newCapEUR } = args;
-  const billing = await ensureBillingRow(shop);
-  if (!billing.usageLineItemId) throw new Error("Missing usageLineItemId");
+
+  let billing = await ensureBillingRow(shop);
+
+  if (billing.status !== "ACTIVE" || !billing.usageLineItemId) {
+    await syncBillingFromShopify({ shop, admin });
+    billing = await db.shopBilling.findUniqueOrThrow({ where: { shop } });
+  }
+
+  if (billing.status !== "ACTIVE") {
+    throw new Error("No active subscription");
+  }
+
+  if (!billing.usageLineItemId) {
+    throw new Error("No active usage line item");
+  }
 
   const m = `#graphql
 mutation UpdateCap($id: ID!, $cappedAmount: MoneyInput!) {
@@ -430,17 +528,28 @@ mutation UpdateCap($id: ID!, $cappedAmount: MoneyInput!) {
   const json = await graphqlShop(
     shop,
     m,
-    { id: billing.usageLineItemId, cappedAmount: { amount: newCapEUR, currencyCode: BILLING_CURRENCY } },
+    {
+      id: billing.usageLineItemId,
+      cappedAmount: { amount: newCapEUR, currencyCode: BILLING_CURRENCY },
+    },
     admin
   );
-  if (json?.errors?.length) throw new Error(json.errors.map((e: any) => e.message).join(" | "));
+
+  if (json?.errors?.length) {
+    throw new Error(json.errors.map((e: any) => e.message).join(" | "));
+  }
 
   const payload = json?.data?.appSubscriptionLineItemUpdate;
   const errs = payload?.userErrors ?? [];
-  if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
+  if (errs.length) {
+    throw new Error(errs.map((e: any) => e.message).join(" | "));
+  }
 
   const confirmationUrl = payload?.confirmationUrl as string | undefined;
-  if (!confirmationUrl) throw new Error("Missing confirmationUrl");
+  if (!confirmationUrl) {
+    throw new Error("Missing confirmationUrl");
+  }
+
   return { confirmationUrl };
 }
 
@@ -488,10 +597,9 @@ export async function applyBillingForCall(args: {
       create: { shop },
     });
 
-    // FREE: 10 one-time minutes
-    if (billing.plan === "FREE") {
+    const chargeAsFree = async (currentBilling: any) => {
       const freeTotal = 10 * 60;
-      const freeUsed = billing.freeSecondsUsed || 0;
+      const freeUsed = Number(currentBilling?.freeSecondsUsed || 0);
       const freeRemaining = Math.max(0, freeTotal - freeUsed);
       const consumeFree = Math.min(billableSeconds, freeRemaining);
 
@@ -511,11 +619,13 @@ export async function applyBillingForCall(args: {
           idempotencyKey: idempotencyKeyForCall(callJobId),
         },
       });
+    };
+
+    let planKey: PlanKey = isPlanKey(billing.plan) ? (billing.plan as PlanKey) : "FREE";
+    if (planKey === "FREE") {
+      await chargeAsFree(billing);
       return;
     }
-
-    const planKey = billing.plan as unknown as PlanKey;
-    const p = PLANS[planKey];
 
     if (!billing.usageLineItemId) {
       try {
@@ -523,44 +633,75 @@ export async function applyBillingForCall(args: {
           await syncBillingFromShopify({ shop, admin });
         } else {
           const q = `#graphql
-          query BillingState {
-            currentAppInstallation {
-              activeSubscriptions {
-                id
-                name
-                status
-                lineItems {
-                  id
-                  plan {
-                    pricingDetails {
-                      __typename
-                      ... on AppUsagePricing { cappedAmount { amount currencyCode } balanceUsed { amount currencyCode } }
-                      ... on AppRecurringPricing { interval price { amount currencyCode } }
-                    }
-                  }
-                }
-              }
+query BillingState {
+  currentAppInstallation {
+    activeSubscriptions {
+      id
+      name
+      status
+      lineItems {
+        id
+        plan {
+          pricingDetails {
+            __typename
+            ... on AppUsagePricing {
+              cappedAmount { amount currencyCode }
+              balanceUsed { amount currencyCode }
             }
-          }`;
+            ... on AppRecurringPricing {
+              interval
+              price { amount currencyCode }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
           const j = await graphqlShop(shop, q, {}, undefined);
-          if (j?.errors?.length) throw new Error(j.errors.map((e: any) => e.message).join(" | "));
+          if (j?.errors?.length) {
+            throw new Error(j.errors.map((e: any) => e.message).join(" | "));
+          }
 
           const subs = j?.data?.currentAppInstallation?.activeSubscriptions ?? [];
-          const ours = subs.find((s: any) => String(s?.name ?? "").startsWith("AI Checkout Calls - "));
+          const ours = pickCurrentSubscription(subs);
+
           if (ours) {
-            const usageLine = (ours.lineItems ?? []).find(
-              (li: any) => li?.plan?.pricingDetails?.__typename === "AppUsagePricing"
-            );
-            const recurLine = (ours.lineItems ?? []).find(
-              (li: any) => li?.plan?.pricingDetails?.__typename === "AppRecurringPricing"
-            );
+            const { usageLine, recurringLine } = getSubscriptionLineItems(ours);
+            const existingRow = await tx.shopBilling.findUnique({ where: { shop } });
+
+            const detectedPlan = extractPlanFromSubscriptionName(ours.name);
+            const existingPlan = isPlanKey(existingRow?.plan) ? (existingRow?.plan as PlanKey) : "FREE";
+            const normalizedPlan: PlanKey =
+              detectedPlan ??
+              (existingPlan !== "FREE"
+                ? existingPlan
+                : recurringLine
+                  ? "STARTER"
+                  : usageLine
+                    ? "PAYG"
+                    : "FREE");
+
             await tx.shopBilling.update({
               where: { shop },
               data: {
+                plan: normalizedPlan as any,
                 status: String(ours.status ?? "ACTIVE").toUpperCase() as any,
                 subscriptionId: ours.id,
                 usageLineItemId: usageLine?.id ?? null,
-                recurringLineItemId: recurLine?.id ?? null,
+                recurringLineItemId: recurringLine?.id ?? null,
+              },
+            });
+          } else {
+            await tx.shopBilling.update({
+              where: { shop },
+              data: {
+                plan: "FREE",
+                status: "NONE",
+                subscriptionId: null,
+                usageLineItemId: null,
+                recurringLineItemId: null,
               },
             });
           }
@@ -570,11 +711,25 @@ export async function applyBillingForCall(args: {
       }
 
       billing = await tx.shopBilling.findUniqueOrThrow({ where: { shop } });
-      if (!billing.usageLineItemId) throw new Error("No usage line item after sync");
+      planKey = isPlanKey(billing.plan) ? (billing.plan as PlanKey) : "FREE";
+
+      if (planKey === "FREE") {
+        await chargeAsFree(billing);
+        return;
+      }
+
+      if (!billing.usageLineItemId) {
+        throw new Error("No usage line item after sync");
+      }
+    }
+
+    const p = PLANS[planKey];
+    if (!p) {
+      throw new Error(`Unknown billing plan: ${String(planKey)}`);
     }
 
     const includedTotal = (p.includedMinutes || 0) * 60;
-    const includedUsed = billing.includedSecondsUsed || 0;
+    const includedUsed = Number(billing.includedSecondsUsed || 0);
     const includedRemaining = Math.max(0, includedTotal - includedUsed);
 
     const consumeIncluded = Math.min(billableSeconds, includedRemaining);
@@ -593,22 +748,22 @@ export async function applyBillingForCall(args: {
 
     if (amountCents > 0) {
       const m = `#graphql
-      mutation UsageCharge(
-        $description: String!
-        $price: MoneyInput!
-        $subscriptionLineItemId: ID!
-        $idempotencyKey: String
-      ) {
-        appUsageRecordCreate(
-          description: $description
-          price: $price
-          subscriptionLineItemId: $subscriptionLineItemId
-          idempotencyKey: $idempotencyKey
-        ) {
-          userErrors { field message }
-          appUsageRecord { id }
-        }
-      }`;
+mutation UsageCharge(
+  $description: String!
+  $price: MoneyInput!
+  $subscriptionLineItemId: ID!
+  $idempotencyKey: String
+) {
+  appUsageRecordCreate(
+    description: $description
+    price: $price
+    subscriptionLineItemId: $subscriptionLineItemId
+    idempotencyKey: $idempotencyKey
+  ) {
+    userErrors { field message }
+    appUsageRecord { id }
+  }
+}`;
 
       const idempotencyKey = idempotencyKeyForCall(callJobId);
 
@@ -624,11 +779,16 @@ export async function applyBillingForCall(args: {
         admin
       );
 
-      if (json?.errors?.length) throw new Error(json.errors.map((e: any) => e.message).join(" | "));
+      if (json?.errors?.length) {
+        throw new Error(json.errors.map((e: any) => e.message).join(" | "));
+      }
 
       const payload = json?.data?.appUsageRecordCreate;
       const errs = payload?.userErrors ?? [];
-      if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
+      if (errs.length) {
+        throw new Error(errs.map((e: any) => e.message).join(" | "));
+      }
+
       usageRecordId = payload?.appUsageRecord?.id ?? null;
     }
 
@@ -649,9 +809,11 @@ export async function applyBillingForCall(args: {
 
 function usageTermsForPlan(plan: PlanKey) {
   const p = PLANS[plan];
+
   if (plan === "PAYG") {
     return `€${p.overageEURPerMin.toFixed(2)}/minute. Charged per started minute. Answered calls only. Monthly spending limit (cap) applies.`;
   }
+
   return `Includes ${p.includedMinutes} minutes per billing cycle. Then €${p.overageEURPerMin.toFixed(
     2
   )}/minute. Charged per started minute. Answered calls only. Usage charges are limited by the approved capped amount.`;
