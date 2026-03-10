@@ -1,4 +1,3 @@
-// app/routes/app.checkouts.$checkoutId.tsx
 import * as React from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useLoaderData, useNavigate, useRouteError } from "react-router";
@@ -30,6 +29,14 @@ type LoaderData = {
     value: number;
     currency: string;
     itemsJson: string | null;
+  };
+
+  recoveredOrder: null | {
+    orderId: string;
+    total: number | null;
+    currency: string | null;
+    financial: string | null;
+    createdAt: string;
   };
 
   latestJob: null | {
@@ -65,7 +72,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const checkoutId = String(params.checkoutId ?? "").trim();
   if (!checkoutId) throw new Response("Missing checkoutId", { status: 400 });
 
-  const [checkout, jobs] = await Promise.all([
+  const [checkout, jobs, recoveredOrder] = await Promise.all([
     db.checkout.findFirst({
       where: { shop, checkoutId },
       select: {
@@ -94,6 +101,17 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
         createdAt: true,
         providerCallId: true,
         recordingUrl: true,
+      },
+    }),
+    db.order.findFirst({
+      where: { shop, checkoutId },
+      orderBy: { createdAt: "desc" },
+      select: {
+        orderId: true,
+        total: true,
+        currency: true,
+        financial: true,
+        createdAt: true,
       },
     }),
   ]);
@@ -125,7 +143,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     shop,
     checkoutId,
     checkout: {
-      status: String(checkout.status),
+      status: recoveredOrder ? "RECOVERED" : String(checkout.status),
       updatedAt: new Date(checkout.updatedAt).toISOString(),
       abandonedAt: checkout.abandonedAt ? new Date(checkout.abandonedAt).toISOString() : null,
       customerName: checkout.customerName ?? null,
@@ -135,6 +153,15 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       currency: String(checkout.currency ?? "USD"),
       itemsJson: checkout.itemsJson ?? null,
     },
+    recoveredOrder: recoveredOrder
+      ? {
+          orderId: String(recoveredOrder.orderId),
+          total: recoveredOrder.total == null ? null : Number(recoveredOrder.total),
+          currency: recoveredOrder.currency ?? null,
+          financial: recoveredOrder.financial ?? null,
+          createdAt: new Date(recoveredOrder.createdAt).toISOString(),
+        }
+      : null,
     latestJob: j
       ? {
           id: String(j.id),
@@ -185,7 +212,9 @@ export default function CheckoutDetailModal() {
   const sb: any = data.sb as any;
 
   const buyPct =
-    typeof sb?.buy_probability === "number" && Number.isFinite(sb.buy_probability) ? Math.round(sb.buy_probability) : null;
+    typeof sb?.buy_probability === "number" && Number.isFinite(sb.buy_probability)
+      ? Math.round(sb.buy_probability)
+      : null;
 
   const title = `Checkout ${data.checkoutId}`;
 
@@ -199,12 +228,17 @@ export default function CheckoutDetailModal() {
           <div style={{ opacity: 0.8, fontWeight: 800, fontSize: 12 }}>
             Status: {safeStr(data.checkout.status)} · Updated: {formatWhen(data.checkout.updatedAt)}{" "}
             {data.checkout.abandonedAt ? `· Abandoned: ${formatWhen(data.checkout.abandonedAt)}` : ""}
+            {data.recoveredOrder?.createdAt ? ` · Recovered: ${formatWhen(data.recoveredOrder.createdAt)}` : ""}
           </div>
           <div style={{ opacity: 0.8, fontWeight: 800, fontSize: 12 }}>
-            Value: {data.checkout.value} {data.checkout.currency}
+            Value:{" "}
+            {data.recoveredOrder?.total != null
+              ? `${data.recoveredOrder.total} ${data.recoveredOrder.currency || data.checkout.currency}`
+              : `${data.checkout.value} ${data.checkout.currency}`}
             {buyPct == null ? "" : ` · Buy: ${buyPct}%`}
             {sb?.call_outcome ? ` · Outcome: ${String(sb.call_outcome).toUpperCase()}` : ""}
             {sb?.ai_status ? ` · AI: ${String(sb.ai_status).toUpperCase()}` : ""}
+            {data.recoveredOrder?.orderId ? ` · Order: ${data.recoveredOrder.orderId}` : ""}
           </div>
 
           {data.recordingUrl ? (
@@ -275,8 +309,14 @@ export default function CheckoutDetailModal() {
           <MonoBox>
             {(() => {
               try {
-                const raw = sb?.payload ?? sb?.end_of_call_report ?? sb?.structured_outputs ?? sb?.ai_result ?? null;
-                return raw ? JSON.stringify(raw, null, 2) : "-";
+                return JSON.stringify(
+                  {
+                    recoveredOrder: data.recoveredOrder ?? null,
+                    raw: sb?.payload ?? sb?.end_of_call_report ?? sb?.structured_outputs ?? sb?.ai_result ?? null,
+                  },
+                  null,
+                  2
+                );
               } catch {
                 return "-";
               }

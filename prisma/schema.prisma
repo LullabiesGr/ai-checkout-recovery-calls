@@ -5,31 +5,32 @@ generator client {
 datasource db {
   provider  = "postgresql"
   url       = env("DATABASE_URL") // runtime (μπορεί να είναι pooler)
-  directUrl = env("DIRECT_URL")   // ΠΑΝΤΑ direct για migrations
+  directUrl = env("DIRECT_URL") // ΠΑΝΤΑ direct για migrations
 }
 
 model Checkout {
-  id                String         @id @default(cuid())
-  shop              String
-  checkoutId        String
-  token             String?
-  email             String?
-  phone             String?
-  value             Float
-  currency          String
-  status            CheckoutStatus @default(OPEN)
-  abandonedAt       DateTime?
-  createdAt         DateTime       @default(now())
-  updatedAt         DateTime       @updatedAt
-  raw               String?
-  customerName      String?
-  itemsJson         String?
-  recoveredAt       DateTime?
-  recoveredOrderId  String?
-  recoveredAmount   Float?
+  id               String         @id @default(cuid())
+  shop             String
+  checkoutId       String
+  token            String?
+  email            String?
+  phone            String?
+  value            Float
+  currency         String
+  status           CheckoutStatus @default(OPEN)
+  abandonedAt      DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  raw              String?
+  customerName     String?
+  itemsJson        String?
+  recoveredAt      DateTime?
+  recoveredOrderId String?
+  recoveredAmount  Float?
 
   @@unique([shop, checkoutId], name: "shop_checkoutId")
   @@index([shop, status, createdAt])
+  @@index([shop, checkoutId, updatedAt])
 }
 
 model Order {
@@ -46,41 +47,45 @@ model Order {
 
   @@unique([shop, orderId], name: "shop_orderId")
   @@index([shop, createdAt])
+  @@index([shop, checkoutId, createdAt])
+  @@index([shop, checkoutToken, createdAt])
 }
 
 model CallJob {
-  id               String        @id @default(cuid())
-  shop             String
-  checkoutId       String
-  phone            String
-  scheduledFor     DateTime
-  status           CallJobStatus @default(QUEUED)
-  attempts         Int           @default(0)
-  provider         String?
-  providerCallId   String?
-  outcome          String?
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
-  endedReason      String?
-  transcript       String?
-  recordingUrl     String?
-  sentiment        String?
-  tagsCsv          String?
-  reason           String?
-  nextAction       String?
-  followUp         String?
-  analysisJson     String?
-  attributedAt     DateTime?
+  id                String        @id @default(cuid())
+  shop              String
+  checkoutId        String
+  phone             String
+  scheduledFor      DateTime
+  status            CallJobStatus @default(QUEUED)
+  attempts          Int           @default(0)
+  provider          String?
+  providerCallId    String?
+  outcome           String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  endedReason       String?
+  transcript        String?
+  recordingUrl      String?
+  sentiment         String?
+  tagsCsv           String?
+  reason            String?
+  nextAction        String?
+  followUp          String?
+  analysisJson      String?
+  attributedAt      DateTime?
   attributedOrderId String?
-  attributedAmount Float?
+  attributedAmount  Float?
 
   @@index([shop, status, scheduledFor])
   @@index([shop, checkoutId])
+  @@index([shop, providerCallId])
+  @@index([shop, checkoutId, createdAt])
 }
 
 model Settings {
-  id              String  @id @default(cuid())
-  shop            String  @unique
+  id   String @id @default(cuid())
+  shop String @unique
 
   enabled         Boolean @default(false)
   delayMinutes    Int     @default(30)
@@ -98,10 +103,10 @@ model Settings {
   promptMode     PromptMode @default(append)
   merchantPrompt String     @default("")
 
-  tone                   String  @default("neutral")
-  goal                   String  @default("complete_checkout")
-  max_call_seconds       Int     @default(120)
-  max_followup_questions Int     @default(2)
+  tone                   String @default("neutral")
+  goal                   String @default("complete_checkout")
+  max_call_seconds       Int    @default(120)
+  max_followup_questions Int    @default(2)
 
   discount_enabled            Boolean @default(false)
   max_discount_percent        Int     @default(10)
@@ -117,7 +122,6 @@ model Settings {
   sms_template_offer    String?
   sms_template_no_offer String?
 
-  // NEW: Brevo sender per shop
   brevoSmsSender String? @db.VarChar(32)
 
   createdAt DateTime @default(now())
@@ -127,10 +131,10 @@ model Settings {
 }
 
 model Session {
-  id                  String   @id
+  id                  String    @id
   shop                String
   state               String
-  isOnline            Boolean  @default(false)
+  isOnline            Boolean   @default(false)
   scope               String?
   expires             DateTime?
   accessToken         String
@@ -138,10 +142,10 @@ model Session {
   firstName           String?
   lastName            String?
   email               String?
-  accountOwner        Boolean  @default(false)
+  accountOwner        Boolean   @default(false)
   locale              String?
-  collaborator        Boolean? @default(false)
-  emailVerified       Boolean? @default(false)
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
 
@@ -164,40 +168,40 @@ enum BillingStatus {
 }
 
 model ShopBilling {
-  shop               String         @id
-  plan               BillingPlan    @default(FREE)
-  status             BillingStatus  @default(NONE)
-  currencyCode       String         @default("EUR")
-  subscriptionId     String?
-  usageLineItemId    String?
+  shop                String        @id
+  plan                BillingPlan   @default(FREE)
+  status              BillingStatus @default(NONE)
+  currencyCode        String        @default("EUR")
+  subscriptionId      String?
+  usageLineItemId     String?
   recurringLineItemId String?
-  currentPeriodStart DateTime?
-  currentPeriodEnd   DateTime?
+  currentPeriodStart  DateTime?
+  currentPeriodEnd    DateTime?
   includedSecondsUsed Int           @default(0)
-  freeSecondsUsed    Int            @default(0)
-  pendingPlan        BillingPlan?
-  pendingCouponCode  String?
-  pendingCouponId    String?        @db.Uuid
-  appliedCouponCode  String?
-  createdAt          DateTime       @default(now())
-  updatedAt          DateTime       @updatedAt
+  freeSecondsUsed     Int           @default(0)
+  pendingPlan         BillingPlan?
+  pendingCouponCode   String?
+  pendingCouponId     String?       @db.Uuid
+  appliedCouponCode   String?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
 
-  charges            CallCharge[]
+  charges CallCharge[]
 }
 
 model CallCharge {
-  id              String      @id @default(cuid())
-  shop            String
-  callJobId       String      @unique
+  id               String   @id @default(cuid())
+  shop             String
+  callJobId        String   @unique
   connectedSeconds Int
-  minutesBilled   Int
-  amountCents     Int
-  currencyCode    String
-  usageRecordId   String?
-  idempotencyKey  String      @unique
-  createdAt       DateTime    @default(now())
+  minutesBilled    Int
+  amountCents      Int
+  currencyCode     String
+  usageRecordId    String?
+  idempotencyKey   String   @unique
+  createdAt        DateTime @default(now())
 
-  billing         ShopBilling @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  billing ShopBilling @relation(fields: [shop], references: [shop], onDelete: Cascade)
 
   @@index([shop, createdAt])
 }
@@ -229,42 +233,36 @@ enum CouponDiscountType {
 }
 
 model BillingCoupon {
-  id                       String                   @id @default(uuid()) @db.Uuid
-  code                     String                   @unique
-  active                   Boolean                  @default(true)
+  id     String  @id @default(uuid()) @db.Uuid
+  code   String  @unique
+  active Boolean @default(true)
 
-  // For PERCENT: decimal fraction (0.20 = 20% off)
-  type                     CouponDiscountType
-  percentage               Float?
+  type       CouponDiscountType
+  percentage Float?
 
-  // For AMOUNT: fixed amount off the monthly subscription fee (in EUR)
   amountOffEUR             Float?
-
-  // If set, Shopify applies the discount for N billing intervals (e.g. 1 = first month only)
   durationLimitInIntervals Int?
 
-  // Optional: JSON array of plan keys, e.g. ["STARTER","PRO"]. Null/empty = all.
-  appliesToPlans           Json?
+  appliesToPlans Json?
 
-  // Optional: global max redemptions
-  maxRedemptions           Int?
-  redeemedCount            Int                      @default(0)
-  startsAt                 DateTime?
-  endsAt                   DateTime?
-  createdAt                DateTime                 @default(now())
-  updatedAt                DateTime                 @updatedAt
+  maxRedemptions Int?
+  redeemedCount  Int       @default(0)
+  startsAt       DateTime?
+  endsAt         DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
-  redemptions              BillingCouponRedemption[]
+  redemptions BillingCouponRedemption[]
 }
 
 model BillingCouponRedemption {
-  id             String       @id @default(uuid()) @db.Uuid
-  couponId       String       @db.Uuid
+  id             String   @id @default(uuid()) @db.Uuid
+  couponId       String   @db.Uuid
   shop           String
   subscriptionId String?
-  redeemedAt     DateTime     @default(now())
+  redeemedAt     DateTime @default(now())
 
-  coupon         BillingCoupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  coupon BillingCoupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
 
   @@unique([couponId, shop])
   @@index([shop])

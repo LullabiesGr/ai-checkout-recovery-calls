@@ -1,4 +1,3 @@
-// app/routes/webhooks.orders_create.tsx
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -29,7 +28,7 @@ export async function action({ request }: ActionFunctionArgs) {
         o?.total_price_set?.shop_money?.amount
     ) ?? null;
 
-  const currency = String((o?.currency || o?.currency_code || "USD")).toUpperCase();
+  const currency = String(o?.currency || o?.currency_code || "USD").toUpperCase();
   const financial = o?.financial_status ? String(o.financial_status) : null;
 
   await db.order.upsert({
@@ -54,22 +53,9 @@ export async function action({ request }: ActionFunctionArgs) {
     },
   });
 
-    // Attribution:
-  // If order maps to a checkout we know, mark RECOVERED and store recovered amount.
+  // Attribution only.
+  // Order table is now the source of truth for recovered state.
   if (checkoutId) {
-    // 1) Update checkout (global truth)
-    await db.checkout.updateMany({
-      where: { shop, checkoutId },
-      data: {
-        status: "RECOVERED",
-        recoveredAt: new Date(),
-        recoveredOrderId: orderId,
-        recoveredAmount: total ?? undefined,
-        abandonedAt: null,
-      },
-    });
-
-    // 2) Attribute revenue to the most recent Vapi call job for this checkout
     const lastJob = await db.callJob.findFirst({
       where: {
         shop,
@@ -77,7 +63,7 @@ export async function action({ request }: ActionFunctionArgs) {
         provider: "vapi",
       },
       orderBy: { createdAt: "desc" },
-      select: { id: true, status: true },
+      select: { id: true },
     });
 
     if (lastJob) {
@@ -91,13 +77,29 @@ export async function action({ request }: ActionFunctionArgs) {
       });
     }
 
-    // 3) Cancel queued/calling jobs for that checkout
     await db.callJob.updateMany({
-      where: { shop, checkoutId, status: { in: ["QUEUED", "CALLING"] } },
-      data: { status: "CANCELED", outcome: "ORDER_PLACED" },
+      where: {
+        shop,
+        checkoutId,
+        status: { in: ["QUEUED", "CALLING"] },
+      },
+      data: {
+        status: "CANCELED",
+        outcome: "ORDER_PLACED",
+      },
+    });
+
+    // Optional display-only sync:
+    // keep checkout no longer abandoned once order exists,
+    // but do NOT write recovered amount/order fields as truth.
+    await db.checkout.updateMany({
+      where: { shop, checkoutId },
+      data: {
+        status: "CONVERTED",
+        abandonedAt: null,
+      },
     });
   }
-
 
   return new Response("OK", { status: 200 });
 }
