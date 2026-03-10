@@ -58,9 +58,9 @@ export async function action({ request }: ActionFunctionArgs) {
     },
   });
 
-  // Canonical mapping rule:
-  // 1) match by checkoutId
-  // 2) else match by checkoutToken -> Checkout.checkoutId
+  // Canonical mapping:
+  // 1) order.checkoutId -> Checkout.checkoutId
+  // 2) else order.checkoutToken -> Checkout.checkoutId
   const matchedCheckout = await db.checkout.findFirst({
     where: {
       shop,
@@ -113,15 +113,13 @@ export async function action({ request }: ActionFunctionArgs) {
     },
   });
 
-  // Display/cache sync only. Order remains source of truth.
+  // Display-only checkout sync.
+  // Order table remains the only source of truth for recovered state.
   await db.checkout.updateMany({
     where: { shop, checkoutId: matchedCheckoutId },
     data: {
       status: "CONVERTED",
       abandonedAt: null,
-      recoveredAt: new Date(),
-      recoveredOrderId: orderId,
-      recoveredAmount: total ?? undefined,
     },
   });
 
