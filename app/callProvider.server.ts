@@ -1,6 +1,7 @@
 import db from "./db.server";
 import { randomBytes } from "node:crypto";
 import { sessionStorage } from "./shopify.server";
+import { getShopPlan, hasSmsFeature } from "./lib/planFeatures.server";
 
 function requiredEnv(name: string) {
   const v = process.env[name];
@@ -266,6 +267,70 @@ function isRecentIso(iso: any, maxAgeMs: number) {
   return Date.now() - ts <= maxAgeMs;
 }
 
+function digitWord(ch: string) {
+  switch (ch) {
+    case "0": return "Zero";
+    case "1": return "One";
+    case "2": return "Two";
+    case "3": return "Three";
+    case "4": return "Four";
+    case "5": return "Five";
+    case "6": return "Six";
+    case "7": return "Seven";
+    case "8": return "Eight";
+    case "9": return "Nine";
+    default: return ch;
+  }
+}
+
+function natoWord(ch: string) {
+  switch (String(ch).toUpperCase()) {
+    case "A": return "Alpha";
+    case "B": return "Bravo";
+    case "C": return "Charlie";
+    case "D": return "Delta";
+    case "E": return "Echo";
+    case "F": return "Foxtrot";
+    case "G": return "Golf";
+    case "H": return "Hotel";
+    case "I": return "India";
+    case "J": return "Juliett";
+    case "K": return "Kilo";
+    case "L": return "Lima";
+    case "M": return "Mike";
+    case "N": return "November";
+    case "O": return "Oscar";
+    case "P": return "Papa";
+    case "Q": return "Quebec";
+    case "R": return "Romeo";
+    case "S": return "Sierra";
+    case "T": return "Tango";
+    case "U": return "Uniform";
+    case "V": return "Victor";
+    case "W": return "Whiskey";
+    case "X": return "X-ray";
+    case "Y": return "Yankee";
+    case "Z": return "Zulu";
+    default: return ch;
+  }
+}
+
+function makeSpeakableCouponCode(code: string | null | undefined) {
+  const raw = String(code ?? "").trim().toUpperCase();
+  if (!raw) return null;
+
+  const parts = raw
+    .split("")
+    .filter(Boolean)
+    .map((ch) => {
+      if (/[A-Z]/.test(ch)) return natoWord(ch);
+      if (/[0-9]/.test(ch)) return digitWord(ch);
+      return ch;
+    });
+
+  return parts.length ? parts.join(" ... ") : null;
+}
+
 function buildToolSuccessResult(args: {
   messageId: string | null;
   offerType: "link_only" | "discount" | "free_shipping";
@@ -278,6 +343,7 @@ function buildToolSuccessResult(args: {
     sms_message_id: args.messageId,
     offer_type: args.offerType,
     code: args.code,
+    code_speakable: makeSpeakableCouponCode(args.code),
     discount_percent: args.discountPercent,
   });
 }
@@ -1159,13 +1225,17 @@ SMS / OFFER TOOL (tool use):
 - Tool name: send_checkout_offer
 - Call it exactly ONCE only after the customer accepts the next step.
 - Immediately before the tool call, say exactly: "I'll send that by text right now."
-- After a successful tool result, say: "I've sent the text. Your code is [code]."
-- Say the code aloud clearly, one time, after the tool succeeds.
+- Do not mention SMS, text message, or sending anything by phone unless SMS is actually enabled in this prompt.
+- Do not promise that any code or message was sent until the tool succeeds.
+- After a successful tool result, confirm briefly that the text was sent.
+- If the tool result includes code, speak the coupon code slowly and clearly.
+- Always spell the coupon code character by character using the provided speakable form when available.
+- For letters, use NATO-style words. For digits, say each digit separately.
+- Never rush the code. Pause slightly between characters.
 - Never read CHECKOUT_LINK aloud.
 - Never spell domains, query parameters, or URL characters aloud.
 - You may choose the final offer during the conversation, but you must stay within the configured limits.
 - If you choose a discount, pass the exact discountPercent you decided on. Do not exceed the configured maximum.
-- Do not promise that any code was sent until the tool succeeds.
 `.trim()
       : "";
 
@@ -1182,8 +1252,11 @@ Hard rules:
 - Never spell domains, query strings, or recovery-link characters aloud.
 - Do not restate the cart total unless the customer directly asks.
 - When a discount is allowed, propose one specific percentage. Do not ask the customer to choose a percentage.
+- Only mention SMS/text if SMS is enabled in this prompt.
 - If you are about to send the SMS, say exactly: "I'll send that by text right now."
-- After the tool succeeds, confirm briefly that the text was sent and say the code aloud once.
+- After the tool succeeds, confirm briefly that the text was sent.
+- If a coupon code exists, say it slowly and clearly, character by character.
+- Prefer the tool-provided speakable code format when available.
 - Once the customer confirms the SMS arrived or says they will use it, close the call politely in one short sentence.
 
 ${memoryBlock ? `\n\n${memoryBlock}\n` : ""}
@@ -1472,6 +1545,12 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
       if (!shop) throw new Error("Missing shop in metadata.");
       if (!callJobId) throw new Error("Missing callJobId in metadata.");
 
+      const billingPlan = await getShopPlan(shop);
+      const smsFeatureAllowedByPlan = hasSmsFeature(billingPlan);
+      if (!smsFeatureAllowedByPlan) {
+        throw new Error(`SMS is not available on this shop plan: ${billingPlan}`);
+      }
+
       const job = await db.callJob.findFirst({ where: { id: callJobId, shop } });
       if (!job) throw new Error("CallJob not found.");
 
@@ -1564,7 +1643,7 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
         couponPrefix: (extras?.coupon_prefix ?? "").trim() ? String(extras?.coupon_prefix).trim() : null,
         couponValidityHours: clamp(Number(extras?.coupon_validity_hours ?? 24), 1, 168),
         freeShippingEnabled: Boolean(extras?.free_shipping_enabled ?? false),
-        followupSmsEnabled: Boolean(extras?.followup_sms_enabled ?? false),
+        followupSmsEnabled: smsFeatureAllowedByPlan && Boolean(extras?.followup_sms_enabled ?? false),
       };
 
       if (!playbook.followupSmsEnabled) throw new Error("SMS follow-up is disabled for this shop.");
@@ -1751,6 +1830,7 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
               discountLink,
               offerType: finalType,
               offerCode,
+              offerCodeSpeakable: makeSpeakableCouponCode(offerCode),
               discountPercent: finalDiscountPercent,
               couponValidityHours: playbook.couponValidityHours,
               shopifyDiscountNodeId: discountNodeId,
@@ -1840,6 +1920,8 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
 
   const settings = await db.settings.findUnique({ where: { shop: params.shop } });
   const extras = await readSettingsExtras(params.shop);
+  const billingPlan = await getShopPlan(params.shop);
+  const smsFeatureAllowedByPlan = hasSmsFeature(billingPlan);
 
   const playbook = {
     tone: pickTone(extras?.tone ?? "neutral"),
@@ -1857,7 +1939,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     freeShippingEnabled: Boolean(extras?.free_shipping_enabled ?? false),
 
     followupEmailEnabled: Boolean(extras?.followup_email_enabled ?? true),
-    followupSmsEnabled: Boolean(extras?.followup_sms_enabled ?? false),
+    followupSmsEnabled: smsFeatureAllowedByPlan && Boolean(extras?.followup_sms_enabled ?? false),
   };
 
   const priorCallsCount = await db.callJob.count({
@@ -1882,7 +1964,11 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
   const hasSmsTransport = Boolean(brevoKey && smsSender);
 
   const smsEnabled =
-    Boolean(playbook.followupSmsEnabled) && hasSmsTransport && Boolean(compactRecoveryUrl) && Boolean(customerNumber);
+    smsFeatureAllowedByPlan &&
+    Boolean(playbook.followupSmsEnabled) &&
+    hasSmsTransport &&
+    Boolean(compactRecoveryUrl) &&
+    Boolean(customerNumber);
 
   const merchantPrompt = String((settings as any)?.merchantPrompt ?? (settings as any)?.userPrompt ?? "");
   const configuredPromptMode = pickPromptMode((settings as any)?.promptMode ?? "replace");
@@ -1956,7 +2042,9 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       role: "user",
       content:
         `If you need to send the SMS, first say exactly "I'll send that by text right now." and then call the tool. ` +
-        `After the tool succeeds, say that the text was sent and say the code aloud clearly one time. ` +
+        `After the tool succeeds, say that the text was sent. ` +
+        `If the tool result contains code_speakable, read that form exactly, slowly, with short pauses between parts. ` +
+        `If there is only code, spell it character by character, slowly and clearly. ` +
         `Never read the checkout URL aloud. Never spell the domain. Never read query parameters aloud.`,
     });
   }
@@ -1975,6 +2063,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       discountLink: compactRecoveryUrl,
       offerType: null,
       offerCode: null,
+      offerCodeSpeakable: null,
       discountPercent: null,
       couponValidityHours: playbook.couponValidityHours,
       shopifyDiscountNodeId: null,
@@ -1988,6 +2077,10 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       lastToolCallId: null,
       lastRequestedType: null,
       lastResult: null,
+    },
+    billing: {
+      plan: billingPlan,
+      smsFeatureAllowedByPlan,
     },
     phone_resolution: {
       rawPhone,
