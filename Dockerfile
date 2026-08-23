@@ -9,7 +9,9 @@ ENV NODE_ENV=production
 
 COPY package.json package-lock.json* ./
 
-RUN npm ci --omit=dev && npm cache clean --force
+# Keep devDependencies because the production build and prisma migrate deploy
+# both require packages currently declared in devDependencies.
+RUN npm ci && npm cache clean --force
 
 COPY . .
 
