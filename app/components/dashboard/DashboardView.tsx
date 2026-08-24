@@ -1,37 +1,24 @@
 // app/components/dashboard/DashboardView.tsx
 import * as React from "react";
 import { Form } from "react-router";
+import {
+  Badge,
+  Banner,
+  BlockStack,
+  Box,
+  Button,
+  ButtonGroup,
+  Card,
+  Divider,
+  IndexTable,
+  InlineGrid,
+  InlineStack,
+  Layout,
+  Page,
+  Text,
+} from "@shopify/polaris";
 
 type BadgeTone = "success" | "info" | "warning" | "critical" | "new";
-
-declare global {
-  namespace JSX {
-    interface IntrinsicElements {
-      "s-page": any;
-      "s-section": any;
-      "s-box": any;
-      "s-text": any;
-      "s-heading": any;
-      "s-badge": any;
-      "s-banner": any;
-      "s-divider": any;
-      "s-grid": any;
-      "s-stack": any;
-      "s-query-container": any;
-      "s-table": any;
-      "s-table-header-row": any;
-      "s-table-header": any;
-      "s-table-body": any;
-      "s-table-row": any;
-      "s-table-cell": any;
-      "s-button": any;
-      "s-button-group": any;
-      "s-clickable": any;
-      "s-link": any;
-      "s-chip": any;
-    }
-  }
-}
 
 export type DashboardViewProps = {
   shopLabel?: string;
@@ -87,7 +74,7 @@ export type DashboardViewProps = {
     status: string;
     tone: BadgeTone;
     whenText: string;
-    statusHint?: string; // clarifies "call outcome" vs "verified order"
+    statusHint?: string;
     recordingUrl?: string;
     logUrl?: string;
   }>;
@@ -124,22 +111,37 @@ export type DashboardViewProps = {
 
   settings: {
     enabled: boolean;
-
-    // keep prop shape compatible with existing loader
     vapiReady: boolean;
     criticalMissing: boolean;
-
     rows: Array<{ label: string; value: string; tone: BadgeTone }>;
   };
 
   canCreateTestCall: boolean;
 };
 
-function toneBadge(t: BadgeTone) {
-  return t;
+function badgeTone(tone: BadgeTone) {
+  if (tone === "warning") return "attention" as const;
+  return tone;
 }
 
-function metricTile(props: {
+function shouldHideSettingRowLabel(label: string) {
+  const s = (label || "").toLowerCase().trim();
+  return (
+    s.includes("assistant id") ||
+    s.includes("phone number id") ||
+    s.includes("phone_number_id") ||
+    s.includes("assistant_id") ||
+    s.includes("vapi")
+  );
+}
+
+function MetricCard({
+  label,
+  valueText,
+  tone,
+  deltaText,
+  href,
+}: {
   label: string;
   valueText: string;
   tone: BadgeTone;
@@ -147,356 +149,395 @@ function metricTile(props: {
   href: string;
 }) {
   return (
-    <s-clickable href={props.href} accessibilityRole="link">
-      <s-box border="base" borderRadius="base" padding="base" background="base">
-        <s-stack gap="tight">
-          <s-text tone="subdued">{props.label}</s-text>
-          <s-heading size="small">{props.valueText}</s-heading>
-          <s-stack direction="inline" gap="tight">
-            <s-badge tone={toneBadge(props.tone)}>{props.tone.toUpperCase()}</s-badge>
-            {props.deltaText ? <s-badge tone="new">{props.deltaText}</s-badge> : null}
-          </s-stack>
-        </s-stack>
-      </s-box>
-    </s-clickable>
+    <Card>
+      <BlockStack gap="300">
+        <Text as="p" variant="bodySm" tone="subdued">
+          {label}
+        </Text>
+        <InlineStack align="space-between" blockAlign="center" gap="200" wrap={false}>
+          <Text as="p" variant="headingLg">
+            {valueText}
+          </Text>
+          <Badge tone={badgeTone(tone)}>{tone === "new" ? "NEW" : tone.toUpperCase()}</Badge>
+        </InlineStack>
+        <InlineStack align="space-between" blockAlign="center" gap="200">
+          <Text as="span" variant="bodySm" tone="subdued">
+            {deltaText || "Current range"}
+          </Text>
+          <Button url={href} variant="plain" size="slim">
+            View
+          </Button>
+        </InlineStack>
+      </BlockStack>
+    </Card>
   );
 }
 
-function shouldHideSettingRowLabel(label: string) {
-  const s = (label || "").toLowerCase().trim();
-
-  if (s.includes("assistant id")) return true;
-  if (s.includes("phone number id")) return true;
-  if (s.includes("phone_number_id")) return true;
-  if (s.includes("assistant_id")) return true;
-
-  if (s.includes("vapi")) return true;
-
-  return false;
+function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }) {
+  return (
+    <BlockStack gap="100">
+      <Text as="h2" variant="headingMd">
+        {title}
+      </Text>
+      {subtitle ? (
+        <Text as="p" variant="bodySm" tone="subdued">
+          {subtitle}
+        </Text>
+      ) : null}
+    </BlockStack>
+  );
 }
 
 export function DashboardView(props: DashboardViewProps) {
-  const settingsRows = React.useMemo(() => {
-    return (props.settings.rows || []).filter((r) => !shouldHideSettingRowLabel(r.label));
-  }, [props.settings.rows]);
+  const settingsRows = React.useMemo(
+    () => (props.settings.rows || []).filter((r) => !shouldHideSettingRowLabel(r.label)),
+    [props.settings.rows],
+  );
 
-  const banner = React.useMemo(() => {
-    if (!props.settings.enabled) return null;
+  const rangeButtons = (
+    <ButtonGroup variant="segmented">
+      <Button url={props.range.links.all} pressed={props.range.key === "all"}>
+        All time
+      </Button>
+      <Button url={props.range.links.d7} pressed={props.range.key === "7d"}>
+        7 days
+      </Button>
+      <Button url={props.range.links.h24} pressed={props.range.key === "24h"}>
+        24 hours
+      </Button>
+    </ButtonGroup>
+  );
 
-    if (props.settings.criticalMissing || !props.settings.vapiReady) {
-      return (
-        <s-banner tone="warning" heading="Automation enabled, calls not ready">
-          <s-text>Open Settings and complete the missing call provider configuration.</s-text>
-        </s-banner>
-      );
-    }
+  const liveRows = props.liveRows.map((row, index) => (
+    <IndexTable.Row id={row.key} key={row.key} position={index}>
+      <IndexTable.Cell>
+        <Text as="span" variant="bodyMd" fontWeight="medium">
+          {row.event}
+        </Text>
+      </IndexTable.Cell>
+      <IndexTable.Cell>
+        <BlockStack gap="100">
+          <div>
+            <Badge tone={badgeTone(row.tone)}>{row.status}</Badge>
+          </div>
+          {row.statusHint ? (
+            <Text as="span" variant="bodySm" tone="subdued">
+              {row.statusHint}
+            </Text>
+          ) : null}
+        </BlockStack>
+      </IndexTable.Cell>
+      <IndexTable.Cell>
+        <Text as="span" variant="bodySm" tone="subdued">
+          {row.whenText}
+        </Text>
+      </IndexTable.Cell>
+      <IndexTable.Cell>
+        <InlineStack gap="200" wrap={false}>
+          {row.recordingUrl ? (
+            <Button url={row.recordingUrl} external variant="plain" size="slim">
+              Recording
+            </Button>
+          ) : (
+            <Text as="span" tone="subdued">
+              —
+            </Text>
+          )}
+          {row.logUrl ? (
+            <Button url={row.logUrl} external variant="plain" size="slim">
+              Logs
+            </Button>
+          ) : null}
+        </InlineStack>
+      </IndexTable.Cell>
+    </IndexTable.Row>
+  ));
 
-    return (
-      <s-banner tone="success" heading="AI agents are ready to call">
-        <s-text>Open Settings to configure scripts, timing, and rules.</s-text>
-      </s-banner>
-    );
-  }, [props.settings.enabled, props.settings.criticalMissing, props.settings.vapiReady]);
+  const priorityRows = props.priorities.map((row, index) => (
+    <IndexTable.Row id={row.key} key={row.key} position={index}>
+      <IndexTable.Cell>
+        <BlockStack gap="100">
+          <Text as="span" variant="bodyMd" fontWeight="medium">
+            {row.label}
+          </Text>
+          {row.rawCountText ? (
+            <Text as="span" variant="bodySm" tone="subdued">
+              {row.rawCountText}
+            </Text>
+          ) : null}
+        </BlockStack>
+      </IndexTable.Cell>
+      <IndexTable.Cell>
+        <Badge tone={badgeTone(row.tone)}>{String(row.count)}</Badge>
+      </IndexTable.Cell>
+      <IndexTable.Cell>
+        <Text as="span" variant="bodySm" tone={row.nextBestAction ? undefined : "subdued"}>
+          {row.nextBestAction || "No action needed"}
+        </Text>
+      </IndexTable.Cell>
+      <IndexTable.Cell>
+        <Button url={row.href} variant="plain" size="slim">
+          Review
+        </Button>
+      </IndexTable.Cell>
+    </IndexTable.Row>
+  ));
+
+  const recoveryRows = props.recentRecoveries.map((row, index) => (
+    <IndexTable.Row id={row.checkoutId} key={row.checkoutId} position={index}>
+      <IndexTable.Cell>
+        <BlockStack gap="100">
+          <Button url={row.href} variant="plain" textAlign="left">
+            {row.customerName || `Checkout ${row.checkoutId}`}
+          </Button>
+          <Text as="span" variant="bodySm" tone="subdued">
+            #{row.checkoutId}
+          </Text>
+        </BlockStack>
+      </IndexTable.Cell>
+      <IndexTable.Cell>
+        <Badge tone="success">{row.amountText}</Badge>
+      </IndexTable.Cell>
+      <IndexTable.Cell>
+        <Text as="span" variant="bodySm" tone="subdued">
+          {row.whenText}
+        </Text>
+      </IndexTable.Cell>
+      <IndexTable.Cell>
+        <Text as="span" variant="bodySm">
+          {row.recoveredOrderId}
+        </Text>
+      </IndexTable.Cell>
+    </IndexTable.Row>
+  ));
 
   return (
-    <s-page heading="Dashboard">
-      <s-stack slot="secondary-actions" direction="inline" gap="tight">
-        <s-link href={props.nav.checkoutsHref}>Open checkouts</s-link>
-        <s-link href={props.nav.callsHref}>Open calls</s-link>
-      </s-stack>
+    <Page
+      title="CheckoutCall AI"
+      subtitle="Abandoned checkout recovery powered by AI voice calls"
+      titleMetadata={
+        <Badge tone={props.settings.enabled && props.settings.vapiReady ? "success" : "attention"}>
+          {props.settings.enabled && props.settings.vapiReady ? "Automation live" : "Needs attention"}
+        </Badge>
+      }
+      primaryAction={{ content: "View checkouts", url: props.nav.checkoutsHref }}
+      secondaryActions={[{ content: "Call activity", url: props.nav.callsHref }]}
+    >
+      <BlockStack gap="500">
+        {props.settings.enabled ? (
+          props.settings.criticalMissing || !props.settings.vapiReady ? (
+            <Banner tone="warning" title="Finish call setup">
+              <p>Automation is enabled, but the call provider configuration is incomplete. Open Settings before running live recovery calls.</p>
+            </Banner>
+          ) : (
+            <Banner tone="success" title="Recovery automation is ready">
+              <p>Your AI agent is ready to call eligible abandoned checkouts using the timing and offer rules in Settings.</p>
+            </Banner>
+          )
+        ) : (
+          <Banner tone="info" title="Recovery automation is paused">
+            <p>Enable automation in Settings when you are ready to start calling eligible abandoned checkouts.</p>
+          </Banner>
+        )}
 
-      <s-stack direction="block" gap="base">
-        {/* Time range + actions */}
-        <s-section>
-          <s-box border="base" borderRadius="base" padding="base" background="base">
-            <s-stack direction="block" gap="base">
-              <s-stack direction="inline" align="space-between" gap="base">
-                <s-stack direction="block" gap="tight">
-                  <s-text tone="subdued">Time range</s-text>
-                  <s-button-group>
-                    <s-button href={props.range.links.all} variant={props.range.key === "all" ? "primary" : "secondary"}>
-                      All-time
-                    </s-button>
-                    <s-button href={props.range.links.d7} variant={props.range.key === "7d" ? "primary" : "secondary"}>
-                      7d
-                    </s-button>
-                    <s-button href={props.range.links.h24} variant={props.range.key === "24h" ? "primary" : "secondary"}>
-                      24h
-                    </s-button>
-                  </s-button-group>
-                </s-stack>
+        <Card>
+          <InlineStack align="space-between" blockAlign="center" gap="400">
+            <BlockStack gap="100">
+              <Text as="h2" variant="headingMd">
+                Performance overview
+              </Text>
+              <Text as="p" variant="bodySm" tone="subdued">
+                {props.range.label} · verified Shopify recovery data
+              </Text>
+            </BlockStack>
 
-                <s-button-group>
-                  <Form method="post">
-                    <input type="hidden" name="intent" value="sync_now" />
-                    <s-button type="submit" variant="secondary">
-                      Sync now
-                    </s-button>
-                  </Form>
+            <InlineStack gap="300" blockAlign="center">
+              {rangeButtons}
+              <Form method="post">
+                <input type="hidden" name="intent" value="sync_now" />
+                <Button submit>Sync now</Button>
+              </Form>
+              <Form method="post">
+                <input type="hidden" name="intent" value="create_test_call" />
+                <Button submit variant="primary" disabled={!props.canCreateTestCall}>
+                  Test call
+                </Button>
+              </Form>
+            </InlineStack>
+          </InlineStack>
+        </Card>
 
-                  <Form method="post">
-                    <input type="hidden" name="intent" value="create_test_call" />
-                    <s-button type="submit" variant="primary" disabled={!props.canCreateTestCall}>
-                      Create test call
-                    </s-button>
-                  </Form>
-                </s-button-group>
-              </s-stack>
-
-              {banner}
-            </s-stack>
-          </s-box>
-        </s-section>
-
-        {/* HERO verified recovered callout */}
         {props.hero.show ? (
-          <s-section>
-            <s-box border="base" borderRadius="base" padding="base" background="subdued">
-              <s-stack direction="block" gap="tight">
-                <s-heading>Verified recovered revenue: {props.hero.recoveredRevenueText}</s-heading>
-                <s-text tone="subdued">
-                  from {props.hero.recoveredCount} recovered checkouts • Win rate {props.hero.winRate}%
-                </s-text>
-                <s-stack direction="inline" gap="tight">
-                  <s-badge tone="success">VERIFIED</s-badge>
-                  <s-badge tone="info">{props.range.label}</s-badge>
-                </s-stack>
-                <s-button href={props.hero.href} variant="primary">
-                  View recovered checkouts
-                </s-button>
-              </s-stack>
-            </s-box>
-          </s-section>
+          <Card>
+            <InlineStack align="space-between" blockAlign="center" gap="500">
+              <BlockStack gap="200">
+                <InlineStack gap="200" blockAlign="center">
+                  <Badge tone="success">Verified revenue</Badge>
+                  <Badge tone="info">{props.range.label}</Badge>
+                </InlineStack>
+                <Text as="p" variant="heading2xl">
+                  {props.hero.recoveredRevenueText}
+                </Text>
+                <Text as="p" variant="bodyMd" tone="subdued">
+                  {props.hero.recoveredCount} recovered checkouts · {props.hero.winRate}% win rate
+                </Text>
+              </BlockStack>
+              <Button url={props.hero.href}>View recoveries</Button>
+            </InlineStack>
+          </Card>
         ) : null}
 
-        {/* Metrics tiles row */}
-        <s-section>
-          <s-stack direction="block" gap="tight">
-            <s-heading size="small">Key metrics</s-heading>
-            <s-text tone="subdued">Click a metric to drill into the relevant list view.</s-text>
+        <BlockStack gap="300">
+          <SectionHeader title="Key metrics" subtitle="The numbers that matter most for recovery performance." />
+          <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="400">
+            {props.metrics.map((metric) => (
+              <MetricCard key={metric.key} {...metric} />
+            ))}
+          </InlineGrid>
+        </BlockStack>
 
-            <s-grid gap="base" gridTemplateColumns="@container (inline-size < 860px) 1fr 1fr, 1fr 1fr 1fr 1fr">
-              {props.metrics.map((m) => (
-                <React.Fragment key={m.key}>{metricTile(m)}</React.Fragment>
-              ))}
-            </s-grid>
-
-            <s-stack direction="inline" gap="tight">
-              <s-chip>Eligible = contactable + meets min order value</s-chip>
-              <s-chip>Follow-ups = needs_followup outcomes</s-chip>
-              <s-chip>Discounts = suggested or percent &gt; 0</s-chip>
-            </s-stack>
-          </s-stack>
-        </s-section>
-
-        {/* Two-column: pipeline + live */}
-        <s-query-container>
-          <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 1fr 1fr">
-            {/* Recovery pipeline */}
-            <s-section heading="Recovery pipeline">
-              <s-box border="base" borderRadius="base" padding="base" background="base">
-                <s-stack direction="block" gap="tight">
-                  {props.pipelineRows.map((p) => (
-                    <s-clickable key={p.key} href={p.href} accessibilityRole="link">
-                      <s-box border="base" borderRadius="base" padding="base" background="base">
-                        <s-stack direction="inline" align="space-between" gap="base">
-                          <s-text>{p.label}</s-text>
-                          <s-stack direction="inline" gap="tight">
-                            <s-badge tone={toneBadge(p.tone)}>{String(p.count)}</s-badge>
-                            <s-badge tone="new">View</s-badge>
-                          </s-stack>
-                        </s-stack>
-                      </s-box>
-                    </s-clickable>
+        <Layout>
+          <Layout.Section variant="oneHalf">
+            <Card>
+              <BlockStack gap="400">
+                <SectionHeader title="Recovery pipeline" subtitle="Where eligible abandoned checkouts are right now." />
+                <BlockStack gap="200">
+                  {props.pipelineRows.map((row, index) => (
+                    <React.Fragment key={row.key}>
+                      <InlineStack align="space-between" blockAlign="center" gap="300">
+                        <BlockStack gap="100">
+                          <Text as="p" variant="bodyMd" fontWeight="medium">
+                            {row.label}
+                          </Text>
+                          <Button url={row.href} variant="plain" size="slim">
+                            View checkouts
+                          </Button>
+                        </BlockStack>
+                        <Badge tone={badgeTone(row.tone)}>{String(row.count)}</Badge>
+                      </InlineStack>
+                      {index < props.pipelineRows.length - 1 ? <Divider /> : null}
+                    </React.Fragment>
                   ))}
-                </s-stack>
-              </s-box>
-            </s-section>
+                </BlockStack>
+              </BlockStack>
+            </Card>
+          </Layout.Section>
 
-            {/* Live activity */}
-            <s-section heading="Live activity">
-              <s-box border="base" borderRadius="base" background="base">
-                <s-table>
-                  <s-table-header-row>
-                    <s-table-header>Event</s-table-header>
-                    <s-table-header>Status</s-table-header>
-                    <s-table-header>When</s-table-header>
-                    <s-table-header>Links</s-table-header>
-                  </s-table-header-row>
+          <Layout.Section variant="oneHalf">
+            <Card padding="0">
+              <Box padding="400">
+                <SectionHeader title="Live activity" subtitle="Latest AI call events and outcomes." />
+              </Box>
+              <IndexTable
+                resourceName={{ singular: "activity", plural: "activities" }}
+                itemCount={props.liveRows.length}
+                headings={[{ title: "Event" }, { title: "Status" }, { title: "When" }, { title: "Links" }]}
+                selectable={false}
+                emptyState={
+                  <Box padding="500">
+                    <Text as="p" tone="subdued" alignment="center">
+                      No recent activity yet.
+                    </Text>
+                  </Box>
+                }
+              >
+                {liveRows}
+              </IndexTable>
+            </Card>
+          </Layout.Section>
+        </Layout>
 
-                  <s-table-body>
-                    {props.liveRows.length === 0 ? (
-                      <s-table-row>
-                        <s-table-cell colSpan={4}>
-                          <s-box padding="base">
-                            <s-text tone="subdued">No recent activity.</s-text>
-                          </s-box>
-                        </s-table-cell>
-                      </s-table-row>
-                    ) : (
-                      props.liveRows.map((r) => (
-                        <s-table-row key={r.key}>
-                          <s-table-cell>{r.event}</s-table-cell>
-                          <s-table-cell>
-                            <s-stack direction="block" gap="tight">
-                              <s-badge tone={toneBadge(r.tone)}>{r.status}</s-badge>
-                              {r.statusHint ? <s-text tone="subdued">{r.statusHint}</s-text> : null}
-                            </s-stack>
-                          </s-table-cell>
-                          <s-table-cell>
-                            <s-text tone="subdued">{r.whenText}</s-text>
-                          </s-table-cell>
-                          <s-table-cell>
-                            <s-stack direction="inline" gap="tight">
-                              {r.recordingUrl ? <s-link href={r.recordingUrl}>Recording</s-link> : <s-text tone="subdued">—</s-text>}
-                              {r.logUrl ? <s-link href={r.logUrl}>Logs</s-link> : null}
-                            </s-stack>
-                          </s-table-cell>
-                        </s-table-row>
-                      ))
-                    )}
-                  </s-table-body>
-                </s-table>
-              </s-box>
-            </s-section>
-          </s-grid>
-        </s-query-container>
+        <Card padding="0">
+          <Box padding="400">
+            <SectionHeader title="Today’s priorities" subtitle="Recovery opportunities that deserve attention first." />
+          </Box>
+          <IndexTable
+            resourceName={{ singular: "priority", plural: "priorities" }}
+            itemCount={props.priorities.length}
+            headings={[{ title: "Priority" }, { title: "Count" }, { title: "Next best action" }, { title: "" }]}
+            selectable={false}
+          >
+            {priorityRows}
+          </IndexTable>
+        </Card>
 
-        {/* Today’s priorities */}
-        <s-section heading="Today’s priorities">
-          <s-box border="base" borderRadius="base" background="base">
-            <s-table>
-              <s-table-header-row>
-                <s-table-header>Priority</s-table-header>
-                <s-table-header>Count</s-table-header>
-                <s-table-header>Next best action</s-table-header>
-                <s-table-header>View</s-table-header>
-              </s-table-header-row>
+        <Card padding="0">
+          <Box padding="400">
+            <SectionHeader title="Recent recoveries" subtitle="Verified Shopify orders attributed to abandoned checkout recovery." />
+          </Box>
+          <IndexTable
+            resourceName={{ singular: "recovery", plural: "recoveries" }}
+            itemCount={props.recentRecoveries.length}
+            headings={[{ title: "Customer" }, { title: "Recovered" }, { title: "When" }, { title: "Order" }]}
+            selectable={false}
+            emptyState={
+              <Box padding="500">
+                <Text as="p" tone="subdued" alignment="center">
+                  No verified recoveries yet.
+                </Text>
+              </Box>
+            }
+          >
+            {recoveryRows}
+          </IndexTable>
+        </Card>
 
-              <s-table-body>
-                {props.priorities.map((p) => (
-                  <s-table-row key={p.key}>
-                    <s-table-cell>
-                      <s-stack direction="block" gap="tight">
-                        <s-text>{p.label}</s-text>
-                        {p.rawCountText ? <s-text tone="subdued">{p.rawCountText}</s-text> : null}
-                      </s-stack>
-                    </s-table-cell>
-                    <s-table-cell>
-                      <s-badge tone={toneBadge(p.tone)}>{String(p.count)}</s-badge>
-                    </s-table-cell>
-                    <s-table-cell>
-                      <s-text tone={p.nextBestAction ? "base" : "subdued"}>{p.nextBestAction || "—"}</s-text>
-                    </s-table-cell>
-                    <s-table-cell>
-                      <s-link href={p.href}>View</s-link>
-                    </s-table-cell>
-                  </s-table-row>
-                ))}
-              </s-table-body>
-            </s-table>
-          </s-box>
-        </s-section>
-
-        {/* Recent recoveries */}
-        <s-section heading="Recent recoveries">
-          <s-box border="base" borderRadius="base" background="base">
-            <s-table>
-              <s-table-header-row>
-                <s-table-header>Customer</s-table-header>
-                <s-table-header>Recovered</s-table-header>
-                <s-table-header>When</s-table-header>
-                <s-table-header>Order</s-table-header>
-              </s-table-header-row>
-
-              <s-table-body>
-                {props.recentRecoveries.length === 0 ? (
-                  <s-table-row>
-                    <s-table-cell colSpan={4}>
-                      <s-box padding="base">
-                        <s-text tone="subdued">No recoveries yet.</s-text>
-                      </s-box>
-                    </s-table-cell>
-                  </s-table-row>
+        <Layout>
+          <Layout.Section variant="oneHalf">
+            <Card>
+              <BlockStack gap="400">
+                <SectionHeader title="Top blockers" subtitle="Most common blockers from AI call summaries in the last 7 days." />
+                {props.blockers.total === 0 ? (
+                  <Text as="p" tone="subdued">
+                    No call summaries in the last 7 days.
+                  </Text>
                 ) : (
-                  props.recentRecoveries.map((r) => (
-                    <s-table-row key={r.checkoutId}>
-                      <s-table-cell>
-                        <s-stack direction="block" gap="tight">
-                          <s-link href={r.href}>{r.customerName || `Checkout ${r.checkoutId}`}</s-link>
-                          <s-text tone="subdued">#{r.checkoutId}</s-text>
-                        </s-stack>
-                      </s-table-cell>
-                      <s-table-cell>
-                        <s-badge tone="success">{r.amountText}</s-badge>
-                      </s-table-cell>
-                      <s-table-cell>
-                        <s-text tone="subdued">{r.whenText}</s-text>
-                      </s-table-cell>
-                      <s-table-cell>{r.recoveredOrderId}</s-table-cell>
-                    </s-table-row>
-                  ))
+                  <BlockStack gap="300">
+                    {props.blockers.rows.map((row, index) => (
+                      <React.Fragment key={row.key}>
+                        <InlineStack align="space-between" blockAlign="center" gap="300">
+                          <InlineStack gap="200" blockAlign="center">
+                            <Text as="span" variant="bodyMd">
+                              {row.label}
+                            </Text>
+                            <Badge tone={badgeTone(row.tone)}>{String(row.count)}</Badge>
+                          </InlineStack>
+                          <Text as="span" variant="bodySm" tone="subdued">
+                            {row.pct == null ? "—" : `${row.pct}%`} of {props.blockers.total}
+                          </Text>
+                        </InlineStack>
+                        {index < props.blockers.rows.length - 1 ? <Divider /> : null}
+                      </React.Fragment>
+                    ))}
+                  </BlockStack>
                 )}
-              </s-table-body>
-            </s-table>
-          </s-box>
-        </s-section>
+              </BlockStack>
+            </Card>
+          </Layout.Section>
 
-        {/* Top blockers (7d) */}
-        <s-section heading="Top blockers (7d)">
-          <s-box border="base" borderRadius="base" padding="base" background="base">
-            <s-stack direction="block" gap="tight">
-              <s-text tone="subdued">Based on call summaries in the last 7 days.</s-text>
-              {props.blockers.total === 0 ? (
-                <s-text tone="subdued">No calls in the last 7 days.</s-text>
-              ) : (
-                props.blockers.rows.map((b) => (
-                  <s-box key={b.key} border="base" borderRadius="base" padding="base" background="subdued">
-                    <s-stack direction="inline" align="space-between" gap="base">
-                      <s-stack direction="inline" gap="tight">
-                        <s-text>{b.label}</s-text>
-                        <s-badge tone={toneBadge(b.tone)}>{String(b.count)}</s-badge>
-                      </s-stack>
-                      <s-stack direction="inline" gap="tight">
-                        <s-badge tone="new">{b.pct == null ? "—" : `${b.pct}%`}</s-badge>
-                        <s-text tone="subdued">of {props.blockers.total}</s-text>
-                      </s-stack>
-                    </s-stack>
-                  </s-box>
-                ))
-              )}
-            </s-stack>
-          </s-box>
-        </s-section>
-
-        {/* System status / Settings snapshot */}
-        <s-section heading="System status / Settings snapshot">
-          <s-box border="base" borderRadius="base" padding="base" background="base">
-            <s-stack direction="block" gap="base">
-              <s-table>
-                <s-table-header-row>
-                  <s-table-header>Setting</s-table-header>
-                  <s-table-header>Value</s-table-header>
-                </s-table-header-row>
-
-                <s-table-body>
-                  {settingsRows.map((r) => (
-                    <s-table-row key={r.label}>
-                      <s-table-cell>{r.label}</s-table-cell>
-                      <s-table-cell>
-                        <s-stack direction="inline" gap="tight">
-                          <s-badge tone={toneBadge(r.tone)}>{r.value}</s-badge>
-                        </s-stack>
-                      </s-table-cell>
-                    </s-table-row>
+          <Layout.Section variant="oneHalf">
+            <Card>
+              <BlockStack gap="400">
+                <SectionHeader title="Automation setup" subtitle="A quick view of the settings that control recovery calls." />
+                <BlockStack gap="300">
+                  {settingsRows.map((row, index) => (
+                    <React.Fragment key={row.label}>
+                      <InlineStack align="space-between" blockAlign="center" gap="300">
+                        <Text as="span" variant="bodyMd">
+                          {row.label}
+                        </Text>
+                        <Badge tone={badgeTone(row.tone)}>{row.value}</Badge>
+                      </InlineStack>
+                      {index < settingsRows.length - 1 ? <Divider /> : null}
+                    </React.Fragment>
                   ))}
-                </s-table-body>
-              </s-table>
-            </s-stack>
-          </s-box>
-        </s-section>
-      </s-stack>
-    </s-page>
+                </BlockStack>
+              </BlockStack>
+            </Card>
+          </Layout.Section>
+        </Layout>
+      </BlockStack>
+    </Page>
   );
 }
 
