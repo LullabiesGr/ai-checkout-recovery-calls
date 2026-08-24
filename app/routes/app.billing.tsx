@@ -209,6 +209,12 @@ export async function action({ request }: ActionFunctionArgs) {
 
     return fail("Unknown intent");
   } catch (e) {
+    // Shopify's embedded redirect helper can throw a Response so React Router
+    // can preserve the special App Bridge navigation headers. Never convert
+    // that control-flow response into a billing error.
+    if (e instanceof Response) throw e;
+
+    console.error("[billing] action failed", e);
     return fail(asErrorMessage(e));
   }
 }
