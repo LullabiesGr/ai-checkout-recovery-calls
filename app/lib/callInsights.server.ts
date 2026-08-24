@@ -1,5 +1,6 @@
 // app/lib/callInsights.server.ts
 import type { SupabaseCallSummary } from "./callInsights.shared";
+export { pickRecordingUrl } from "./callInsights.shared";
 
 function uniq(values: string[]) {
   const s = new Set(values.map((x) => String(x ?? "").trim()).filter(Boolean));
