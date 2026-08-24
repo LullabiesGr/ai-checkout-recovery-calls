@@ -96,19 +96,17 @@ export default function App() {
   return (
     <AppProvider embedded apiKey={apiKey}>
       <ui-nav-menu>
-        <a href={href("/app")} rel="home">
+        <a href={href("/app/dashboard")} rel="home">
           Dashboard
         </a>
         <a href={href("/app/checkouts")}>Checkouts</a>
-        <a href={href("/app/settings")}>Settings</a>
+        <a href={href("/app/calls")}>Calls</a>
+        <a href={href("/app/settings")}>Automation</a>
         <a href={href("/app/billing")}>Billing</a>
-
         {showAdminInbox ? <a href={href("/app/admin/support")}>Support Inbox</a> : null}
       </ui-nav-menu>
 
       <Outlet />
-
-      {/* Support chat σε ΟΛΟΥΣ */}
       <SupportBubble shop={shop} />
     </AppProvider>
   );
