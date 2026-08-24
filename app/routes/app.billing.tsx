@@ -37,12 +37,6 @@ type LoaderData = {
   billingError: string | null;
 };
 
-function requiredEnv(name: string) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env: ${name}`);
-  return v;
-}
-
 function asErrorMessage(e: unknown) {
   if (!e) return "Unknown error";
   if (e instanceof Error) return e.message;
@@ -92,19 +86,6 @@ function embeddedPath(pathname: string, request: Request, extra?: Record<string,
 
   const qs = out.searchParams.toString();
   return qs ? `${out.pathname}?${qs}` : out.pathname;
-}
-
-function billingAdminUrl(shop: string, extra?: Record<string, string>) {
-  const apiKey = requiredEnv("SHOPIFY_API_KEY");
-  const u = new URL(`https://${shop}/admin/apps/${apiKey}/app/billing`);
-
-  if (extra) {
-    for (const [k, v] of Object.entries(extra)) {
-      if (v != null && String(v).length) u.searchParams.set(k, String(v));
-    }
-  }
-
-  return u.toString();
 }
 
 function billingReturnUrlOnApp(request: Request, shop: string) {
@@ -157,32 +138,18 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 export async function action({ request }: ActionFunctionArgs) {
   const auth: any = await authenticate.admin(request);
-  const { admin, session } = auth;
+  const { admin, session, redirect } = auth;
   const shop = session.shop;
 
   const fd = await request.formData();
   const intent = String(fd.get("intent") || "");
-  const wantsTop = String(fd.get("top") || "") === "1";
   const couponCode = String(fd.get("coupon") || "").trim();
 
   const backToBilling = (extra?: Record<string, string>) => {
-    const location = wantsTop ? billingAdminUrl(shop, extra) : embeddedPath("/app/billing", request, extra);
-
-    return new Response(null, { status: 303, headers: { Location: location } });
+    return redirect(embeddedPath("/app/billing", request, extra));
   };
 
   const fail = (msg: string) => backToBilling({ billing_error: msg });
-
-  const redirectTopHtml = (url: string) => {
-    const html = `<!doctype html><html><head><meta charset="utf-8" /></head><body><script>window.top.location.href=${JSON.stringify(
-      url
-    )};</script></body></html>`;
-
-    return new Response(html, {
-      status: 200,
-      headers: { "Content-Type": "text/html; charset=utf-8" },
-    });
-  };
 
   try {
     if (intent === "select_plan") {
@@ -224,11 +191,7 @@ export async function action({ request }: ActionFunctionArgs) {
         couponCode,
       });
 
-      if (wantsTop) {
-        return new Response(null, { status: 303, headers: { Location: confirmationUrl } });
-      }
-
-      return redirectTopHtml(confirmationUrl);
+      return redirect(confirmationUrl, { target: "_top" });
     }
 
     if (intent === "increase_cap") {
@@ -236,12 +199,7 @@ export async function action({ request }: ActionFunctionArgs) {
       if (!Number.isFinite(newCapEUR) || newCapEUR <= 0) return fail("Invalid cap amount");
 
       const { confirmationUrl } = await requestCapIncrease({ shop, admin, newCapEUR });
-
-      if (wantsTop) {
-        return new Response(null, { status: 303, headers: { Location: confirmationUrl } });
-      }
-
-      return redirectTopHtml(confirmationUrl);
+      return redirect(confirmationUrl, { target: "_top" });
     }
 
     if (intent === "cancel") {
@@ -366,9 +324,8 @@ export default function BillingRoute() {
                 ) : null}
 
                 {hasActivePaidPlan ? (
-                  <Form method="post" reloadDocument target="_top">
+                  <Form method="post">
                     <input type="hidden" name="intent" value="increase_cap" />
-                    <input type="hidden" name="top" value="1" />
                     <input
                       type="hidden"
                       name="newCapEUR"
@@ -421,8 +378,6 @@ export default function BillingRoute() {
                     : ("success" as const);
 
                 const isThisSubmitting = isBusy && activeIntent === "select_plan" && activePlan === k;
-                const needsConfirmation = k !== "FREE";
-                const formProps: any = needsConfirmation ? { reloadDocument: true, target: "_top" } : {};
 
                 return (
                   <Card key={k}>
@@ -447,11 +402,10 @@ export default function BillingRoute() {
                         </Text>
                       )}
 
-                      <Form method="post" {...formProps}>
+                      <Form method="post">
                         <input type="hidden" name="intent" value="select_plan" />
                         <input type="hidden" name="plan" value={k} />
                         <input type="hidden" name="coupon" value={coupon.trim()} />
-                        {needsConfirmation ? <input type="hidden" name="top" value="1" /> : null}
                         <Button submit disabled={isSelected} loading={isThisSubmitting}>
                           {isSelected ? "Selected" : "Select"}
                         </Button>
