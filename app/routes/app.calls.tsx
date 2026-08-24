@@ -11,6 +11,21 @@ import {
   syncAbandonedCheckoutsFromShopify,
 } from "../callRecovery.server";
 import { createVapiCallForJob } from "../callProvider.server";
+import {
+  Badge,
+  Banner,
+  BlockStack,
+  Box,
+  Button,
+  Card,
+  Divider,
+  IndexTable,
+  InlineGrid,
+  InlineStack,
+  Layout,
+  Page,
+  Text,
+} from "@shopify/polaris";
 
 function safeStr(v: any) {
   return v == null ? "" : String(v);
@@ -20,47 +35,6 @@ function formatWhen(iso: string) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "-";
   return d.toLocaleString();
-}
-
-function Pill(props: { children: any; tone?: "neutral" | "green" | "blue" | "amber" | "red"; title?: string }) {
-  const tone = props.tone ?? "neutral";
-  const t =
-    tone === "green"
-      ? { bg: "rgba(16,185,129,0.10)", bd: "rgba(16,185,129,0.25)", tx: "#065f46" }
-      : tone === "blue"
-      ? { bg: "rgba(59,130,246,0.10)", bd: "rgba(59,130,246,0.25)", tx: "#1e3a8a" }
-      : tone === "amber"
-      ? { bg: "rgba(245,158,11,0.10)", bd: "rgba(245,158,11,0.25)", tx: "#92400e" }
-      : tone === "red"
-      ? { bg: "rgba(239,68,68,0.10)", bd: "rgba(239,68,68,0.25)", tx: "#7f1d1d" }
-      : { bg: "rgba(0,0,0,0.04)", bd: "rgba(0,0,0,0.10)", tx: "rgba(0,0,0,0.75)" };
-
-  return (
-    <span
-      title={props.title}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        padding: "3px 10px",
-        borderRadius: 999,
-        border: `1px solid ${t.bd}`,
-        background: t.bg,
-        color: t.tx,
-        fontWeight: 950,
-        fontSize: 12,
-        whiteSpace: "nowrap",
-      }}
-    >
-      {props.children}
-    </span>
-  );
-}
-
-function StatusPill({ status }: { status: string }) {
-  const s = safeStr(status).toUpperCase();
-  const tone =
-    s === "COMPLETED" ? "green" : s === "CALLING" ? "blue" : s === "QUEUED" ? "amber" : s === "FAILED" ? "red" : "neutral";
-  return <Pill tone={tone as any}>{s}</Pill>;
 }
 
 type CallRow = {
@@ -100,14 +74,6 @@ function pickOpenAIOutcome(sb: any): string | null {
   if (a && a !== "{}") return a;
   const c = normalizeOutcome(sb?.call_outcome);
   return c;
-}
-
-function outcomeTone(outcome: string | null): "green" | "amber" | "red" | "neutral" {
-  const s = (outcome || "").toLowerCase();
-  if (s.includes("recovered") || s.includes("converted") || s.includes("success")) return "green";
-  if (s.includes("needs_followup") || s.includes("follow") || s.includes("voicemail")) return "amber";
-  if (s.includes("no_answer") || s.includes("failed") || s.includes("not_interested")) return "red";
-  return "neutral";
 }
 
 function pickSentSystemPrompt(sb: any): string | null {
@@ -153,7 +119,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       where: { shop },
       orderBy: { createdAt: "desc" },
       take: 80,
-      select: { id: true, checkoutId: true, status: true, scheduledFor: true, createdAt: true, attempts: true, providerCallId: true, recordingUrl: true },
+      select: {
+        id: true,
+        checkoutId: true,
+        status: true,
+        scheduledFor: true,
+        createdAt: true,
+        attempts: true,
+        providerCallId: true,
+        recordingUrl: true,
+      },
     }),
   ]);
 
@@ -232,7 +207,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     for (const job of jobs) {
       const locked = await db.callJob.updateMany({
         where: { id: job.id, shop, status: "QUEUED" },
-        data: { status: "CALLING", attempts: { increment: 1 }, provider: providerOk ? "vapi" : "sim", outcome: null },
+        data: {
+          status: "CALLING",
+          attempts: { increment: 1 },
+          provider: providerOk ? "vapi" : "sim",
+          outcome: null,
+        },
       });
       if (locked.count === 0) continue;
 
@@ -262,7 +242,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           const next = new Date(Date.now() + retryMinutes * 60 * 1000);
           await db.callJob.update({
             where: { id: job.id },
-            data: { status: "QUEUED", scheduledFor: next, outcome: `RETRY_SCHEDULED in ${retryMinutes}m` },
+            data: {
+              status: "QUEUED",
+              scheduledFor: next,
+              outcome: `RETRY_SCHEDULED in ${retryMinutes}m`,
+            },
           });
         }
       }
@@ -312,7 +296,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const next = new Date(Date.now() + retryMinutes * 60 * 1000);
         await db.callJob.updateMany({
           where: { id: callJobId, shop },
-          data: { status: "QUEUED", scheduledFor: next, outcome: `RETRY_SCHEDULED in ${retryMinutes}m` },
+          data: {
+            status: "QUEUED",
+            scheduledFor: next,
+            outcome: `RETRY_SCHEDULED in ${retryMinutes}m`,
+          },
         });
       }
     }
@@ -322,6 +310,46 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   return redirectBack();
 };
+
+function statusTone(status: string) {
+  const value = safeStr(status).toUpperCase();
+  if (value === "COMPLETED") return "success" as const;
+  if (value === "CALLING") return "info" as const;
+  if (value === "QUEUED") return "attention" as const;
+  if (value === "FAILED") return "critical" as const;
+  return undefined;
+}
+
+function outcomeTone(outcome: string | null) {
+  const value = safeStr(outcome).toLowerCase();
+  if (value.includes("recovered") || value.includes("converted") || value.includes("success")) return "success" as const;
+  if (value.includes("needs_followup") || value.includes("follow") || value.includes("voicemail")) return "attention" as const;
+  if (value.includes("no_answer") || value.includes("failed") || value.includes("not_interested")) return "critical" as const;
+  return undefined;
+}
+
+function displayOutcome(value: string | null) {
+  if (!value) return "—";
+  return value.replace(/_/g, " ").toUpperCase();
+}
+
+function StatCard({ label, value, help }: { label: string; value: number; help: string }) {
+  return (
+    <Card>
+      <BlockStack gap="200">
+        <Text as="p" variant="bodySm" tone="subdued">
+          {label}
+        </Text>
+        <Text as="p" variant="headingXl">
+          {String(value)}
+        </Text>
+        <Text as="p" variant="bodySm" tone="subdued">
+          {help}
+        </Text>
+      </BlockStack>
+    </Card>
+  );
+}
 
 export default function Calls() {
   const { shop, providerConfigured, stats, rows } = useLoaderData<typeof loader>();
@@ -335,335 +363,244 @@ export default function Calls() {
   }, [stats.calling, stats.queued, revalidator]);
 
   const [selectedId, setSelectedId] = React.useState<string | null>(rows?.[0]?.id ?? null);
+
   React.useEffect(() => {
     if (!selectedId && rows?.[0]?.id) setSelectedId(rows[0].id);
   }, [selectedId, rows]);
 
   const selected = React.useMemo(() => rows.find((r) => r.id === selectedId) ?? null, [rows, selectedId]);
 
-  const headerCell: React.CSSProperties = {
-    position: "sticky",
-    top: 0,
-    background: "white",
-    zIndex: 1,
-    borderBottom: "1px solid rgba(0,0,0,0.08)",
-    padding: "10px 10px",
-    fontSize: 12,
-    fontWeight: 1000,
-    color: "rgba(17,24,39,0.55)",
-    whiteSpace: "nowrap",
-  };
-
-  const cell: React.CSSProperties = {
-    padding: "10px 10px",
-    borderBottom: "1px solid rgba(0,0,0,0.06)",
-    verticalAlign: "top",
-    fontSize: 13,
-    fontWeight: 900,
-    color: "rgba(17,24,39,0.78)",
-  };
-
   return (
-    <div style={{ padding: 16, minWidth: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-        <div style={{ display: "grid", gap: 4, minWidth: 0 }}>
-          <div style={{ fontWeight: 1100, fontSize: 18, color: "rgba(17,24,39,0.92)" }}>Calls</div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-            <Pill title="Shop">{shop}</Pill>
-            <Pill title="Provider">{providerConfigured ? "Provider ready" : "Simulation"}</Pill>
-            {stats.calling > 0 ? <Pill tone="blue">{stats.calling} calling</Pill> : null}
-            {stats.queued > 0 ? <Pill tone="amber">{stats.queued} queued</Pill> : null}
-            <Pill title="Completed in 7d">{stats.completed7d} completed/7d</Pill>
-          </div>
-        </div>
+    <Page
+      title="Call activity"
+      subtitle="Monitor queued calls, live calls, AI outcomes and follow-up intelligence"
+      titleMetadata={
+        <Badge tone={providerConfigured ? "success" : "attention"}>
+          {providerConfigured ? "Provider ready" : "Simulation mode"}
+        </Badge>
+      }
+      backAction={{ content: "Dashboard", url: "/app/dashboard" }}
+    >
+      <BlockStack gap="500">
+        {!providerConfigured ? (
+          <Banner tone="warning" title="Call provider is not fully configured">
+            <p>Calls will not use the live provider until the required provider settings are available.</p>
+          </Banner>
+        ) : null}
 
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <Form method="post">
-            <input type="hidden" name="intent" value="run_jobs" />
-            <button
-              type="submit"
-              style={{
-                padding: "10px 12px",
-                borderRadius: 12,
-                border: "1px solid rgba(59,130,246,0.30)",
-                background: "rgba(59,130,246,0.10)",
-                cursor: "pointer",
-                fontWeight: 1000,
-              }}
-            >
-              Run queued jobs →
-            </button>
-          </Form>
+        <Card>
+          <InlineStack align="space-between" blockAlign="center" gap="400">
+            <BlockStack gap="100">
+              <Text as="h2" variant="headingMd">
+                Live queue
+              </Text>
+              <Text as="p" variant="bodySm" tone="subdued">
+                {shop} · refreshes automatically every 5 seconds while calls are active
+              </Text>
+            </BlockStack>
+            <InlineStack gap="200">
+              <Form method="post">
+                <input type="hidden" name="intent" value="run_jobs" />
+                <Button submit variant="primary" disabled={stats.queued === 0}>
+                  Run queued jobs
+                </Button>
+              </Form>
+              <Button onClick={() => revalidator.revalidate()}>Refresh</Button>
+            </InlineStack>
+          </InlineStack>
+        </Card>
 
-          <button
-            type="button"
-            onClick={() => revalidator.revalidate()}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 12,
-              border: "1px solid rgba(0,0,0,0.12)",
-              background: "white",
-              cursor: "pointer",
-              fontWeight: 1000,
-            }}
-          >
-            Refresh
-          </button>
-        </div>
-      </div>
+        <InlineGrid columns={{ xs: 1, sm: 3 }} gap="400">
+          <StatCard label="Queued" value={stats.queued} help="Waiting for their scheduled call time" />
+          <StatCard label="Calling now" value={stats.calling} help="Currently in progress with the provider" />
+          <StatCard label="Completed" value={stats.completed7d} help="Completed during the last 7 days" />
+        </InlineGrid>
 
-      <div
-        style={{
-          marginTop: 12,
-          display: "grid",
-          gridTemplateColumns: "minmax(0, 1fr) 420px",
-          gap: 12,
-          alignItems: "start",
-          minWidth: 0,
-        }}
-      >
-        <div
-          style={{
-            border: "1px solid rgba(0,0,0,0.08)",
-            borderRadius: 16,
-            overflow: "hidden",
-            background: "white",
-            boxShadow: "0 1px 0 rgba(0,0,0,0.03)",
-            minWidth: 0,
-          }}
-        >
-          <div style={{ maxHeight: 650, overflow: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1040 }}>
-              <thead>
-                <tr>
-                  <th style={headerCell}>Checkout</th>
-                  <th style={headerCell}>Status</th>
-                  <th style={headerCell}>Outcome</th>
-                  <th style={headerCell}>OpenAI</th>
-                  <th style={headerCell}>AI</th>
-                  <th style={headerCell}>Scheduled</th>
-                  <th style={headerCell}>Attempts</th>
-                  <th style={headerCell}>Recording</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => {
-                  const isSel = r.id === selectedId;
-                  return (
-                    <tr
-                      key={r.id}
-                      onClick={() => setSelectedId(r.id)}
-                      style={{ background: isSel ? "rgba(59,130,246,0.06)" : "white", cursor: "pointer" }}
-                    >
-                      <td style={{ ...cell, color: "rgba(30,58,138,0.95)" }}>{r.checkoutId}</td>
-                      <td style={cell}>
-                        <StatusPill status={r.status} />
-                      </td>
-                      <td style={cell}>
-                        <Pill tone={outcomeTone(r.callOutcome)}>
-                          {r.callOutcome ? String(r.callOutcome).toUpperCase() : "—"}
-                        </Pill>
-                      </td>
-                      <td style={cell}>
-                        <Pill tone={outcomeTone(r.openaiOutcome)}>
-                          {r.openaiOutcome ? String(r.openaiOutcome).toUpperCase() : "—"}
-                        </Pill>
-                      </td>
-                      <td style={cell}>
-                        <Pill>{r.aiStatus ? `AI: ${String(r.aiStatus).toUpperCase()}` : "AI: —"}</Pill>
-                      </td>
-                      <td style={cell}>
-                        <div style={{ display: "grid", gap: 4 }}>
-                          <div style={{ fontWeight: 1000 }}>{formatWhen(r.scheduledFor)}</div>
-                          <div style={{ fontSize: 11, fontWeight: 900, color: "rgba(17,24,39,0.40)" }}>
-                            Created {formatWhen(r.createdAt)}
-                          </div>
-                        </div>
-                      </td>
-                      <td style={cell}>{r.attempts}</td>
-                      <td style={cell}>
-                        {r.recordingUrl ? (
-                          <a href={r.recordingUrl} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>
-                            <button
-                              type="button"
-                              style={{
-                                padding: "8px 10px",
-                                borderRadius: 12,
-                                border: "1px solid rgba(59,130,246,0.30)",
-                                background: "rgba(59,130,246,0.10)",
-                                cursor: "pointer",
-                                fontWeight: 1000,
-                                fontSize: 12,
-                              }}
-                            >
-                              Open
-                            </button>
-                          </a>
-                        ) : (
-                          <button
-                            type="button"
-                            disabled
-                            style={{
-                              padding: "8px 10px",
-                              borderRadius: 12,
-                              border: "1px solid rgba(0,0,0,0.10)",
-                              background: "rgba(0,0,0,0.03)",
-                              fontWeight: 1000,
-                              fontSize: 12,
-                              opacity: 0.6,
-                            }}
-                          >
-                            Open
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <Layout>
+          <Layout.Section>
+            <Card padding="0">
+              <Box padding="400">
+                <BlockStack gap="100">
+                  <Text as="h2" variant="headingMd">
+                    Recent calls
+                  </Text>
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    Select any call to inspect the AI summary and next action.
+                  </Text>
+                </BlockStack>
+              </Box>
 
-        <div
-          style={{
-            position: "sticky",
-            top: 12,
-            border: "1px solid rgba(0,0,0,0.08)",
-            borderRadius: 16,
-            background: "white",
-            overflow: "hidden",
-            minWidth: 0,
-            width: 420,
-            justifySelf: "stretch",
-            boxShadow: "0 1px 0 rgba(0,0,0,0.03)",
-          }}
-        >
-          <div style={{ padding: 14, borderBottom: "1px solid rgba(0,0,0,0.06)" }}>
-            <div style={{ fontSize: 13, fontWeight: 1000, color: "rgba(17,24,39,0.80)" }}>Call intelligence</div>
-            <div style={{ fontSize: 12, fontWeight: 900, color: "rgba(17,24,39,0.45)" }}>
-              {selected ? `Checkout ${selected.checkoutId}` : "Select a row"}
-            </div>
-          </div>
+              <IndexTable
+                resourceName={{ singular: "call", plural: "calls" }}
+                itemCount={rows.length}
+                selectable={false}
+                headings={[
+                  { title: "Checkout" },
+                  { title: "Status" },
+                  { title: "Outcome" },
+                  { title: "AI outcome" },
+                  { title: "Scheduled" },
+                  { title: "Attempts" },
+                  { title: "Recording" },
+                ]}
+                emptyState={
+                  <Box padding="600">
+                    <Text as="p" alignment="center" tone="subdued">
+                      No call jobs yet.
+                    </Text>
+                  </Box>
+                }
+              >
+                {rows.map((row, index) => (
+                  <IndexTable.Row id={row.id} key={row.id} position={index}>
+                    <IndexTable.Cell>
+                      <BlockStack gap="100">
+                        <Button variant="plain" textAlign="left" onClick={() => setSelectedId(row.id)}>
+                          {row.checkoutId}
+                        </Button>
+                        {row.id === selectedId ? <Badge tone="info">Selected</Badge> : null}
+                      </BlockStack>
+                    </IndexTable.Cell>
+                    <IndexTable.Cell>
+                      <Badge tone={statusTone(row.status)}>{safeStr(row.status).toUpperCase()}</Badge>
+                    </IndexTable.Cell>
+                    <IndexTable.Cell>
+                      <Badge tone={outcomeTone(row.callOutcome)}>{displayOutcome(row.callOutcome)}</Badge>
+                    </IndexTable.Cell>
+                    <IndexTable.Cell>
+                      <BlockStack gap="100">
+                        <Badge tone={outcomeTone(row.openaiOutcome)}>{displayOutcome(row.openaiOutcome)}</Badge>
+                        {row.aiStatus ? (
+                          <Text as="span" variant="bodySm" tone="subdued">
+                            AI: {safeStr(row.aiStatus).toUpperCase()}
+                          </Text>
+                        ) : null}
+                      </BlockStack>
+                    </IndexTable.Cell>
+                    <IndexTable.Cell>
+                      <BlockStack gap="100">
+                        <Text as="span" variant="bodySm">
+                          {formatWhen(row.scheduledFor)}
+                        </Text>
+                        <Text as="span" variant="bodySm" tone="subdued">
+                          Created {formatWhen(row.createdAt)}
+                        </Text>
+                      </BlockStack>
+                    </IndexTable.Cell>
+                    <IndexTable.Cell>{String(row.attempts)}</IndexTable.Cell>
+                    <IndexTable.Cell>
+                      {row.recordingUrl ? (
+                        <Button url={row.recordingUrl} external variant="plain" size="slim">
+                          Open
+                        </Button>
+                      ) : (
+                        <Text as="span" tone="subdued">
+                          —
+                        </Text>
+                      )}
+                    </IndexTable.Cell>
+                  </IndexTable.Row>
+                ))}
+              </IndexTable>
+            </Card>
+          </Layout.Section>
 
-          <div style={{ padding: 14, display: "grid", gap: 12 }}>
-            {!selected ? (
-              <div style={{ color: "rgba(17,24,39,0.45)", fontWeight: 950 }}>—</div>
-            ) : (
-              <>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <Pill title="Call ID">{selected.providerCallId ? `Call ${selected.providerCallId}` : "Call —"}</Pill>
-                  <Pill tone={outcomeTone(selected.openaiOutcome)} title="OpenAI outcome">
-                    {selected.openaiOutcome ? String(selected.openaiOutcome).toUpperCase() : "OPENAI —"}
-                  </Pill>
-                </div>
+          <Layout.Section variant="oneThird">
+            <Card>
+              <BlockStack gap="400">
+                <BlockStack gap="100">
+                  <Text as="h2" variant="headingMd">
+                    Call intelligence
+                  </Text>
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    {selected ? `Checkout ${selected.checkoutId}` : "Select a call from the table"}
+                  </Text>
+                </BlockStack>
 
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontSize: 12, fontWeight: 1000, color: "rgba(17,24,39,0.55)" }}>Summary</div>
-                  <div
-                    style={{
-                      border: "1px solid rgba(0,0,0,0.10)",
-                      borderRadius: 14,
-                      padding: 10,
-                      fontWeight: 900,
-                      color: "rgba(17,24,39,0.78)",
-                      lineHeight: 1.35,
-                      background: "rgba(0,0,0,0.02)",
-                      whiteSpace: "pre-wrap",
-                    }}
-                  >
-                    {selected.summary ?? "—"}
-                  </div>
-                </div>
+                {selected ? (
+                  <>
+                    <InlineStack gap="200">
+                      <Badge tone={statusTone(selected.status)}>{safeStr(selected.status).toUpperCase()}</Badge>
+                      <Badge tone={outcomeTone(selected.openaiOutcome)}>{displayOutcome(selected.openaiOutcome)}</Badge>
+                    </InlineStack>
 
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontSize: 12, fontWeight: 1000, color: "rgba(17,24,39,0.55)" }}>Next action</div>
-                  <div
-                    style={{
-                      border: "1px solid rgba(59,130,246,0.20)",
-                      borderRadius: 14,
-                      padding: 10,
-                      fontWeight: 950,
-                      color: "rgba(30,58,138,0.92)",
-                      lineHeight: 1.35,
-                      background: "rgba(59,130,246,0.06)",
-                      whiteSpace: "pre-wrap",
-                    }}
-                  >
-                    {selected.nextAction ?? "—"}
-                  </div>
-                </div>
+                    <Divider />
 
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontSize: 12, fontWeight: 1000, color: "rgba(17,24,39,0.55)" }}>Follow-up</div>
-                  <div
-                    style={{
-                      border: "1px solid rgba(0,0,0,0.10)",
-                      borderRadius: 14,
-                      padding: 10,
-                      fontWeight: 900,
-                      color: "rgba(17,24,39,0.78)",
-                      lineHeight: 1.35,
-                      background: "white",
-                      whiteSpace: "pre-wrap",
-                      maxHeight: 160,
-                      overflow: "auto",
-                    }}
-                  >
-                    {selected.followUp ?? "—"}
-                  </div>
-                </div>
+                    <BlockStack gap="200">
+                      <Text as="h3" variant="headingSm">
+                        AI summary
+                      </Text>
+                      <Text as="p" variant="bodyMd" tone={selected.summary ? undefined : "subdued"}>
+                        {selected.summary || "No summary available yet."}
+                      </Text>
+                    </BlockStack>
 
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontSize: 12, fontWeight: 1000, color: "rgba(17,24,39,0.55)" }}>Prompt sent to agent</div>
-                  <div
-                    style={{
-                      border: "1px solid rgba(0,0,0,0.10)",
-                      borderRadius: 14,
-                      padding: 10,
-                      fontWeight: 900,
-                      color: "rgba(17,24,39,0.78)",
-                      lineHeight: 1.35,
-                      background: "rgba(0,0,0,0.02)",
-                      whiteSpace: "pre-wrap",
-                      maxHeight: 220,
-                      overflow: "auto",
-                      fontSize: 12,
-                    }}
-                  >
-                    {selected.sentSystemPrompt ?? "—"}
-                  </div>
-                </div>
+                    <BlockStack gap="200">
+                      <Text as="h3" variant="headingSm">
+                        Next best action
+                      </Text>
+                      <Text as="p" variant="bodyMd" tone={selected.nextAction ? undefined : "subdued"}>
+                        {selected.nextAction || "No next action available yet."}
+                      </Text>
+                    </BlockStack>
 
-                <Form method="post">
-                  <input type="hidden" name="intent" value="manual_call" />
-                  <input type="hidden" name="callJobId" value={selected.id} />
-                  <button
-                    type="submit"
-                    disabled={selected.status !== "QUEUED"}
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      border: "1px solid rgba(0,0,0,0.12)",
-                      background: selected.status === "QUEUED" ? "white" : "#f3f3f3",
-                      cursor: selected.status === "QUEUED" ? "pointer" : "not-allowed",
-                      fontWeight: 1000,
-                      width: "100%",
-                    }}
-                  >
-                    Call now
-                  </button>
-                </Form>
-              </>
-            )}
-          </div>
-        </div>
-      </div>
+                    <BlockStack gap="200">
+                      <Text as="h3" variant="headingSm">
+                        Follow-up message
+                      </Text>
+                      <Box background="bg-surface-secondary" borderRadius="300" padding="300">
+                        <Text as="p" variant="bodySm" tone={selected.followUp ? undefined : "subdued"}>
+                          {selected.followUp || "No follow-up message available."}
+                        </Text>
+                      </Box>
+                    </BlockStack>
 
-      <div style={{ marginTop: 10, fontWeight: 900, fontSize: 12, color: "rgba(17,24,39,0.45)" }}>
-        Live updates every 5s when calls are active.
-      </div>
-    </div>
+                    <BlockStack gap="200">
+                      <Text as="h3" variant="headingSm">
+                        Provider call
+                      </Text>
+                      <Text as="p" variant="bodySm" tone="subdued">
+                        {selected.providerCallId || "No provider call ID yet"}
+                      </Text>
+                      {selected.recordingUrl ? (
+                        <Button url={selected.recordingUrl} external>
+                          Open recording
+                        </Button>
+                      ) : null}
+                    </BlockStack>
+
+                    <BlockStack gap="200">
+                      <Text as="h3" variant="headingSm">
+                        System prompt used
+                      </Text>
+                      <Box background="bg-surface-secondary" borderRadius="300" padding="300">
+                        <Text as="p" variant="bodySm" tone={selected.sentSystemPrompt ? undefined : "subdued"}>
+                          {selected.sentSystemPrompt || "Prompt data is not available for this call."}
+                        </Text>
+                      </Box>
+                    </BlockStack>
+
+                    <Form method="post">
+                      <input type="hidden" name="intent" value="manual_call" />
+                      <input type="hidden" name="callJobId" value={selected.id} />
+                      <Button submit fullWidth variant="primary" disabled={selected.status !== "QUEUED"}>
+                        Call now
+                      </Button>
+                    </Form>
+                  </>
+                ) : (
+                  <Box paddingBlock="500">
+                    <Text as="p" alignment="center" tone="subdued">
+                      Choose a call to see its summary, provider details, next action and follow-up message.
+                    </Text>
+                  </Box>
+                )}
+              </BlockStack>
+            </Card>
+          </Layout.Section>
+        </Layout>
+      </BlockStack>
+    </Page>
   );
 }
 
