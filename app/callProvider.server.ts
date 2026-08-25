@@ -618,6 +618,22 @@ function compactCheckoutUrl(urlStr: string) {
   }
 }
 
+function publicAppOrigin() {
+  const candidates = [process.env.APP_URL, process.env.SHOPIFY_APP_URL, process.env.VAPI_SERVER_URL];
+  for (const raw of candidates) {
+    const value = String(raw ?? "").trim();
+    if (!value) continue;
+    try { return new URL(value).origin; } catch {}
+  }
+  return "";
+}
+
+function shortRecoveryUrl(callJobId: string) {
+  const origin = publicAppOrigin();
+  const id = String(callJobId ?? "").trim();
+  return origin && id ? `${origin}/r/${encodeURIComponent(id)}` : "";
+}
+
 function checkoutUrlWithOfferCode(urlStr: string, code: string | null | undefined) {
   const raw = String(urlStr ?? "").trim();
   const offerCode = String(code ?? "").trim();
@@ -1366,6 +1382,19 @@ function normalizeBrevoType(t: any) {
   return "transactional";
 }
 
+const GSM7_EXTENDED_ASCII = new Set(["^", "{", "}", "\\", "[", "]", "~", "|"]);
+
+function smsSingleSegmentInfo(body: string) {
+  const chars = Array.from(String(body ?? ""));
+  let units = 0;
+  for (const ch of chars) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (cp > 127) return { encoding: "unicode" as const, units: chars.length, limit: 70 };
+    units += GSM7_EXTENDED_ASCII.has(ch) ? 2 : 1;
+  }
+  return { encoding: "gsm7" as const, units, limit: 160 };
+}
+
 async function brevoSendSms(params: {
   toE164: string;
   body: string;
@@ -1383,13 +1412,19 @@ async function brevoSendSms(params: {
 
   const recipient = normalizeBrevoRecipient(params.toE164);
   if (!recipient) throw new Error("Invalid recipient phone");
+const body = String(params.body ?? "").trim();
+const segment = smsSingleSegmentInfo(body);
+if (segment.units > segment.limit) {
+  throw new Error(`SMS exceeds one-segment limit (${segment.encoding}): ${segment.units}/${segment.limit}. Shorten the SMS template.`);
+}
 
-  const payload: Record<string, any> = {
-    sender,
-    recipient,
-    content: String(params.body ?? "").trim(),
-    type: normalizeBrevoType(params.type ?? process.env.BREVO_SMS_TYPE),
-  };
+const payload: Record<string, any> = {
+  sender,
+  recipient,
+  content: body,
+  type: normalizeBrevoType(params.type ?? process.env.BREVO_SMS_TYPE),
+};
+if (segment.encoding === "unicode") payload.unicodeEnabled = true;
 
   const tag = String(params.tag ?? process.env.BREVO_SMS_TAG ?? "").trim();
   if (tag) payload.tag = tag;
@@ -1667,7 +1702,7 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
       const recoveryUrl = extractRecoveryUrlFromCheckoutRaw(checkout.raw);
       if (!recoveryUrl) throw new Error("Missing recovery checkout URL.");
 
-      const compactLink = compactCheckoutUrl(recoveryUrl);
+      const compactLink = shortRecoveryUrl(job.id) || compactCheckoutUrl(recoveryUrl);
 
       const to = String(job.phone ?? "").trim();
       if (!to || !to.startsWith("+")) throw new Error("Missing/invalid E.164 recipient on CallJob.");
@@ -1738,7 +1773,7 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
           discountNodeId = created.nodeId;
           finalDiscountPercent = requestedDiscountPercent;
           finalType = "discount";
-          discountLink = checkoutUrlWithOfferCode(compactLink, offerCode);
+          discountLink = `${compactLink}?c=${encodeURIComponent(offerCode)}`;
         } catch (e: any) {
           offerCreateError = String(e?.message ?? e);
           throw new Error(`Could not create Shopify discount code: ${offerCreateError}`);
@@ -1787,7 +1822,7 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
           offerCode = created.createdCode ?? candidate;
           discountNodeId = created.nodeId;
           finalType = "free_shipping";
-          discountLink = checkoutUrlWithOfferCode(compactLink, offerCode);
+          discountLink = `${compactLink}?c=${encodeURIComponent(offerCode)}`;
         } catch (e: any) {
           offerCreateError = String(e?.message ?? e);
           throw new Error(`Could not create Shopify free shipping code: ${offerCreateError}`);
@@ -1805,7 +1840,7 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
         customer_name: String(checkout.customerName ?? "").trim() || "Customer",
         checkout_id: String(checkout.checkoutId),
         checkout_link: compactLink,
-        discount_link: compactLink,
+        discount_link: discountLink,
         offer_code: String(offerCode ?? ""),
         percent: percentForTemplate,
         validity_hours: String(Math.floor(Number(playbook.couponValidityHours || 24))),
@@ -2027,7 +2062,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       : null;
 
   const recoveryUrl = extractRecoveryUrlFromCheckoutRaw(checkout.raw);
-  const compactRecoveryUrl = recoveryUrl ? compactCheckoutUrl(recoveryUrl) : null;
+  const compactRecoveryUrl = recoveryUrl ? (shortRecoveryUrl(job.id) || compactCheckoutUrl(recoveryUrl)) : null;
 
   const brevoKey = pickBrevoApiKey();
   const smsSender = resolveBrevoSender(extras);

@@ -567,6 +567,9 @@ export default function Settings() {
   const smsVarsHelp =
     "Available variables: {{shop}}, {{shop_name}}, {{customer_name}}, {{checkout_id}}, {{checkout_link}}, {{discount_link}}, {{offer_code}}, {{percent}}, {{validity_hours}}";
 
+const smsTemplateLimit = (value: string) => /[^\x00-\x7F]/.test(value) ? 70 : 160;
+const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTemplateLimit(value)).join("");
+
   return (
     <Page
       title="Settings"
@@ -852,10 +855,11 @@ export default function Settings() {
                       label="SMS template (with offer code)"
                       name="smsTemplateOffer"
                       value={smsTemplateOffer}
-                      onChange={setSmsTemplateOffer}
+                      onChange={(value) => setSmsTemplateOffer(clampSmsTemplate(value))}
+                      maxLength={smsTemplateLimit(smsTemplateOffer)}
                       multiline={6}
                       autoComplete="off"
-                      helpText="Used when an offer code exists. Use {{discount_link}} so the discount applies automatically."
+                      helpText={`${Array.from(smsTemplateOffer).length}/${smsTemplateLimit(smsTemplateOffer)} template chars. One SMS segment only: 160 GSM/ASCII or 70 Unicode. The final rendered SMS is checked again before sending. Use {{discount_link}}.`}
                       disabled={!smsFeatureAllowed || !followupSmsEnabled}
                     />
 
@@ -863,10 +867,11 @@ export default function Settings() {
                       label="SMS template (no offer)"
                       name="smsTemplateNoOffer"
                       value={smsTemplateNoOffer}
-                      onChange={setSmsTemplateNoOffer}
+                      onChange={(value) => setSmsTemplateNoOffer(clampSmsTemplate(value))}
+                      maxLength={smsTemplateLimit(smsTemplateNoOffer)}
                       multiline={4}
                       autoComplete="off"
-                      helpText="Used when no offer code exists. Use {{checkout_link}}."
+                      helpText={`${Array.from(smsTemplateNoOffer).length}/${smsTemplateLimit(smsTemplateNoOffer)} template chars. One SMS segment only: 160 GSM/ASCII or 70 Unicode. The final rendered SMS is checked again before sending. Use {{checkout_link}}.`}
                       disabled={!smsFeatureAllowed || !followupSmsEnabled}
                     />
                   </FormLayout>
