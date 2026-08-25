@@ -71,6 +71,9 @@ export async function action({ request }: ActionFunctionArgs) {
     },
     select: {
       checkoutId: true,
+      status: true,
+      abandonedAt: true,
+      recoveredOrderId: true,
     },
   });
 
@@ -80,19 +83,46 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const matchedCheckoutId = String(matchedCheckout.checkoutId);
 
-  const lastJob = await db.callJob.findFirst({
+  // A checkout is only a verified recovery when a REAL Shopify order exists
+  // AND we have evidence that this checkout had entered an abandonment/recovery cycle.
+  // AI conversation, SMS delivery, positive sentiment, or a call summary are NEVER
+  // sufficient to mark a checkout as recovered.
+  const latestRecoveryJob = await db.callJob.findFirst({
+    where: {
+      shop,
+      checkoutId: matchedCheckoutId,
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      provider: true,
+      providerCallId: true,
+      createdAt: true,
+    },
+  });
+
+  const alreadyRecovered = Boolean(matchedCheckout.recoveredOrderId) || String(matchedCheckout.status) === "RECOVERED";
+  const hadAbandonmentEvidence =
+    String(matchedCheckout.status) === "ABANDONED" ||
+    matchedCheckout.abandonedAt != null ||
+    Boolean(latestRecoveryJob);
+  const isVerifiedRecovery = alreadyRecovered || hadAbandonmentEvidence;
+
+  // Attribute the order to the most recent actual Vapi call only when one exists.
+  const lastVapiJob = await db.callJob.findFirst({
     where: {
       shop,
       checkoutId: matchedCheckoutId,
       provider: "vapi",
+      providerCallId: { not: null },
     },
     orderBy: { createdAt: "desc" },
     select: { id: true },
   });
 
-  if (lastJob) {
+  if (isVerifiedRecovery && lastVapiJob) {
     await db.callJob.update({
-      where: { id: lastJob.id },
+      where: { id: lastVapiJob.id },
       data: {
         attributedAt: new Date(),
         attributedOrderId: orderId,
@@ -113,15 +143,30 @@ export async function action({ request }: ActionFunctionArgs) {
     },
   });
 
-  // Display-only checkout sync.
-  // Order table remains the only source of truth for recovered state.
-  await db.checkout.updateMany({
-    where: { shop, checkoutId: matchedCheckoutId },
-    data: {
-      status: "CONVERTED",
-      abandonedAt: null,
-    },
-  });
+  if (isVerifiedRecovery) {
+    // RECOVERED means one thing only:
+    // Shopify confirmed a real order after this checkout had been abandoned.
+    await db.checkout.updateMany({
+      where: { shop, checkoutId: matchedCheckoutId },
+      data: {
+        status: "RECOVERED",
+        abandonedAt: null,
+        recoveredAt: new Date(),
+        recoveredOrderId: orderId,
+        recoveredAmount: total ?? undefined,
+      },
+    });
+  } else {
+    // A normal checkout that converts without prior abandonment is simply CONVERTED,
+    // never RECOVERED and never counted as recovery revenue.
+    await db.checkout.updateMany({
+      where: { shop, checkoutId: matchedCheckoutId },
+      data: {
+        status: "CONVERTED",
+        abandonedAt: null,
+      },
+    });
+  }
 
   return new Response("OK", { status: 200 });
 }
