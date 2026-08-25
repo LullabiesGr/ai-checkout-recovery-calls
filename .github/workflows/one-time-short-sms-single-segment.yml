@@ -1,0 +1,186 @@
+name: One-time short SMS single segment patch
+
+on:
+  push:
+    paths:
+      - '.github/workflows/one-time-short-sms-single-segment.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Patch recovery SMS flow
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('app/callProvider.server.ts')
+          s = p.read_text()
+
+          marker = '''function checkoutUrlWithOfferCode(urlStr: string, code: string | null | undefined) {'''
+          helpers = '''function publicAppOrigin() {
+            const candidates = [
+              process.env.APP_URL,
+              process.env.SHOPIFY_APP_URL,
+              process.env.VAPI_SERVER_URL,
+            ];
+            for (const raw of candidates) {
+              const value = String(raw ?? "").trim();
+              if (!value) continue;
+              try {
+                return new URL(value).origin;
+              } catch {}
+            }
+            return "";
+          }
+
+          function shortRecoveryUrl(callJobId: string) {
+            const origin = publicAppOrigin();
+            const id = String(callJobId ?? "").trim();
+            return origin && id ? `${origin}/r/${encodeURIComponent(id)}` : "";
+          }
+
+          '''
+          if 'function shortRecoveryUrl(callJobId: string)' not in s:
+              assert marker in s
+              s = s.replace(marker, helpers + marker, 1)
+
+          old = '''function normalizeBrevoType(t: any) {
+            const v = String(t ?? "").trim().toLowerCase();
+            if (v === "marketing") return "marketing";
+            return "transactional";
+          }
+
+          async function brevoSendSms(params: {'''
+          new = '''function normalizeBrevoType(t: any) {
+            const v = String(t ?? "").trim().toLowerCase();
+            if (v === "marketing") return "marketing";
+            return "transactional";
+          }
+
+          const GSM7_EXTENDED = new Set(["^", "{", "}", "\\\\", "[", "]", "~", "|", "€"]);
+          const GSM7_BASIC = new Set(Array.from(
+            "@£$¥èéùìòÇ\\nØø\\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\\\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà"
+          ));
+
+          function smsSingleSegmentInfo(body: string) {
+            const chars = Array.from(String(body ?? ""));
+            let septets = 0;
+            for (const ch of chars) {
+              if (GSM7_EXTENDED.has(ch)) {
+                septets += 2;
+                continue;
+              }
+              if (!GSM7_BASIC.has(ch)) {
+                return { encoding: "unicode" as const, units: chars.length, limit: 70 };
+              }
+              septets += 1;
+            }
+            return { encoding: "gsm7" as const, units: septets, limit: 160 };
+          }
+
+          async function brevoSendSms(params: {'''
+          if 'function smsSingleSegmentInfo(body: string)' not in s:
+              assert old in s
+              s = s.replace(old, new, 1)
+
+          old = '''  const payload: Record<string, any> = {
+              sender,
+              recipient,
+              content: String(params.body ?? "").trim(),
+              type: normalizeBrevoType(params.type ?? process.env.BREVO_SMS_TYPE),
+            };'''
+          new = '''  const body = String(params.body ?? "").trim();
+            const segment = smsSingleSegmentInfo(body);
+            if (segment.units > segment.limit) {
+              throw new Error(
+                `SMS exceeds one-segment limit (${segment.encoding}): ${segment.units}/${segment.limit}. Shorten the merchant SMS template.`
+              );
+            }
+
+            const payload: Record<string, any> = {
+              sender,
+              recipient,
+              content: body,
+              type: normalizeBrevoType(params.type ?? process.env.BREVO_SMS_TYPE),
+            };
+            if (segment.encoding === "unicode") payload.unicodeEnabled = true;'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '      const compactLink = compactCheckoutUrl(recoveryUrl);'
+          new = '      const compactLink = shortRecoveryUrl(job.id) || compactCheckoutUrl(recoveryUrl);'
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '          discountLink = checkoutUrlWithOfferCode(compactLink, offerCode);'
+          new = '          discountLink = `${compactLink}?c=${encodeURIComponent(offerCode)}`;'
+          count = s.count(old)
+          assert count == 2, count
+          s = s.replace(old, new)
+
+          old = '        discount_link: compactLink,'
+          new = '        discount_link: discountLink,'
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '  const compactRecoveryUrl = recoveryUrl ? compactCheckoutUrl(recoveryUrl) : null;'
+          new = '  const compactRecoveryUrl = recoveryUrl ? (shortRecoveryUrl(job.id) || compactCheckoutUrl(recoveryUrl)) : null;'
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+
+          p = Path('app/routes/app.settings.tsx')
+          s = p.read_text()
+
+          anchor = '''  const smsVarsHelp =
+            "Available variables: {{shop}}, {{shop_name}}, {{customer_name}}, {{checkout_id}}, {{checkout_link}}, {{discount_link}}, {{offer_code}}, {{percent}}, {{validity_hours}}";'''
+          replacement = '''  const smsVarsHelp =
+            "Available variables: {{shop}}, {{shop_name}}, {{customer_name}}, {{checkout_id}}, {{checkout_link}}, {{discount_link}}, {{offer_code}}, {{percent}}, {{validity_hours}}";
+
+          const smsTemplateLimit = (value: string) => /[^\\x00-\\x7F]/.test(value) ? 70 : 160;
+          const clampSmsTemplate = (value: string) =>
+            Array.from(value).slice(0, smsTemplateLimit(value)).join("");'''
+          assert anchor in s
+          s = s.replace(anchor, replacement, 1)
+
+          s = s.replace(
+              'onChange={setSmsTemplateOffer}\\n                      multiline={6}',
+              'onChange={(value) => setSmsTemplateOffer(clampSmsTemplate(value))}\\n                      maxLength={smsTemplateLimit(smsTemplateOffer)}\\n                      multiline={6}',
+              1,
+          )
+          s = s.replace(
+              'helpText="Used when an offer code exists. Use {{discount_link}} so the discount applies automatically."',
+              'helpText={`${Array.from(smsTemplateOffer).length}/${smsTemplateLimit(smsTemplateOffer)} template characters. One SMS segment only: 160 GSM/ASCII or 70 Unicode. Final rendered SMS is also enforced server-side. Use {{discount_link}}.`}',
+              1,
+          )
+          s = s.replace(
+              'onChange={setSmsTemplateNoOffer}\\n                      multiline={4}',
+              'onChange={(value) => setSmsTemplateNoOffer(clampSmsTemplate(value))}\\n                      maxLength={smsTemplateLimit(smsTemplateNoOffer)}\\n                      multiline={4}',
+              1,
+          )
+          s = s.replace(
+              'helpText="Used when no offer code exists. Use {{checkout_link}}."',
+              'helpText={`${Array.from(smsTemplateNoOffer).length}/${smsTemplateLimit(smsTemplateNoOffer)} template characters. One SMS segment only: 160 GSM/ASCII or 70 Unicode. Final rendered SMS is also enforced server-side. Use {{checkout_link}}.`}',
+              1,
+          )
+
+          p.write_text(s)
+          PY
+
+      - name: Commit patch
+        run: |
+          git config user.name "CheckoutCall AI"
+          git config user.email "actions@users.noreply.github.com"
+          git add app/callProvider.server.ts app/routes/app.settings.tsx
+          git diff --cached --quiet && exit 0
+          git commit -m "Shorten recovery SMS links and enforce one segment"
+          git push
