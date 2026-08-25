@@ -1,0 +1,25 @@
+name: Run SMS 100 patch
+on:
+  push:
+    paths:
+      - '.github/workflows/one-time-run-sms-100-patch.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run patch script
+        run: python .github/scripts/patch_sms_100.py
+      - name: Commit patch
+        run: |
+          git config user.name "Beautio"
+          git config user.email "info@lullabies.gr"
+          git add app/routes/app.settings.tsx app/callProvider.server.ts
+          if git diff --cached --quiet; then
+            echo "No changes needed"
+          else
+            git commit -m "Limit SMS templates to 100 chars and always send"
+            git push
+          fi
