@@ -1,6 +1,6 @@
 import * as React from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData, useRouteError } from "react-router";
+import { useFetcher, useLoaderData, useLocation, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -804,7 +804,7 @@ function urgencyScore(r: Row) {
   return score;
 }
 
-type FilterKey = "all" | "abandoned" | "followups" | "high_intent" | "no_answer" | "discounts";
+type FilterKey = "all" | "open" | "abandoned" | "followups" | "high_intent" | "no_answer" | "discounts" | "recovered";
 
 function isFollowUpCandidate(r: Row) {
   const n = normalizeOutcome(r.callOutcome);
@@ -826,6 +826,13 @@ function isDiscountCandidate(r: Row) {
 
 export default function Checkouts() {
   const { rows } = useLoaderData<typeof loader>();
+  const location = useLocation();
+
+  const requestedFilter = React.useMemo<FilterKey>(() => {
+    const raw = new URLSearchParams(location.search).get("tab")?.toLowerCase() ?? "";
+    if (raw === "open" || raw === "abandoned" || raw === "followups" || raw === "high_intent" || raw === "no_answer" || raw === "discounts" || raw === "recovered") return raw as FilterKey;
+    return "all";
+  }, [location.search]);
 
   const currency = (rows.find((r) => safeStr(r.currency))?.currency ?? "USD").toUpperCase();
 
@@ -891,11 +898,13 @@ export default function Checkouts() {
   const counts = React.useMemo(() => {
     const c = {
       all: baseWorkSorted.length,
+      open: rows.filter((r) => safeStr(r.status).toUpperCase() === "OPEN" && !isRecovered(r)).length,
       abandoned: 0,
       followups: 0,
       high_intent: 0,
       no_answer: 0,
       discounts: 0,
+      recovered: recoveredRows.length,
     };
 
     for (const r of baseWorkSorted) {
@@ -907,12 +916,17 @@ export default function Checkouts() {
     }
 
     return c;
-  }, [baseWorkSorted]);
+  }, [baseWorkSorted, recoveredRows, rows]);
 
-  const [activeFilter, setActiveFilter] = React.useState<FilterKey>("all");
+  const [activeFilter, setActiveFilter] = React.useState<FilterKey>(requestedFilter);
+  React.useEffect(() => setActiveFilter(requestedFilter), [requestedFilter]);
 
   const filteredWorkRows = React.useMemo(() => {
     switch (activeFilter) {
+      case "open":
+        return rows.filter((r) => safeStr(r.status).toUpperCase() === "OPEN" && !isRecovered(r));
+      case "recovered":
+        return recoveredRows;
       case "abandoned":
         return baseWorkSorted.filter((r) => r.eligibleAtRisk);
       case "followups":
@@ -927,7 +941,7 @@ export default function Checkouts() {
       default:
         return baseWorkSorted;
     }
-  }, [baseWorkSorted, activeFilter]);
+  }, [baseWorkSorted, activeFilter, recoveredRows, rows]);
 
   const toReviewCount = filteredWorkRows.length;
   const tableRows = React.useMemo(() => filteredWorkRows.slice(0, 80), [filteredWorkRows]);
@@ -1141,11 +1155,13 @@ export default function Checkouts() {
                 <s-box border="base" borderRadius="base" padding="base" background="subdued">
                   <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap", alignItems: "center" }}>
                     <s-chip {...chipProps("all")}>All ({counts.all})</s-chip>
+                    {counts.open > 0 ? <s-chip {...chipProps("open")}>Open ({counts.open})</s-chip> : null}
                     <s-chip {...chipProps("abandoned")}>Abandoned ({counts.abandoned})</s-chip>
                     <s-chip {...chipProps("followups")}>Follow-ups ({counts.followups})</s-chip>
                     <s-chip {...chipProps("high_intent")}>High intent ({counts.high_intent})</s-chip>
                     <s-chip {...chipProps("no_answer")}>No answer ({counts.no_answer})</s-chip>
                     {hasDiscountFields ? <s-chip {...chipProps("discounts")}>Discounts ({counts.discounts})</s-chip> : null}
+                    {counts.recovered > 0 ? <s-chip {...chipProps("recovered")}>Recovered ({counts.recovered})</s-chip> : null}
                   </s-stack>
                 </s-box>
 

@@ -116,6 +116,25 @@ export type DashboardViewProps = {
   canCreateTestCall: boolean;
 };
 
+function displayActivityStatus(value: string) {
+  const v = String(value ?? "").trim().toUpperCase();
+  const known: Record<string, string> = {
+    NEEDS_FOLLOWUP: "Needs follow-up",
+    ORDER_RECOVERED: "Order recovered",
+    HIGH_INTENT: "High intent",
+    NO_ANSWER: "No answer",
+    AI_ERROR: "Needs review",
+    NOT_RECOVERED: "Not recovered",
+    COMPLETED: "Completed",
+    CALLING: "Calling",
+    QUEUED: "Waiting",
+    FAILED: "Failed",
+    ERROR: "Needs review",
+    VOICEMAIL: "Voicemail",
+  };
+  return known[v] ?? (v ? v.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (m) => m.toUpperCase()) : "Update");
+}
+
 function badgeTone(tone: BadgeTone) {
   if (tone === "warning") return "attention" as const;
   return tone;
@@ -215,7 +234,7 @@ export function DashboardView(props: DashboardViewProps) {
         </Text>
       </IndexTable.Cell>
       <IndexTable.Cell>
-        <Badge tone={badgeTone(row.tone)}>{row.status}</Badge>
+        <Badge tone={badgeTone(row.tone)}>{displayActivityStatus(row.status)}</Badge>
       </IndexTable.Cell>
       <IndexTable.Cell>
         <Text as="span" variant="bodySm" tone="subdued">
@@ -241,6 +260,9 @@ export function DashboardView(props: DashboardViewProps) {
         <Text as="span" variant="bodySm" tone="subdued">
           {row.whenText}
         </Text>
+      </IndexTable.Cell>
+      <IndexTable.Cell>
+        <Text as="span" variant="bodySm">{row.recoveredOrderId || "—"}</Text>
       </IndexTable.Cell>
     </IndexTable.Row>
   ));
@@ -395,7 +417,7 @@ export function DashboardView(props: DashboardViewProps) {
             <IndexTable
               resourceName={{ singular: "recovery", plural: "recoveries" }}
               itemCount={visibleRecoveries.length}
-              headings={[{ title: "Customer" }, { title: "Recovered" }, { title: "When" }]}
+              headings={[{ title: "Customer" }, { title: "Recovered" }, { title: "When" }, { title: "Order" }]}
               selectable={false}
             >
               {recoveryRows}

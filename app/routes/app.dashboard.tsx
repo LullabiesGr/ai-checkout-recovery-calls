@@ -738,6 +738,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     },
   ];
 
+  const customerByCheckoutId = new Map(
+    recentCheckouts.map((c) => [String(c.checkoutId), String(c.customerName ?? "").trim()]).filter(([, name]) => Boolean(name)),
+  );
+
+  const shortCheckout = (id: string) => {
+    const value = String(id ?? "").trim();
+    return value.length > 12 ? `…${value.slice(-10)}` : value;
+  };
+
   type LiveInternal = DashboardViewProps["liveRows"][number] & { ts: number };
 
   const liveFromVapi: LiveInternal[] = vapiRecent.slice(0, 40).map((r) => {
@@ -786,7 +795,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       tone = "info";
     }
 
-    const event = `Call${cid ? ` • Checkout ${cid}` : ""}`;
+    const customer = cid ? customerByCheckoutId.get(cid) : "";
+    const event = customer ? `Call · ${customer}` : cid ? `Call · Checkout ${shortCheckout(cid)}` : "Call";
 
     return {
       ts,
@@ -845,7 +855,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       tone = "info";
     }
 
-    const event = `Job • Checkout ${String(j.checkoutId)}`;
+    const customer = customerByCheckoutId.get(String(j.checkoutId)) || "";
+    const event = customer ? `Call · ${customer}` : `Call · Checkout ${shortCheckout(String(j.checkoutId))}`;
 
     return {
       ts,
