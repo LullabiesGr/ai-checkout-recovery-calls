@@ -1,0 +1,28 @@
+name: Run offer history UI patch
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.issue.title == '[RUN] Offer history UI'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - run: python .github/scripts/offer_history_ui_patch.py
+      - run: git diff --check
+      - shell: bash
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/routes/app.checkouts.tsx 'app/routes/app.checkouts.$checkoutId.tsx'
+          git commit -m 'Keep real coupon details visible across follow-up calls'
+          git push origin HEAD:main
