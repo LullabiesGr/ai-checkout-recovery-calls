@@ -1,0 +1,37 @@
+name: Run merchant UI polish phase 2
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.issue.title == '[RUN] Merchant UI polish phase 2'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Apply second-pass UI patch
+        run: python .github/scripts/ui_polish_phase2.py
+
+      - name: Validate diff
+        run: git diff --check
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo 'No changes to commit'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/routes/app.checkouts.tsx app/routes/app.dashboard.tsx app/components/dashboard/DashboardView.tsx
+          git commit -m 'Make recovery UI filters and activity links merchant-friendly'
+          git push origin HEAD:main
