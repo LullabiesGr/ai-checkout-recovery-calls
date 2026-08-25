@@ -117,6 +117,8 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
                   title
                   quantity
                   variantTitle
+                  sku
+                  image { url altText }
                   originalUnitPriceSet { shopMoney { amount currencyCode } }
                 }
               }
@@ -151,6 +153,9 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
           title: it?.title ?? null,
           quantity: Number(it?.quantity ?? 1),
           variantTitle: it?.variantTitle ?? null,
+          sku: it?.sku ?? null,
+          image: it?.image?.url ?? null,
+          imageAlt: it?.image?.altText ?? null,
           price: it?.originalUnitPriceSet?.shopMoney?.amount ?? null,
           currency: it?.originalUnitPriceSet?.shopMoney?.currencyCode ?? null,
         }))

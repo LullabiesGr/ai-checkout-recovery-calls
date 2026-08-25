@@ -992,6 +992,9 @@ function mapItemsJsonFromAbandonedCheckout(n: any): string | null {
       title: it?.title ?? null,
       quantity: Number(it?.quantity ?? 1),
       variantTitle: it?.variantTitle ?? null,
+      sku: it?.sku ?? null,
+      image: it?.image?.url ?? null,
+      imageAlt: it?.image?.altText ?? null,
       price: it?.originalUnitPriceSet?.shopMoney?.amount ?? null,
       currency: it?.originalUnitPriceSet?.shopMoney?.currencyCode ?? null,
     }))

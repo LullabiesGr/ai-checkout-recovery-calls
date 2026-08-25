@@ -4,7 +4,7 @@ import { useFetcher, useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import { ensureSettings } from "../callRecovery.server";
+import { ensureSettings, syncAbandonedCheckoutsFromShopify } from "../callRecovery.server";
 
 import {
   buildCartPreview,
@@ -229,6 +229,12 @@ type Row = {
   discountSuggest?: boolean | null;
   discountPercent?: number | null;
 
+  offerCode: string | null;
+  offerType: string | null;
+  offerPercent: number | null;
+  smsSentAt: string | null;
+  smsMessageId: string | null;
+
   latestJobId: string | null;
   latestProviderCallId: string | null;
 };
@@ -249,6 +255,20 @@ function safeJsonParse<T = any>(v: any): T | null {
   } catch {
     return null;
   }
+}
+
+function parseCheckoutOffer(v: any) {
+  const j = safeJsonParse<any>(v);
+  const offer = j?.offer && typeof j.offer === "object" ? j.offer : null;
+  if (!offer) return { code: null, type: null, percent: null, smsSentAt: null, smsMessageId: null };
+  const pct = offer.discountPercent == null ? null : Number(offer.discountPercent);
+  return {
+    code: safeStr(offer.offerCode).trim() || null,
+    type: safeStr(offer.offerType).trim() || null,
+    percent: Number.isFinite(pct as number) ? pct : null,
+    smsSentAt: safeStr(offer.smsSentAt).trim() || null,
+    smsMessageId: safeStr(offer.smsMessageSid).trim() || null,
+  };
 }
 
 function pickThumbFromItem(it: CartItemLite): string {
@@ -359,9 +379,10 @@ function buildRecoveredOrderMap(
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
 
+  await syncAbandonedCheckoutsFromShopify({ admin, shop, limit: 100 });
   const settings: any = await ensureSettings(shop);
   const minOrderValue =
     typeof settings?.minOrderValue === "number"
@@ -402,6 +423,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         createdAt: true,
         providerCallId: true,
         recordingUrl: true,
+        analysisJson: true,
       },
     }),
   ]);
@@ -620,6 +642,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const checkoutId = String(c.checkoutId);
     const j = latestJobMap.get(checkoutId) ?? null;
     const order = recoveredOrderMap.get(checkoutId) ?? null;
+    const offer = parseCheckoutOffer((j as any)?.analysisJson);
 
     const callId = j?.providerCallId ? String(j.providerCallId) : "";
     const jobId = j?.id ? String(j.id) : "";
@@ -720,6 +743,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       discountSuggest,
       discountPercent:
         discountPercent == null ? discountPercent : Number.isFinite(discountPercent) ? discountPercent : null,
+
+      offerCode: offer.code,
+      offerType: offer.type,
+      offerPercent: offer.percent,
+      smsSentAt: offer.smsSentAt,
+      smsMessageId: offer.smsMessageId,
 
       latestJobId: j?.id ? String(j.id) : null,
       latestProviderCallId: j?.providerCallId ? String(j.providerCallId) : null,
@@ -985,7 +1014,7 @@ export default function Checkouts() {
                       <s-text tone="subdued" variant="bodySm">Recovered revenue</s-text>
                       <s-text variant="headingLg">{fmtMoney(recoveredRevenue, currency)}</s-text>
                       <s-text tone="subdued" variant="bodySm">
-                        Uses Order.total as source of truth
+                        Completed Shopify orders only
                       </s-text>
                     </s-stack>
                   </s-box>
@@ -995,7 +1024,7 @@ export default function Checkouts() {
                       <s-text tone="subdued" variant="bodySm">At-risk revenue</s-text>
                       <s-text variant="headingLg">{fmtMoney(atRiskRevenue, currency)}</s-text>
                       <s-text tone="subdued" variant="bodySm">
-                        Eligible abandoned (min value + contact)
+                        Eligible abandoned checkouts
                       </s-text>
                     </s-stack>
                   </s-box>
@@ -1005,7 +1034,7 @@ export default function Checkouts() {
                       <s-text tone="subdued" variant="bodySm">Win rate</s-text>
                       <s-text variant="headingLg">{winRate}%</s-text>
                       <s-text tone="subdued" variant="bodySm">
-                        wins / (wins + eligible at-risk)
+                        Recovered / total recovery opportunities
                       </s-text>
                     </s-stack>
                   </s-box>
@@ -1038,7 +1067,7 @@ export default function Checkouts() {
             <s-box border="base" borderRadius="base" padding="base" style={{ background: "rgba(0,128,96,0.08)" }}>
               <s-stack gap="tight">
                 <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center" }}>
-                  <s-text variant="headingMd">Recovered wins</s-text>
+                  <s-text variant="headingMd">Recovered orders</s-text>
                   <s-badge tone="success">{recoveredCount}</s-badge>
                 </s-stack>
 
@@ -1065,7 +1094,8 @@ export default function Checkouts() {
                           return (
                             <s-table-row key={id} clickDelegate={`win-${id}`}>
                               <s-table-cell style={compactCell}>
-                                <s-link
+                                <s-stack gap="tight">
+<s-link
                                   id={`win-${id}`}
                                   href="#"
                                   onClick={(e: any) => {
@@ -1080,6 +1110,7 @@ export default function Checkouts() {
                                 <s-text tone="subdued" variant="bodySm">
                                   {safeStr(r.recoveredOrderId) ? `ORDER ${r.recoveredOrderId}` : "RECOVERED"}
                                 </s-text>
+                                </s-stack>
                               </s-table-cell>
                               <s-table-cell style={compactCell}>{fmtMoney(amt, r.currency)}</s-table-cell>
                               <s-table-cell style={compactCell}>{formatWhen(whenIso)}</s-table-cell>
@@ -1100,7 +1131,7 @@ export default function Checkouts() {
             <s-section>
               <s-stack gap="tight">
                 <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center", flexWrap: "wrap" }}>
-                  <s-text variant="headingMd">Action queue</s-text>
+                  <s-text variant="headingMd">Recovery queue</s-text>
                   <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap", alignItems: "center" }}>
                     <s-badge tone="info">{toReviewCount} to review</s-badge>
                     <s-badge tone="neutral">Urgency sorted</s-badge>
@@ -1122,9 +1153,9 @@ export default function Checkouts() {
                   <s-table style={{ tableLayout: "fixed", width: "100%" }}>
                     <s-table-header-row>
                       <s-table-header style={{ width: 60 }}>Img</s-table-header>
-                      <s-table-header>Customer / Cart</s-table-header>
+                      <s-table-header>Customer & cart</s-table-header>
                       <s-table-header format="numeric" style={{ width: 120 }}>Value</s-table-header>
-                      <s-table-header style={{ width: 200 }}>Signals</s-table-header>
+                      <s-table-header style={{ width: 200 }}>Status</s-table-header>
                       <s-table-header style={{ width: 260 }}>Next step</s-table-header>
                     </s-table-header-row>
 
@@ -1181,7 +1212,7 @@ export default function Checkouts() {
                                     >
                                       <s-text fontWeight="semibold">{customer}</s-text>
                                     </s-link>
-                                    <s-text tone="subdued" variant="bodySm">#{id}</s-text>
+                                    <s-text tone="subdued" variant="bodySm">Checkout …{id.slice(-10)}</s-text>
                                     {r.eligibleAtRisk ? <s-badge tone="warning">AT-RISK</s-badge> : null}
                                   </s-stack>
 
@@ -1206,11 +1237,13 @@ export default function Checkouts() {
                               </s-table-cell>
 
                               <s-table-cell style={compactCell}>
-                                <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
-                                  <s-badge tone={checkoutTone}>{safeStr(r.status).toUpperCase()}</s-badge>
-                                  <s-badge tone={callTone}>{r.callStatus ? safeStr(r.callStatus).toUpperCase() : "NO CALL"}</s-badge>
-                                  <s-badge tone={outcomeTone}>{outcomeLabel(r.callOutcome)}</s-badge>
-                                  <s-badge tone={typeof r.buyProbabilityPct === "number" ? "info" : "neutral"}>{buyBadge}</s-badge>
+                                <s-stack gap="tight">
+                                  <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
+                                    <s-badge tone={checkoutTone}>{safeStr(r.status).toUpperCase()}</s-badge>
+                                    {r.callOutcome ? <s-badge tone={outcomeTone}>{outcomeLabel(r.callOutcome)}</s-badge> : null}
+                                    {r.offerCode ? <s-badge tone="success">{`CODE ${r.offerCode}`}</s-badge> : null}
+                                  </s-stack>
+                                  {r.offerPercent ? <s-text tone="subdued" variant="bodySm">{`${r.offerPercent}% offer${r.smsSentAt ? " · SMS sent" : ""}`}</s-text> : null}
                                 </s-stack>
                               </s-table-cell>
 
@@ -1366,6 +1399,33 @@ export default function Checkouts() {
                           </s-grid>
                         </s-box>
 
+                        {selected.offerCode || selected.smsSentAt ? (
+                          <s-box border="base" borderRadius="base" padding="base" background="subdued">
+                            <s-stack gap="tight">
+                              <s-text variant="headingSm">Offer & SMS</s-text>
+                              <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
+                                {selected.offerCode ? <s-badge tone="success">{`Coupon ${selected.offerCode}`}</s-badge> : null}
+                                {selected.offerPercent ? <s-badge tone="info">{`${selected.offerPercent}% off`}</s-badge> : null}
+                                <s-badge tone={selected.smsSentAt ? "success" : "neutral"}>{selected.smsSentAt ? "SMS SENT" : "SMS NOT SENT"}</s-badge>
+                              </s-stack>
+                              {selected.smsSentAt ? <s-text tone="subdued" variant="bodySm">Sent {formatWhen(selected.smsSentAt)}</s-text> : null}
+                            </s-stack>
+                          </s-box>
+                        ) : null}
+
+                        {selected.recoveredOrderId ? (
+                          <s-box border="base" borderRadius="base" padding="base" style={{ background: "rgba(0,128,96,0.08)" }}>
+                            <s-stack gap="tight">
+                              <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
+                                <s-badge tone="success">RECOVERED ORDER</s-badge>
+                                {selected.recoveredFinancial ? <s-badge tone="neutral">{safeStr(selected.recoveredFinancial).toUpperCase()}</s-badge> : null}
+                              </s-stack>
+                              <s-text fontWeight="semibold">{`Order ${selected.recoveredOrderId}`}</s-text>
+                              <s-text>{fmtMoney(Number(selected.recoveredAmount ?? 0), selected.currency)}</s-text>
+                            </s-stack>
+                          </s-box>
+                        ) : null}
+
                         <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
                           <s-button
                             variant="primary"
@@ -1389,14 +1449,6 @@ export default function Checkouts() {
 
                           <s-button variant="secondary" disabled={!safeStr(sb?.transcript).trim()} onClick={() => setModalKind("transcript")}>
                             Transcript
-                          </s-button>
-
-                          <s-button variant="secondary" onClick={() => setModalKind("evidence")}>
-                            Evidence
-                          </s-button>
-
-                          <s-button variant="secondary" onClick={() => setModalKind("raw")}>
-                            Raw
                           </s-button>
                         </s-stack>
 
