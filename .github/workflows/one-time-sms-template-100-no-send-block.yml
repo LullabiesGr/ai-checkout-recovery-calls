@@ -1,0 +1,128 @@
+name: One-time SMS template 100 chars and always send
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-sms-template-100-no-send-block.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch SMS template limits and delivery behavior
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          # 1) UI: fixed 100-character template limit.
+          p = Path('app/routes/app.settings.tsx')
+          s = p.read_text()
+
+          s = s.replace(
+              'const smsTemplateLimit = (value: string) => /[^\\x00-\\x7F]/.test(value) ? 70 : 160;',
+              'const smsTemplateLimit = (_value: string) => 100;'
+          )
+
+          s = s.replace(
+              'One SMS segment only: 160 GSM/ASCII or 70 Unicode. The final rendered SMS is checked again before sending. Use {{discount_link}}.',
+              'Template limit: 100 characters to leave room for the Shopify checkout URL. Use {{discount_link}}.'
+          )
+          s = s.replace(
+              'One SMS segment only: 160 GSM/ASCII or 70 Unicode. The final rendered SMS is checked again before sending. Use {{checkout_link}}.',
+              'Template limit: 100 characters to leave room for the Shopify checkout URL. Use {{checkout_link}}.'
+          )
+
+          # Add a server-side sanitizer so direct POSTs cannot store >100 chars either.
+          if 'function normalizeSmsTemplateInput' not in s:
+              marker = 'function normalizeBrevoSenderInput(v: any): string | null {'
+              helper = '''function normalizeSmsTemplateInput(v: any): string | null {
+  const raw = String(v ?? "");
+  const limited = Array.from(raw).slice(0, 100).join("");
+  return limited.trim() ? limited : null;
+}
+
+'''
+              if marker not in s:
+                  raise SystemExit('normalizeBrevoSenderInput marker not found')
+              s = s.replace(marker, helper + marker, 1)
+
+          # Replace action-side template reads with the 100-char sanitizer where possible.
+          s = re.sub(
+              r'const smsTemplateOffer\s*=\s*String\(fd\.get\("smsTemplateOffer"\)\s*\?\?\s*""\)\.trim\(\)\s*\|\|\s*null\s*;',
+              'const smsTemplateOffer = normalizeSmsTemplateInput(fd.get("smsTemplateOffer"));',
+              s,
+              count=1,
+          )
+          s = re.sub(
+              r'const smsTemplateNoOffer\s*=\s*String\(fd\.get\("smsTemplateNoOffer"\)\s*\?\?\s*""\)\.trim\(\)\s*\|\|\s*null\s*;',
+              'const smsTemplateNoOffer = normalizeSmsTemplateInput(fd.get("smsTemplateNoOffer"));',
+              s,
+              count=1,
+          )
+
+          # Also clamp any existing alternate assignment forms at write time.
+          s = s.replace(
+              'smsTemplateOffer: smsFeatureAllowed ? smsTemplateOffer : extras?.sms_template_offer ?? null,',
+              'smsTemplateOffer: smsFeatureAllowed ? normalizeSmsTemplateInput(smsTemplateOffer) : extras?.sms_template_offer ?? null,'
+          )
+          s = s.replace(
+              'smsTemplateNoOffer: smsFeatureAllowed ? smsTemplateNoOffer : extras?.sms_template_no_offer ?? null,',
+              'smsTemplateNoOffer: smsFeatureAllowed ? normalizeSmsTemplateInput(smsTemplateNoOffer) : extras?.sms_template_no_offer ?? null,'
+          )
+
+          p.write_text(s)
+
+          # 2) Backend: never block sending just because the final SMS spans >1 segment.
+          p = Path('app/callProvider.server.ts')
+          s = p.read_text()
+
+          pattern = re.compile(
+              r'const body = String\(params\.body \?\? ""\)\.trim\(\);\s*'
+              r'const segment = smsSingleSegmentInfo\(body\);\s*'
+              r'if \(segment\.units > segment\.limit\) \{.*?\}\s*'
+              r'const payload: Record<string, any> = \{\s*'
+              r'sender,\s*recipient,\s*content: body,\s*'
+              r'type: normalizeBrevoType\(params\.type \?\? process\.env\.BREVO_SMS_TYPE\),\s*'
+              r'\};\s*'
+              r'if \(segment\.encoding === "unicode"\) payload\.unicodeEnabled = true;',
+              re.S,
+          )
+
+          replacement = '''const body = String(params.body ?? "").trim();
+
+  const payload: Record<string, any> = {
+    sender,
+    recipient,
+    content: body,
+    type: normalizeBrevoType(params.type ?? process.env.BREVO_SMS_TYPE),
+  };
+  // Send regardless of final length. Enable Unicode automatically when needed.
+  if (/[^\\x00-\\x7F]/.test(body)) payload.unicodeEnabled = true;'''
+
+          s2, n = pattern.subn(replacement, s, count=1)
+          if n != 1:
+              raise SystemExit(f'Expected to patch one Brevo length guard, patched {n}')
+
+          p.write_text(s2)
+          PY
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "Beautio"
+          git config user.email "info@lullabies.gr"
+          git add app/routes/app.settings.tsx app/callProvider.server.ts
+          if git diff --cached --quiet; then
+            echo "No changes needed"
+          else
+            git commit -m "Limit SMS templates to 100 chars and always send"
+            git push
+          fi
