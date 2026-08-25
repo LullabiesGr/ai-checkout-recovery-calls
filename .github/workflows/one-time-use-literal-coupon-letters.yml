@@ -1,0 +1,68 @@
+name: One-time use literal coupon letters
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-use-literal-coupon-letters.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Patch coupon speech
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app/callProvider.server.ts')
+          s = p.read_text(encoding='utf-8')
+
+          old = '''    .map((ch) => {
+      if (/[A-Z]/.test(ch)) return natoWord(ch);
+      if (/[0-9]/.test(ch)) return digitWord(ch);
+      return ch;
+    });'''
+          new = '''    .map((ch) => {
+      if (/[A-Z]/.test(ch)) return ch;
+      if (/[0-9]/.test(ch)) return digitWord(ch);
+      return ch;
+    });'''
+          if old not in s:
+              raise SystemExit('coupon speech mapping pattern not found')
+          s = s.replace(old, new, 1)
+
+          s = s.replace(
+              'If the tool result includes code_speakable, read that exact form slowly with short pauses.',
+              'If the tool result includes code_speakable, read that exact form slowly with short pauses. Say letters as the literal letter names (for example C as C), never as NATO words such as Charlie.',
+              1,
+          )
+          s = s.replace(
+              'If a real coupon code exists in the tool result, say it slowly and clearly using code_speakable when available.',
+              'If a real coupon code exists in the tool result, say it slowly and clearly using code_speakable when available. Pronounce letters literally (for example C as C), not with NATO words.',
+              1,
+          )
+          s = s.replace(
+              'if a real code/code_speakable is returned, you may give only that exact code.',
+              'if a real code/code_speakable is returned, you may give only that exact code. Pronounce letters literally, for example C as C, never Charlie.',
+              1,
+          )
+
+          p.write_text(s, encoding='utf-8')
+          PY
+      - name: Validate and commit
+        shell: bash
+        run: |
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/callProvider.server.ts
+          git commit -m 'Use literal coupon letters in voice prompts'
+          git push origin HEAD:main
