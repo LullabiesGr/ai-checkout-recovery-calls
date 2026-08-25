@@ -1,0 +1,52 @@
+name: One-time fix coupon speech
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-fix-coupon-speech.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Patch coupon speech formatting
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app/callProvider.server.ts')
+          s = p.read_text(encoding='utf-8')
+          old = 'return parts.length ? parts.join(" ... ") : null;'
+          new = 'return parts.length ? parts.join(", ") : null;'
+          if s.count(old) != 1:
+              raise SystemExit(f'expected 1 speakable join, found {s.count(old)}')
+          s = s.replace(old, new, 1)
+          old2 = '- If the tool result includes code_speakable, read that exact form slowly with short pauses.'
+          new2 = '- If the tool result includes code_speakable, read that exact form slowly. Commas indicate pauses only; never say the words dot, period, comma, separator, or punctuation.'
+          if s.count(old2) != 1:
+              raise SystemExit(f'expected 1 sms block instruction, found {s.count(old2)}')
+          s = s.replace(old2, new2, 1)
+          old3 = '`If sms_sent=false, say it could not be sent; if a real code/code_speakable is returned, you may give only that exact code. ` +'
+          new3 = '`If sms_sent=false, say it could not be sent; if a real code/code_speakable is returned, you may give only that exact code. When reading code_speakable, commas are silent pauses only; never say dot, period, comma, separator, or punctuation. ` +'
+          if s.count(old3) != 1:
+              raise SystemExit(f'expected 1 runtime instruction, found {s.count(old3)}')
+          s = s.replace(old3, new3, 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+      - name: Validate and commit
+        shell: bash
+        run: |
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/callProvider.server.ts
+          git commit -m 'Fix spoken coupon code pauses'
+          git push origin HEAD:main
