@@ -441,8 +441,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const smsTemplateOfferRaw = String(fd.get("smsTemplateOffer") ?? "").trim();
   const smsTemplateNoOfferRaw = String(fd.get("smsTemplateNoOffer") ?? "").trim();
-  const smsTemplateOffer = smsTemplateOfferRaw ? smsTemplateOfferRaw : null;
-  const smsTemplateNoOffer = smsTemplateNoOfferRaw ? smsTemplateNoOfferRaw : null;
+  const smsTemplateOffer = smsTemplateOfferRaw ? Array.from(smsTemplateOfferRaw).slice(0, 100).join("") : null;
+  const smsTemplateNoOffer = smsTemplateNoOfferRaw ? Array.from(smsTemplateNoOfferRaw).slice(0, 100).join("") : null;
 
   const brevoSmsSender = normalizeBrevoSenderInput(fd.get("brevoSmsSender"));
 
@@ -567,7 +567,7 @@ export default function Settings() {
   const smsVarsHelp =
     "Available variables: {{shop}}, {{shop_name}}, {{customer_name}}, {{checkout_id}}, {{checkout_link}}, {{discount_link}}, {{offer_code}}, {{percent}}, {{validity_hours}}";
 
-const smsTemplateLimit = (value: string) => /[^\x00-\x7F]/.test(value) ? 70 : 160;
+const smsTemplateLimit = (_value: string) => 100;
 const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTemplateLimit(value)).join("");
 
   return (
@@ -859,7 +859,7 @@ const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTempla
                       maxLength={smsTemplateLimit(smsTemplateOffer)}
                       multiline={6}
                       autoComplete="off"
-                      helpText={`${Array.from(smsTemplateOffer).length}/${smsTemplateLimit(smsTemplateOffer)} template chars. One SMS segment only: 160 GSM/ASCII or 70 Unicode. The final rendered SMS is checked again before sending. Use {{discount_link}}.`}
+                      helpText={`${Array.from(smsTemplateOffer).length}/${smsTemplateLimit(smsTemplateOffer)} template chars. Template limit: 100 characters to leave room for the Shopify checkout URL. Use {{discount_link}}.`}
                       disabled={!smsFeatureAllowed || !followupSmsEnabled}
                     />
 
@@ -871,7 +871,7 @@ const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTempla
                       maxLength={smsTemplateLimit(smsTemplateNoOffer)}
                       multiline={4}
                       autoComplete="off"
-                      helpText={`${Array.from(smsTemplateNoOffer).length}/${smsTemplateLimit(smsTemplateNoOffer)} template chars. One SMS segment only: 160 GSM/ASCII or 70 Unicode. The final rendered SMS is checked again before sending. Use {{checkout_link}}.`}
+                      helpText={`${Array.from(smsTemplateNoOffer).length}/${smsTemplateLimit(smsTemplateNoOffer)} template chars. Template limit: 100 characters to leave room for the Shopify checkout URL. Use {{checkout_link}}.`}
                       disabled={!smsFeatureAllowed || !followupSmsEnabled}
                     />
                   </FormLayout>

@@ -1413,10 +1413,6 @@ async function brevoSendSms(params: {
   const recipient = normalizeBrevoRecipient(params.toE164);
   if (!recipient) throw new Error("Invalid recipient phone");
 const body = String(params.body ?? "").trim();
-const segment = smsSingleSegmentInfo(body);
-if (segment.units > segment.limit) {
-  throw new Error(`SMS exceeds one-segment limit (${segment.encoding}): ${segment.units}/${segment.limit}. Shorten the SMS template.`);
-}
 
 const payload: Record<string, any> = {
   sender,
@@ -1424,7 +1420,7 @@ const payload: Record<string, any> = {
   content: body,
   type: normalizeBrevoType(params.type ?? process.env.BREVO_SMS_TYPE),
 };
-if (segment.encoding === "unicode") payload.unicodeEnabled = true;
+if (/[^\x00-\x7F]/.test(body)) payload.unicodeEnabled = true;
 
   const tag = String(params.tag ?? process.env.BREVO_SMS_TAG ?? "").trim();
   if (tag) payload.tag = tag;
