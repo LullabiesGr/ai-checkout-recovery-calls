@@ -1,8 +1,9 @@
 import * as React from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Outlet, useLoaderData, useLocation, useNavigate, useRouteError } from "react-router";
+import { Outlet, useLoaderData, useLocation, useNavigate, useNavigation, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
+import { Card, InlineStack, Spinner, Text } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
 import { SupportBubble } from "../components/SupportBubble";
 
@@ -50,6 +51,7 @@ export default function App() {
   const { apiKey, shop, showAdminInbox } = useLoaderData<typeof loader>();
   const location = useLocation();
   const navigate = useNavigate();
+  const navigation = useNavigation();
 
   const embeddedParams = React.useMemo(() => pickEmbeddedParams(location.search), [location.search]);
 
@@ -92,6 +94,7 @@ export default function App() {
   }, [location.pathname, location.search, navigate]);
 
   const href = React.useCallback((path: string) => mergeSearch(path, embeddedParams), [embeddedParams]);
+  const isLoading = navigation.state !== "idle";
 
   return (
     <AppProvider embedded apiKey={apiKey}>
@@ -107,6 +110,30 @@ export default function App() {
       </ui-nav-menu>
 
       <Outlet />
+
+      {isLoading ? (
+        <div
+          aria-live="polite"
+          aria-busy="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 9999,
+            display: "grid",
+            placeItems: "center",
+            background: "rgba(255,255,255,0.58)",
+            backdropFilter: "blur(2px)",
+          }}
+        >
+          <Card>
+            <InlineStack gap="300" blockAlign="center" wrap={false}>
+              <Spinner accessibilityLabel="Loading CheckoutCall" size="small" />
+              <Text as="p" variant="bodyMd" fontWeight="medium">Updating CheckoutCall…</Text>
+            </InlineStack>
+          </Card>
+        </div>
+      ) : null}
+
       <SupportBubble shop={shop} />
     </AppProvider>
   );
