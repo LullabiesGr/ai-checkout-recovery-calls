@@ -1,0 +1,37 @@
+name: Run merchant UI polish
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.issue.title == '[RUN] Merchant UI polish'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Apply merchant UI patch
+        run: python .github/scripts/ui_polish_patch.py
+
+      - name: Validate diff
+        run: git diff --check
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo 'No changes to commit'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/routes/app.calls.tsx app/routes/app.checkouts.tsx app/callRecovery.server.ts app/callProvider.server.ts
+          git commit -m 'Polish merchant recovery UI and surface checkout context'
+          git push origin HEAD:main
