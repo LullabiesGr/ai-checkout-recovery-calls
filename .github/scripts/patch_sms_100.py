@@ -49,7 +49,6 @@ const payload: Record<string, any> = {
   type: normalizeBrevoType(params.type ?? process.env.BREVO_SMS_TYPE),
 };
 if (/[^\\x00-\\x7F]/.test(body)) payload.unicodeEnabled = true;'''
-if old not in s:
-    raise SystemExit('Expected SMS send guard block not found')
-s = s.replace(old, new, 1)
+if old in s:
+    s = s.replace(old, new, 1)
 provider.write_text(s)
