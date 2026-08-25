@@ -3,17 +3,14 @@ import * as React from "react";
 import { Form } from "react-router";
 import {
   Badge,
-  Banner,
   BlockStack,
   Box,
   Button,
   ButtonGroup,
   Card,
-  Divider,
   IndexTable,
   InlineGrid,
   InlineStack,
-  Layout,
   Page,
   Text,
 } from "@shopify/polaris";
@@ -124,47 +121,42 @@ function badgeTone(tone: BadgeTone) {
   return tone;
 }
 
-function shouldHideSettingRowLabel(label: string) {
-  const s = (label || "").toLowerCase().trim();
-  return (
-    s.includes("assistant id") ||
-    s.includes("phone number id") ||
-    s.includes("phone_number_id") ||
-    s.includes("assistant_id") ||
-    s.includes("vapi")
-  );
+function friendlyMetricLabel(key: DashboardViewProps["metrics"][number]["key"], fallback: string) {
+  switch (key) {
+    case "recovered_revenue":
+      return "Revenue recovered";
+    case "at_risk_eligible_revenue":
+      return "Revenue to recover";
+    case "win_rate":
+      return "Recovery rate";
+    case "abandoned_eligible_count":
+      return "Open checkouts";
+    case "calls_completed":
+      return "Calls completed";
+    case "followups_needed":
+      return "Needs follow-up";
+    case "discount_requests":
+      return "Discount requests";
+    default:
+      return fallback;
+  }
 }
 
-function MetricCard({
-  label,
-  valueText,
-  tone,
-  deltaText,
-  href,
-}: {
-  label: string;
-  valueText: string;
-  tone: BadgeTone;
-  deltaText?: string | null;
-  href: string;
-}) {
+function MetricCard({ metric }: { metric: DashboardViewProps["metrics"][number] }) {
   return (
     <Card>
-      <BlockStack gap="300">
+      <BlockStack gap="200">
         <Text as="p" variant="bodySm" tone="subdued">
-          {label}
+          {friendlyMetricLabel(metric.key, metric.label)}
         </Text>
-        <InlineStack align="space-between" blockAlign="center" gap="200" wrap={false}>
-          <Text as="p" variant="headingLg">
-            {valueText}
-          </Text>
-          <Badge tone={badgeTone(tone)}>{tone === "new" ? "NEW" : tone.toUpperCase()}</Badge>
-        </InlineStack>
+        <Text as="p" variant="headingXl">
+          {metric.valueText}
+        </Text>
         <InlineStack align="space-between" blockAlign="center" gap="200">
           <Text as="span" variant="bodySm" tone="subdued">
-            {deltaText || "Current range"}
+            {metric.deltaText || "Current period"}
           </Text>
-          <Button url={href} variant="plain" size="slim">
+          <Button url={metric.href} variant="plain" size="slim">
             View
           </Button>
         </InlineStack>
@@ -173,107 +165,39 @@ function MetricCard({
   );
 }
 
-function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }) {
-  return (
-    <BlockStack gap="100">
-      <Text as="h2" variant="headingMd">
-        {title}
-      </Text>
-      {subtitle ? (
-        <Text as="p" variant="bodySm" tone="subdued">
-          {subtitle}
-        </Text>
-      ) : null}
-    </BlockStack>
-  );
-}
-
 export function DashboardView(props: DashboardViewProps) {
-  const settingsRows = React.useMemo(
-    () => (props.settings.rows || []).filter((r) => !shouldHideSettingRowLabel(r.label)),
-    [props.settings.rows],
-  );
+  const keyMetricOrder: DashboardViewProps["metrics"][number]["key"][] = [
+    "recovered_revenue",
+    "at_risk_eligible_revenue",
+    "win_rate",
+    "abandoned_eligible_count",
+  ];
 
-  const rangeButtons = (
-    <ButtonGroup variant="segmented">
-      <Button url={props.range.links.all} pressed={props.range.key === "all"}>
-        All time
-      </Button>
-      <Button url={props.range.links.d7} pressed={props.range.key === "7d"}>
-        7 days
-      </Button>
-      <Button url={props.range.links.h24} pressed={props.range.key === "24h"}>
-        24 hours
-      </Button>
-    </ButtonGroup>
-  );
+  const keyMetrics = keyMetricOrder
+    .map((key) => props.metrics.find((metric) => metric.key === key))
+    .filter(Boolean) as DashboardViewProps["metrics"];
 
-  const liveRows = props.liveRows.map((row, index) => (
-    <IndexTable.Row id={row.key} key={row.key} position={index}>
-      <IndexTable.Cell>
-        <Text as="span" variant="bodyMd" fontWeight="medium">
-          {row.event}
-        </Text>
-      </IndexTable.Cell>
-      <IndexTable.Cell>
-        <BlockStack gap="100">
-          <div>
-            <Badge tone={badgeTone(row.tone)}>{row.status}</Badge>
-          </div>
-          {row.statusHint ? (
-            <Text as="span" variant="bodySm" tone="subdued">
-              {row.statusHint}
-            </Text>
-          ) : null}
-        </BlockStack>
-      </IndexTable.Cell>
-      <IndexTable.Cell>
-        <Text as="span" variant="bodySm" tone="subdued">
-          {row.whenText}
-        </Text>
-      </IndexTable.Cell>
-      <IndexTable.Cell>
-        <InlineStack gap="200" wrap={false}>
-          {row.recordingUrl ? (
-            <Button url={row.recordingUrl} external variant="plain" size="slim">
-              Recording
-            </Button>
-          ) : (
-            <Text as="span" tone="subdued">
-              —
-            </Text>
-          )}
-          {row.logUrl ? (
-            <Button url={row.logUrl} external variant="plain" size="slim">
-              Logs
-            </Button>
-          ) : null}
-        </InlineStack>
-      </IndexTable.Cell>
-    </IndexTable.Row>
-  ));
+  const visibleMetrics = keyMetrics.length >= 3 ? keyMetrics.slice(0, 4) : props.metrics.slice(0, 4);
+  const visiblePriorities = props.priorities.filter((row) => row.count > 0).slice(0, 4);
+  const visibleActivity = props.liveRows.slice(0, 5);
+  const visibleRecoveries = props.recentRecoveries.slice(0, 5);
 
-  const priorityRows = props.priorities.map((row, index) => (
+  const priorityRows = visiblePriorities.map((row, index) => (
     <IndexTable.Row id={row.key} key={row.key} position={index}>
       <IndexTable.Cell>
         <BlockStack gap="100">
           <Text as="span" variant="bodyMd" fontWeight="medium">
             {row.label}
           </Text>
-          {row.rawCountText ? (
+          {row.nextBestAction ? (
             <Text as="span" variant="bodySm" tone="subdued">
-              {row.rawCountText}
+              {row.nextBestAction}
             </Text>
           ) : null}
         </BlockStack>
       </IndexTable.Cell>
       <IndexTable.Cell>
         <Badge tone={badgeTone(row.tone)}>{String(row.count)}</Badge>
-      </IndexTable.Cell>
-      <IndexTable.Cell>
-        <Text as="span" variant="bodySm" tone={row.nextBestAction ? undefined : "subdued"}>
-          {row.nextBestAction || "No action needed"}
-        </Text>
       </IndexTable.Cell>
       <IndexTable.Cell>
         <Button url={row.href} variant="plain" size="slim">
@@ -283,29 +207,39 @@ export function DashboardView(props: DashboardViewProps) {
     </IndexTable.Row>
   ));
 
-  const recoveryRows = props.recentRecoveries.map((row, index) => (
-    <IndexTable.Row id={row.checkoutId} key={row.checkoutId} position={index}>
+  const activityRows = visibleActivity.map((row, index) => (
+    <IndexTable.Row id={row.key} key={row.key} position={index}>
       <IndexTable.Cell>
-        <BlockStack gap="100">
-          <Button url={row.href} variant="plain" textAlign="left">
-            {row.customerName || `Checkout ${row.checkoutId}`}
-          </Button>
-          <Text as="span" variant="bodySm" tone="subdued">
-            #{row.checkoutId}
-          </Text>
-        </BlockStack>
+        <Text as="span" variant="bodyMd" fontWeight="medium">
+          {row.event}
+        </Text>
       </IndexTable.Cell>
       <IndexTable.Cell>
-        <Badge tone="success">{row.amountText}</Badge>
+        <Badge tone={badgeTone(row.tone)}>{row.status}</Badge>
       </IndexTable.Cell>
       <IndexTable.Cell>
         <Text as="span" variant="bodySm" tone="subdued">
           {row.whenText}
         </Text>
       </IndexTable.Cell>
+    </IndexTable.Row>
+  ));
+
+  const recoveryRows = visibleRecoveries.map((row, index) => (
+    <IndexTable.Row id={row.checkoutId} key={row.checkoutId} position={index}>
       <IndexTable.Cell>
-        <Text as="span" variant="bodySm">
-          {row.recoveredOrderId}
+        <Button url={row.href} variant="plain" textAlign="left">
+          {row.customerName || `Checkout ${row.checkoutId}`}
+        </Button>
+      </IndexTable.Cell>
+      <IndexTable.Cell>
+        <Text as="span" fontWeight="semibold">
+          {row.amountText}
+        </Text>
+      </IndexTable.Cell>
+      <IndexTable.Cell>
+        <Text as="span" variant="bodySm" tone="subdued">
+          {row.whenText}
         </Text>
       </IndexTable.Cell>
     </IndexTable.Row>
@@ -314,231 +248,161 @@ export function DashboardView(props: DashboardViewProps) {
   return (
     <Page
       title="CheckoutCall AI"
-      subtitle="Abandoned checkout recovery powered by AI voice calls"
+      subtitle="Your abandoned checkout recovery at a glance"
       titleMetadata={
-        <Badge tone={props.settings.enabled && props.settings.vapiReady ? "success" : "attention"}>
-          {props.settings.enabled && props.settings.vapiReady ? "Automation live" : "Needs attention"}
+        <Badge tone={props.settings.enabled ? "success" : "info"}>
+          {props.settings.enabled ? "Automation active" : "Automation paused"}
         </Badge>
       }
       primaryAction={{ content: "View checkouts", url: props.nav.checkoutsHref }}
       secondaryActions={[{ content: "Call activity", url: props.nav.callsHref }]}
     >
-      <BlockStack gap="500">
-        {props.settings.enabled ? (
-          props.settings.criticalMissing || !props.settings.vapiReady ? (
-            <Banner tone="warning" title="Finish call setup">
-              <p>Automation is enabled, but the call provider configuration is incomplete. Open Settings before running live recovery calls.</p>
-            </Banner>
-          ) : (
-            <Banner tone="success" title="Recovery automation is ready">
-              <p>Your AI agent is ready to call eligible abandoned checkouts using the timing and offer rules in Settings.</p>
-            </Banner>
-          )
-        ) : (
-          <Banner tone="info" title="Recovery automation is paused">
-            <p>Enable automation in Settings when you are ready to start calling eligible abandoned checkouts.</p>
-          </Banner>
-        )}
+      <BlockStack gap="400">
+        <InlineStack align="space-between" blockAlign="center" gap="300">
+          <ButtonGroup variant="segmented">
+            <Button url={props.range.links.all} pressed={props.range.key === "all"}>
+              All time
+            </Button>
+            <Button url={props.range.links.d7} pressed={props.range.key === "7d"}>
+              7 days
+            </Button>
+            <Button url={props.range.links.h24} pressed={props.range.key === "24h"}>
+              24 hours
+            </Button>
+          </ButtonGroup>
 
-        <Card>
-          <InlineStack align="space-between" blockAlign="center" gap="400">
-            <BlockStack gap="100">
-              <Text as="h2" variant="headingMd">
-                Performance overview
-              </Text>
-              <Text as="p" variant="bodySm" tone="subdued">
-                {props.range.label} · verified Shopify recovery data
-              </Text>
-            </BlockStack>
-
-            <InlineStack gap="300" blockAlign="center">
-              {rangeButtons}
-              <Form method="post">
-                <input type="hidden" name="intent" value="sync_now" />
-                <Button submit>Sync now</Button>
-              </Form>
+          <InlineStack gap="200">
+            <Form method="post">
+              <input type="hidden" name="intent" value="sync_now" />
+              <Button submit>Refresh</Button>
+            </Form>
+            {props.canCreateTestCall ? (
               <Form method="post">
                 <input type="hidden" name="intent" value="create_test_call" />
-                <Button submit variant="primary" disabled={!props.canCreateTestCall}>
-                  Test call
-                </Button>
+                <Button submit>Test call</Button>
               </Form>
-            </InlineStack>
+            ) : null}
           </InlineStack>
-        </Card>
+        </InlineStack>
 
         {props.hero.show ? (
           <Card>
-            <InlineStack align="space-between" blockAlign="center" gap="500">
-              <BlockStack gap="200">
-                <InlineStack gap="200" blockAlign="center">
-                  <Badge tone="success">Verified revenue</Badge>
-                  <Badge tone="info">{props.range.label}</Badge>
-                </InlineStack>
+            <InlineStack align="space-between" blockAlign="center" gap="400">
+              <BlockStack gap="100">
+                <Text as="p" variant="bodySm" tone="subdued">
+                  Recovered revenue · {props.range.label}
+                </Text>
                 <Text as="p" variant="heading2xl">
                   {props.hero.recoveredRevenueText}
                 </Text>
-                <Text as="p" variant="bodyMd" tone="subdued">
-                  {props.hero.recoveredCount} recovered checkouts · {props.hero.winRate}% win rate
+                <Text as="p" variant="bodySm" tone="subdued">
+                  {props.hero.recoveredCount} completed purchases recovered · {props.hero.winRate}% recovery rate
                 </Text>
               </BlockStack>
-              <Button url={props.hero.href}>View recoveries</Button>
+              <Button url={props.hero.href}>View recovered orders</Button>
             </InlineStack>
           </Card>
         ) : null}
 
-        <BlockStack gap="300">
-          <SectionHeader title="Key metrics" subtitle="The numbers that matter most for recovery performance." />
-          <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="400">
-            {props.metrics.map((metric) => (
-              <MetricCard key={metric.key} {...metric} />
-            ))}
-          </InlineGrid>
-        </BlockStack>
+        <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="300">
+          {visibleMetrics.map((metric) => (
+            <MetricCard key={metric.key} metric={metric} />
+          ))}
+        </InlineGrid>
 
-        <Layout>
-          <Layout.Section variant="oneHalf">
-            <Card>
-              <BlockStack gap="400">
-                <SectionHeader title="Recovery pipeline" subtitle="Where eligible abandoned checkouts are right now." />
-                <BlockStack gap="200">
-                  {props.pipelineRows.map((row, index) => (
-                    <React.Fragment key={row.key}>
-                      <InlineStack align="space-between" blockAlign="center" gap="300">
-                        <BlockStack gap="100">
-                          <Text as="p" variant="bodyMd" fontWeight="medium">
-                            {row.label}
-                          </Text>
-                          <Button url={row.href} variant="plain" size="slim">
-                            View checkouts
-                          </Button>
-                        </BlockStack>
-                        <Badge tone={badgeTone(row.tone)}>{String(row.count)}</Badge>
-                      </InlineStack>
-                      {index < props.pipelineRows.length - 1 ? <Divider /> : null}
-                    </React.Fragment>
-                  ))}
-                </BlockStack>
-              </BlockStack>
-            </Card>
-          </Layout.Section>
-
-          <Layout.Section variant="oneHalf">
-            <Card padding="0">
-              <Box padding="400">
-                <SectionHeader title="Live activity" subtitle="Latest AI call events and outcomes." />
-              </Box>
-              <IndexTable
-                resourceName={{ singular: "activity", plural: "activities" }}
-                itemCount={props.liveRows.length}
-                headings={[{ title: "Event" }, { title: "Status" }, { title: "When" }, { title: "Links" }]}
-                selectable={false}
-                emptyState={
-                  <Box padding="500">
-                    <Text as="p" tone="subdued" alignment="center">
-                      No recent activity yet.
-                    </Text>
-                  </Box>
-                }
-              >
-                {liveRows}
-              </IndexTable>
-            </Card>
-          </Layout.Section>
-        </Layout>
-
-        <Card padding="0">
-          <Box padding="400">
-            <SectionHeader title="Today’s priorities" subtitle="Recovery opportunities that deserve attention first." />
-          </Box>
-          <IndexTable
-            resourceName={{ singular: "priority", plural: "priorities" }}
-            itemCount={props.priorities.length}
-            headings={[{ title: "Priority" }, { title: "Count" }, { title: "Next best action" }, { title: "" }]}
-            selectable={false}
-          >
-            {priorityRows}
-          </IndexTable>
-        </Card>
-
-        <Card padding="0">
-          <Box padding="400">
-            <SectionHeader title="Recent recoveries" subtitle="Verified Shopify orders attributed to abandoned checkout recovery." />
-          </Box>
-          <IndexTable
-            resourceName={{ singular: "recovery", plural: "recoveries" }}
-            itemCount={props.recentRecoveries.length}
-            headings={[{ title: "Customer" }, { title: "Recovered" }, { title: "When" }, { title: "Order" }]}
-            selectable={false}
-            emptyState={
-              <Box padding="500">
-                <Text as="p" tone="subdued" alignment="center">
-                  No verified recoveries yet.
+        <InlineGrid columns={{ xs: 1, md: 2 }} gap="400">
+          <Card padding="0">
+            <Box padding="400">
+              <BlockStack gap="100">
+                <Text as="h2" variant="headingMd">
+                  Needs your attention
                 </Text>
-              </Box>
-            }
-          >
-            {recoveryRows}
-          </IndexTable>
-        </Card>
-
-        <Layout>
-          <Layout.Section variant="oneHalf">
-            <Card>
-              <BlockStack gap="400">
-                <SectionHeader title="Top blockers" subtitle="Most common blockers from AI call summaries in the last 7 days." />
-                {props.blockers.total === 0 ? (
-                  <Text as="p" tone="subdued">
-                    No call summaries in the last 7 days.
+                <Text as="p" variant="bodySm" tone="subdued">
+                  Only the recovery items worth checking now.
+                </Text>
+              </BlockStack>
+            </Box>
+            <IndexTable
+              resourceName={{ singular: "priority", plural: "priorities" }}
+              itemCount={visiblePriorities.length}
+              headings={[{ title: "Item" }, { title: "Count" }, { title: "" }]}
+              selectable={false}
+              emptyState={
+                <Box padding="500">
+                  <Text as="p" tone="subdued" alignment="center">
+                    Nothing needs your attention right now.
                   </Text>
-                ) : (
-                  <BlockStack gap="300">
-                    {props.blockers.rows.map((row, index) => (
-                      <React.Fragment key={row.key}>
-                        <InlineStack align="space-between" blockAlign="center" gap="300">
-                          <InlineStack gap="200" blockAlign="center">
-                            <Text as="span" variant="bodyMd">
-                              {row.label}
-                            </Text>
-                            <Badge tone={badgeTone(row.tone)}>{String(row.count)}</Badge>
-                          </InlineStack>
-                          <Text as="span" variant="bodySm" tone="subdued">
-                            {row.pct == null ? "—" : `${row.pct}%`} of {props.blockers.total}
-                          </Text>
-                        </InlineStack>
-                        {index < props.blockers.rows.length - 1 ? <Divider /> : null}
-                      </React.Fragment>
-                    ))}
-                  </BlockStack>
-                )}
-              </BlockStack>
-            </Card>
-          </Layout.Section>
+                </Box>
+              }
+            >
+              {priorityRows}
+            </IndexTable>
+          </Card>
 
-          <Layout.Section variant="oneHalf">
-            <Card>
-              <BlockStack gap="400">
-                <SectionHeader title="Automation setup" subtitle="A quick view of the settings that control recovery calls." />
-                <BlockStack gap="300">
-                  {settingsRows.map((row, index) => (
-                    <React.Fragment key={row.label}>
-                      <InlineStack align="space-between" blockAlign="center" gap="300">
-                        <Text as="span" variant="bodyMd">
-                          {row.label}
-                        </Text>
-                        <Badge tone={badgeTone(row.tone)}>{row.value}</Badge>
-                      </InlineStack>
-                      {index < settingsRows.length - 1 ? <Divider /> : null}
-                    </React.Fragment>
-                  ))}
-                </BlockStack>
+          <Card padding="0">
+            <Box padding="400">
+              <BlockStack gap="100">
+                <Text as="h2" variant="headingMd">
+                  Recent activity
+                </Text>
+                <Text as="p" variant="bodySm" tone="subdued">
+                  Latest calls and recovery activity.
+                </Text>
               </BlockStack>
-            </Card>
-          </Layout.Section>
-        </Layout>
+            </Box>
+            <IndexTable
+              resourceName={{ singular: "activity", plural: "activities" }}
+              itemCount={visibleActivity.length}
+              headings={[{ title: "Activity" }, { title: "Status" }, { title: "When" }]}
+              selectable={false}
+              emptyState={
+                <Box padding="500">
+                  <Text as="p" tone="subdued" alignment="center">
+                    Activity will appear here as recovery starts.
+                  </Text>
+                </Box>
+              }
+            >
+              {activityRows}
+            </IndexTable>
+            {props.liveRows.length > visibleActivity.length ? (
+              <Box padding="300">
+                <Button url={props.nav.callsHref} variant="plain">
+                  View all call activity
+                </Button>
+              </Box>
+            ) : null}
+          </Card>
+        </InlineGrid>
+
+        {visibleRecoveries.length > 0 ? (
+          <Card padding="0">
+            <Box padding="400">
+              <InlineStack align="space-between" blockAlign="center" gap="300">
+                <BlockStack gap="100">
+                  <Text as="h2" variant="headingMd">
+                    Recent recovered orders
+                  </Text>
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    Purchases that were actually completed after abandonment.
+                  </Text>
+                </BlockStack>
+                <Button url={props.nav.checkoutsHref} variant="plain">
+                  View all
+                </Button>
+              </InlineStack>
+            </Box>
+            <IndexTable
+              resourceName={{ singular: "recovery", plural: "recoveries" }}
+              itemCount={visibleRecoveries.length}
+              headings={[{ title: "Customer" }, { title: "Recovered" }, { title: "When" }]}
+              selectable={false}
+            >
+              {recoveryRows}
+            </IndexTable>
+          </Card>
+        ) : null}
       </BlockStack>
     </Page>
   );
 }
-
-export default DashboardView;
