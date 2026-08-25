@@ -27,6 +27,7 @@ jobs:
           node-version: '20'
           cache: npm
       - run: npm ci
+      - run: npm install --no-save @shopify/polaris-types@1.0.7
       - run: npx prisma generate
       - run: npm run typecheck
       - run: npm run build
