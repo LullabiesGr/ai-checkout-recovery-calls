@@ -456,6 +456,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const latestJobMap = pickLatestJobByCheckout(jobs);
   const recoveredOrderMap = buildRecoveredOrderMap(orders);
+  const latestOfferByCheckout = new Map<string, ReturnType<typeof parseCheckoutOffer>>();
+  for (const job of jobs as any[]) {
+    const checkoutKey = safeStr(job?.checkoutId).trim();
+    if (!checkoutKey || latestOfferByCheckout.has(checkoutKey)) continue;
+    const parsed = parseCheckoutOffer(job?.analysisJson);
+    if (parsed.code || parsed.smsSentAt || parsed.smsMessageId) latestOfferByCheckout.set(checkoutKey, parsed);
+  }
 
   const callIds = checkouts
     .map((c) => {
@@ -642,7 +649,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const checkoutId = String(c.checkoutId);
     const j = latestJobMap.get(checkoutId) ?? null;
     const order = recoveredOrderMap.get(checkoutId) ?? null;
-    const offer = parseCheckoutOffer((j as any)?.analysisJson);
+    const offer = latestOfferByCheckout.get(checkoutId) ?? parseCheckoutOffer((j as any)?.analysisJson);
 
     const callId = j?.providerCallId ? String(j.providerCallId) : "";
     const jobId = j?.id ? String(j.id) : "";

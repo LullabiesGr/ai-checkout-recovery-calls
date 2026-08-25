@@ -264,7 +264,13 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
           recordingUrl: j.recordingUrl ? String(j.recordingUrl) : null,
         }
       : null,
-    offer: parseOffer((j as any)?.analysisJson),
+    offer: (() => {
+      for (const job of jobs as any[]) {
+        const parsed = parseOffer(job?.analysisJson);
+        if (parsed.code || parsed.smsSentAt || parsed.smsMessageId) return parsed;
+      }
+      return parseOffer((j as any)?.analysisJson);
+    })(),
     sb,
     recordingUrl,
   } satisfies LoaderData;
