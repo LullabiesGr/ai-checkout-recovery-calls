@@ -1702,7 +1702,7 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
       const recoveryUrl = extractRecoveryUrlFromCheckoutRaw(checkout.raw);
       if (!recoveryUrl) throw new Error("Missing recovery checkout URL.");
 
-      const compactLink = shortRecoveryUrl(job.id) || compactCheckoutUrl(recoveryUrl);
+      const compactLink = compactCheckoutUrl(recoveryUrl);
 
       const to = String(job.phone ?? "").trim();
       if (!to || !to.startsWith("+")) throw new Error("Missing/invalid E.164 recipient on CallJob.");
@@ -1773,7 +1773,7 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
           discountNodeId = created.nodeId;
           finalDiscountPercent = requestedDiscountPercent;
           finalType = "discount";
-          discountLink = `${compactLink}?c=${encodeURIComponent(offerCode)}`;
+          discountLink = checkoutUrlWithOfferCode(compactLink, offerCode);
         } catch (e: any) {
           offerCreateError = String(e?.message ?? e);
           throw new Error(`Could not create Shopify discount code: ${offerCreateError}`);
@@ -1822,7 +1822,7 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
           offerCode = created.createdCode ?? candidate;
           discountNodeId = created.nodeId;
           finalType = "free_shipping";
-          discountLink = `${compactLink}?c=${encodeURIComponent(offerCode)}`;
+          discountLink = checkoutUrlWithOfferCode(compactLink, offerCode);
         } catch (e: any) {
           offerCreateError = String(e?.message ?? e);
           throw new Error(`Could not create Shopify free shipping code: ${offerCreateError}`);
@@ -2062,7 +2062,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       : null;
 
   const recoveryUrl = extractRecoveryUrlFromCheckoutRaw(checkout.raw);
-  const compactRecoveryUrl = recoveryUrl ? (shortRecoveryUrl(job.id) || compactCheckoutUrl(recoveryUrl)) : null;
+  const compactRecoveryUrl = recoveryUrl ? compactCheckoutUrl(recoveryUrl) : null;
 
   const brevoKey = pickBrevoApiKey();
   const smsSender = resolveBrevoSender(extras);
