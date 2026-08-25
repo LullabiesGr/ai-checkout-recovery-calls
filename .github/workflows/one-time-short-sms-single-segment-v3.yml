@@ -1,0 +1,125 @@
+name: One-time short SMS single segment patch v3
+
+on:
+  push:
+    paths:
+      - '.github/workflows/one-time-short-sms-single-segment-v3.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Patch SMS flow
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('app/callProvider.server.ts')
+          s = p.read_text()
+
+          if 'function shortRecoveryUrl(callJobId: string)' not in s:
+              marker = 'function checkoutUrlWithOfferCode(urlStr: string, code: string | null | undefined) {'
+              helpers = '''function publicAppOrigin() {
+            const candidates = [process.env.APP_URL, process.env.SHOPIFY_APP_URL, process.env.VAPI_SERVER_URL];
+            for (const raw of candidates) {
+              const value = String(raw ?? "").trim();
+              if (!value) continue;
+              try { return new URL(value).origin; } catch {}
+            }
+            return "";
+          }
+
+          function shortRecoveryUrl(callJobId: string) {
+            const origin = publicAppOrigin();
+            const id = String(callJobId ?? "").trim();
+            return origin && id ? `${origin}/r/${encodeURIComponent(id)}` : "";
+          }
+
+          '''
+              if marker not in s: raise SystemExit('missing redirect helper marker')
+              s = s.replace(marker, helpers + marker, 1)
+
+          if 'function smsSingleSegmentInfo(body: string)' not in s:
+              marker = 'async function brevoSendSms(params: {'
+              helper = '''const GSM7_EXTENDED_ASCII = new Set(["^", "{", "}", "\\\\", "[", "]", "~", "|"]);
+
+          function smsSingleSegmentInfo(body: string) {
+            const chars = Array.from(String(body ?? ""));
+            let units = 0;
+            for (const ch of chars) {
+              const cp = ch.codePointAt(0) ?? 0;
+              if (cp > 127) return { encoding: "unicode" as const, units: chars.length, limit: 70 };
+              units += GSM7_EXTENDED_ASCII.has(ch) ? 2 : 1;
+            }
+            return { encoding: "gsm7" as const, units, limit: 160 };
+          }
+
+          '''
+              if marker not in s: raise SystemExit('missing brevoSendSms marker')
+              s = s.replace(marker, helper + marker, 1)
+
+          if 'SMS exceeds one-segment limit' not in s:
+              pattern = re.compile(r'''\s*const payload: Record<string, any> = \{\s*sender,\s*recipient,\s*content: String\(params\.body \?\? ""\)\.trim\(\),\s*type: normalizeBrevoType\(params\.type \?\? process\.env\.BREVO_SMS_TYPE\),\s*\};''')
+              replacement = '''
+          const body = String(params.body ?? "").trim();
+          const segment = smsSingleSegmentInfo(body);
+          if (segment.units > segment.limit) {
+            throw new Error(`SMS exceeds one-segment limit (${segment.encoding}): ${segment.units}/${segment.limit}. Shorten the SMS template.`);
+          }
+
+          const payload: Record<string, any> = {
+            sender,
+            recipient,
+            content: body,
+            type: normalizeBrevoType(params.type ?? process.env.BREVO_SMS_TYPE),
+          };
+          if (segment.encoding === "unicode") payload.unicodeEnabled = true;'''
+              s2, n = pattern.subn(replacement, s, count=1)
+              if n != 1: raise SystemExit(f'payload regex replacements={n}')
+              s = s2
+
+          old = '      const compactLink = compactCheckoutUrl(recoveryUrl);'
+          if old in s:
+              s = s.replace(old, '      const compactLink = shortRecoveryUrl(job.id) || compactCheckoutUrl(recoveryUrl);', 1)
+
+          s = s.replace('          discountLink = checkoutUrlWithOfferCode(compactLink, offerCode);', '          discountLink = `${compactLink}?c=${encodeURIComponent(offerCode)}`;')
+          s = s.replace('        discount_link: compactLink,', '        discount_link: discountLink,', 1)
+          s = s.replace('  const compactRecoveryUrl = recoveryUrl ? compactCheckoutUrl(recoveryUrl) : null;', '  const compactRecoveryUrl = recoveryUrl ? (shortRecoveryUrl(job.id) || compactCheckoutUrl(recoveryUrl)) : null;', 1)
+          p.write_text(s)
+
+          p = Path('app/routes/app.settings.tsx')
+          s = p.read_text()
+          if 'const smsTemplateLimit = (value: string)' not in s:
+              idx = s.find('  const smsVarsHelp =')
+              end = s.find(';', idx)
+              if idx < 0 or end < 0: raise SystemExit('missing smsVarsHelp')
+              insert_at = end + 1
+              extra = '''
+
+          const smsTemplateLimit = (value: string) => /[^\\x00-\\x7F]/.test(value) ? 70 : 160;
+          const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTemplateLimit(value)).join("");'''
+              s = s[:insert_at] + extra + s[insert_at:]
+
+          s = s.replace('onChange={setSmsTemplateOffer}\n                      multiline={6}', 'onChange={(value) => setSmsTemplateOffer(clampSmsTemplate(value))}\n                      maxLength={smsTemplateLimit(smsTemplateOffer)}\n                      multiline={6}', 1)
+          s = s.replace('helpText="Used when an offer code exists. Use {{discount_link}} so the discount applies automatically."', 'helpText={`${Array.from(smsTemplateOffer).length}/${smsTemplateLimit(smsTemplateOffer)} template chars. One SMS segment only: 160 GSM/ASCII or 70 Unicode. The final rendered SMS is checked again before sending. Use {{discount_link}}.`}', 1)
+          s = s.replace('onChange={setSmsTemplateNoOffer}\n                      multiline={4}', 'onChange={(value) => setSmsTemplateNoOffer(clampSmsTemplate(value))}\n                      maxLength={smsTemplateLimit(smsTemplateNoOffer)}\n                      multiline={4}', 1)
+          s = s.replace('helpText="Used when no offer code exists. Use {{checkout_link}}."', 'helpText={`${Array.from(smsTemplateNoOffer).length}/${smsTemplateLimit(smsTemplateNoOffer)} template chars. One SMS segment only: 160 GSM/ASCII or 70 Unicode. The final rendered SMS is checked again before sending. Use {{checkout_link}}.`}', 1)
+          p.write_text(s)
+          PY
+
+      - name: Commit patch
+        run: |
+          git config user.name "CheckoutCall AI"
+          git config user.email "actions@users.noreply.github.com"
+          git add app/callProvider.server.ts app/routes/app.settings.tsx
+          git diff --cached --quiet && exit 0
+          git commit -m "Shorten recovery SMS links and enforce one segment"
+          git push
