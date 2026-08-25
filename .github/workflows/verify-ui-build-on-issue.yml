@@ -1,0 +1,32 @@
+name: Verify UI build
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.event.issue.title == '[RUN] Verify UI build'
+    runs-on: ubuntu-latest
+    env:
+      SHOPIFY_API_KEY: test_key
+      SHOPIFY_API_SECRET: test_secret
+      SHOPIFY_APP_URL: https://example.com
+      SCOPES: read_orders,read_checkouts
+      DATABASE_URL: postgresql://user:pass@localhost:5432/test
+      DIRECT_URL: postgresql://user:pass@localhost:5432/test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run typecheck
+      - run: npm run build
