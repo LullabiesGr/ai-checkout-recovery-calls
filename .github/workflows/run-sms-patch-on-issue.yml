@@ -1,0 +1,37 @@
+name: Run SMS patch on issue
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.issue.title == '[RUN] Harden SMS flow'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Apply SMS source patch
+        run: python scripts/harden_sms_flow.py
+
+      - name: Validate diff
+        run: git diff --check && git diff -- app/callProvider.server.ts
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo 'No changes to commit'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/callProvider.server.ts
+          git commit -m 'Harden SMS recovery tool flow'
+          git push origin HEAD:main
