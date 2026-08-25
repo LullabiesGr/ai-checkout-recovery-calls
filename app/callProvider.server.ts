@@ -323,7 +323,7 @@ function makeSpeakableCouponCode(code: string | null | undefined) {
     .split("")
     .filter(Boolean)
     .map((ch) => {
-      if (/[A-Z]/.test(ch)) return natoWord(ch);
+      if (/[A-Z]/.test(ch)) return ch;
       if (/[0-9]/.test(ch)) return digitWord(ch);
       return ch;
     });
