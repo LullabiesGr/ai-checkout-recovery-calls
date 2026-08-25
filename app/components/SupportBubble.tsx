@@ -1,13 +1,15 @@
 import * as React from "react";
 import {
-  Card,
-  Text,
-  InlineStack,
-  BlockStack,
-  TextField,
-  Button,
   Badge,
+  BlockStack,
+  Box,
+  Button,
+  Card,
+  Divider,
+  InlineStack,
   Spinner,
+  Text,
+  TextField,
 } from "@shopify/polaris";
 import { supabaseBrowser } from "../lib/supabase.client";
 
@@ -30,7 +32,6 @@ type Msg = {
 async function readJsonSafe<T = any>(response: Response): Promise<T | null> {
   const text = await response.text().catch(() => "");
   if (!text) return null;
-
   try {
     return JSON.parse(text) as T;
   } catch {
@@ -47,9 +48,7 @@ export function SupportBubble({ shop }: { shop: string }) {
   const [loading, setLoading] = React.useState(false);
   const [sending, setSending] = React.useState(false);
 
-  React.useEffect(() => {
-    setMounted(true);
-  }, []);
+  React.useEffect(() => setMounted(true), []);
 
   const appendMessage = React.useCallback((message: Msg) => {
     setMessages((prev) => {
@@ -61,7 +60,6 @@ export function SupportBubble({ shop }: { shop: string }) {
 
   const load = React.useCallback(async () => {
     setLoading(true);
-
     try {
       const response = await fetch("/api/support/thread");
       const payload = await readJsonSafe<{
@@ -90,13 +88,11 @@ export function SupportBubble({ shop }: { shop: string }) {
   }, []);
 
   React.useEffect(() => {
-    if (!open) return;
-    void load();
+    if (open) void load();
   }, [open, load]);
 
   React.useEffect(() => {
     if (!open) return;
-
     const sb = supabaseBrowser();
     if (!sb) return;
 
@@ -107,30 +103,18 @@ export function SupportBubble({ shop }: { shop: string }) {
       try {
         const response = await fetch("/api/support/channel");
         const payload = await readJsonSafe<{ ok?: boolean; channel?: string; error?: string }>(response);
-
-        if (!active) return;
-        if (!response.ok || payload?.ok === false) {
-          console.error("[support] channel load failed", payload?.error ?? response.statusText);
-          return;
-        }
+        if (!active || !response.ok || payload?.ok === false) return;
 
         const channelName = String(payload?.channel ?? "").trim();
         if (!channelName) return;
-
         const ch = sb.channel(channelName);
-
         ch.on("broadcast", { event: "support:new_message" }, (payload) => {
           if (!active) return;
           const message = (payload as any)?.payload?.message as Msg | undefined;
-          if (!message?.id) return;
-          appendMessage(message);
+          if (message?.id) appendMessage(message);
         });
-
         ch.subscribe();
-
-        cleanup = () => {
-          void sb.removeChannel(ch);
-        };
+        cleanup = () => void sb.removeChannel(ch);
       } catch (error) {
         console.error("[support] realtime subscription failed", error);
       }
@@ -145,23 +129,18 @@ export function SupportBubble({ shop }: { shop: string }) {
   const send = React.useCallback(async () => {
     const body = draft.trim();
     if (!body || sending) return;
-
     setSending(true);
-
     try {
       const response = await fetch("/api/support/message", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ body }),
       });
-
       const payload = await readJsonSafe<{ ok?: boolean; message?: Msg; error?: string }>(response);
-
       if (!response.ok || payload?.ok === false) {
         console.error("[support] send failed", payload?.error ?? response.statusText);
         return;
       }
-
       if (payload?.message) {
         setDraft("");
         appendMessage(payload.message);
@@ -174,143 +153,81 @@ export function SupportBubble({ shop }: { shop: string }) {
   }, [appendMessage, draft, sending]);
 
   if (!mounted) return null;
-
   const unread = Number(thread?.unread_by_merchant ?? 0) > 0;
 
   return (
     <>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        style={{
-          position: "fixed",
-          right: 18,
-          bottom: 18,
-          width: 56,
-          height: 56,
-          borderRadius: 999,
-          border: "1px solid rgba(0,0,0,0.12)",
-          background: "#111827",
-          color: "#fff",
-          cursor: "pointer",
-          zIndex: 2147482000,
-          fontSize: 20,
-          fontWeight: 700,
-        }}
-        aria-label="Support chat"
-        title="Support"
-      >
-        {unread ? (
-          <span
-            style={{
-              position: "absolute",
-              top: -6,
-              right: -6,
-              width: 18,
-              height: 18,
-              borderRadius: 999,
-              background: "#ef4444",
-              border: "2px solid #fff",
-            }}
-          />
-        ) : null}
-        ?
-      </button>
+      <div style={{ position: "fixed", right: 18, bottom: 18, zIndex: 2147482000 }}>
+        <Button variant="primary" onClick={() => setOpen((v) => !v)} accessibilityLabel="Open support chat">
+          {unread ? "Support · New" : "Support"}
+        </Button>
+      </div>
 
       {open ? (
-        <div
-          style={{
-            position: "fixed",
-            right: 18,
-            bottom: 86,
-            width: 360,
-            zIndex: 2147482000,
-          }}
-        >
+        <div style={{ position: "fixed", right: 18, bottom: 72, width: 380, maxWidth: "calc(100vw - 36px)", zIndex: 2147482000 }}>
           <Card>
             <BlockStack gap="300">
-              <InlineStack align="space-between">
+              <InlineStack align="space-between" blockAlign="center" gap="200">
                 <BlockStack gap="050">
-                  <Text as="h3" variant="headingMd">
-                    Support
-                  </Text>
-
-                  <InlineStack gap="200">
-                    <Badge tone="success">Live</Badge>
-                    <Text as="p" variant="bodySm" tone="subdued">
-                      {shop}
-                    </Text>
+                  <InlineStack gap="150" blockAlign="center">
+                    <Text as="h3" variant="headingMd">CheckoutCall support</Text>
+                    {unread ? <Badge tone="attention">New reply</Badge> : <Badge tone="success">Online</Badge>}
                   </InlineStack>
+                  <Text as="p" variant="bodySm" tone="subdued">We’ll help with your recovery setup and calls.</Text>
                 </BlockStack>
-
-                <Button onClick={() => setOpen(false)}>Close</Button>
+                <Button onClick={() => setOpen(false)} variant="plain">Close</Button>
               </InlineStack>
 
-              <div
-                style={{
-                  height: 340,
-                  overflow: "auto",
-                  border: "1px solid #e5e7eb",
-                  borderRadius: 12,
-                  padding: 12,
-                }}
-              >
+              <Divider />
+
+              <Box background="bg-surface-secondary" borderRadius="300" padding="300" minHeight="320px">
                 {loading || messages === null ? (
-                  <InlineStack align="center">
-                    <Spinner accessibilityLabel="Loading" size="small" />
-                  </InlineStack>
+                  <Box paddingBlock="800">
+                    <InlineStack align="center"><Spinner accessibilityLabel="Loading support messages" size="small" /></InlineStack>
+                  </Box>
                 ) : messages.length === 0 ? (
-                  <Text as="p" variant="bodyMd">
-                    Write your first message.
-                  </Text>
+                  <Box paddingBlock="600">
+                    <BlockStack gap="100" align="center">
+                      <Text as="p" variant="headingSm">How can we help?</Text>
+                      <Text as="p" variant="bodySm" tone="subdued">Send your first message below.</Text>
+                    </BlockStack>
+                  </Box>
                 ) : (
-                  <BlockStack gap="200">
-                    {messages.map((m) => (
-                      <div
-                        key={m.id}
-                        style={{
-                          padding: 10,
-                          borderRadius: 12,
-                          background: m.sender_role === "admin" ? "#eef2ff" : "#f9fafb",
-                        }}
-                      >
-                        <InlineStack align="space-between">
-                          <Text as="p" variant="bodySm">
-                            {m.sender_role === "admin" ? "Support" : "You"}
-                          </Text>
-                          <Text as="p" variant="bodySm" tone="subdued">
-                            {new Date(m.created_at).toLocaleTimeString([], {
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            })}
-                          </Text>
-                        </InlineStack>
-
-                        <Text as="p" variant="bodyMd">
-                          {m.body}
-                        </Text>
-                      </div>
-                    ))}
-                  </BlockStack>
+                  <div style={{ maxHeight: 320, overflowY: "auto" }}>
+                    <BlockStack gap="200">
+                      {messages.map((m) => (
+                        <Box key={m.id} background={m.sender_role === "admin" ? "bg-surface-info" : "bg-surface"} borderRadius="300" padding="250">
+                          <BlockStack gap="100">
+                            <InlineStack align="space-between" gap="200">
+                              <Text as="p" variant="bodySm" fontWeight="semibold">{m.sender_role === "admin" ? "Support" : "You"}</Text>
+                              <Text as="p" variant="bodySm" tone="subdued">
+                                {new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                              </Text>
+                            </InlineStack>
+                            <Text as="p" variant="bodyMd">{m.body}</Text>
+                          </BlockStack>
+                        </Box>
+                      ))}
+                    </BlockStack>
+                  </div>
                 )}
-              </div>
+              </Box>
 
-              <InlineStack gap="200" align="end">
-                <div style={{ flex: 1 }}>
-                  <TextField
-                    label="Message"
-                    labelHidden
-                    value={draft}
-                    onChange={setDraft}
-                    autoComplete="off"
-                    multiline={3}
-                  />
-                </div>
-
-                <Button variant="primary" onClick={send} loading={sending}>
-                  Send
-                </Button>
-              </InlineStack>
+              <BlockStack gap="200">
+                <TextField
+                  label="Message"
+                  value={draft}
+                  onChange={setDraft}
+                  autoComplete="off"
+                  multiline={3}
+                  placeholder="Describe what you need help with…"
+                />
+                <InlineStack align="end">
+                  <Button variant="primary" onClick={send} loading={sending} disabled={!draft.trim()}>
+                    Send message
+                  </Button>
+                </InlineStack>
+              </BlockStack>
             </BlockStack>
           </Card>
         </div>
