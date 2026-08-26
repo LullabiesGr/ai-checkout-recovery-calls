@@ -19,7 +19,7 @@ export const PLANS: Record<
     key: "FREE",
     title: "Free",
     recurringMonthlyEUR: 0,
-    includedAttempts: 0,
+    includedAttempts: 10,
     overageEURPerAttempt: 0,
     usageCapEUR: 0,
   },

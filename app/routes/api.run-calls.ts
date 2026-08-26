@@ -3,6 +3,7 @@ import type { ActionFunctionArgs } from "react-router";
 import db from "../db.server";
 import { ensureSettings } from "../callRecovery.server";
 import { startVapiCallForJob } from "../callProvider.server";
+import { getAttemptAvailability } from "../lib/billing.server";
 
 function parseHHMM(hhmm: string): number | null {
   const m = /^(\d{2}):(\d{2})$/.exec((hhmm || "").trim());
@@ -58,8 +59,24 @@ export async function action({ request }: ActionFunctionArgs) {
   let started = 0;
   let failed = 0;
   let canceled = 0;
+  const freeStartsThisRun = new Map<string, number>();
 
   for (const job of jobs) {
+    const attemptAvailability = await getAttemptAvailability(job.shop);
+    const locallyStartedFree = freeStartsThisRun.get(job.shop) ?? 0;
+    const freeRemainingForThisRun = attemptAvailability.remainingIncluded - locallyStartedFree;
+
+    if (attemptAvailability.plan === "FREE" && (!attemptAvailability.allowed || freeRemainingForThisRun <= 0)) {
+      await db.callJob.update({
+        where: { id: job.id },
+        data: {
+          status: "FAILED",
+          outcome: "FREE_ATTEMPT_LIMIT_REACHED",
+        },
+      });
+      failed += 1;
+      continue;
+    }
     // Lock exactly once and increment attempts exactly once here.
     const locked = await db.callJob.updateMany({
       where: { id: job.id, status: "QUEUED" },
@@ -111,6 +128,9 @@ export async function action({ request }: ActionFunctionArgs) {
         },
       });
 
+      if (attemptAvailability.plan === "FREE") {
+        freeStartsThisRun.set(job.shop, locallyStartedFree + 1);
+      }
       started += 1;
     } catch (e: any) {
       const jobFresh = await db.callJob.findUnique({

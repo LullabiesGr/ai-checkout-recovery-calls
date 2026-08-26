@@ -170,6 +170,10 @@ export async function action({ request }: ActionFunctionArgs) {
             pendingCouponId: null,
             pendingCouponCode: null,
             appliedCouponCode: null,
+            includedSecondsUsed: 0,
+            freeSecondsUsed: 0,
+            currentPeriodStart: null,
+            currentPeriodEnd: null,
           },
         });
 
@@ -244,7 +248,7 @@ export default function BillingRoute() {
   const hasActivePaidPlan = status === "ACTIVE" && effectivePlanKey !== "FREE";
   const plan = PLANS[effectivePlanKey] ?? PLANS.FREE;
 
-  const freeRemainingAttempts = Math.max(0, 10 - Number(billing?.freeSecondsUsed || 0));
+  const freeRemainingAttempts = Math.max(0, PLANS.FREE.includedAttempts - Number(billing?.freeSecondsUsed || 0));
 
   const includedAttemptsUsed = Number(billing?.includedSecondsUsed || 0);
   const includedRemainingAttempts = Math.max(0, plan.includedAttempts - includedAttemptsUsed);
@@ -394,7 +398,7 @@ export default function BillingRoute() {
                       </InlineStack>
 
                       {k === "FREE" ? (
-                        <Text as="p">€0/month • 10 call attempts • SMS included with every attempt</Text>
+                        <Text as="p">€0/month • {p.includedAttempts} call attempts • SMS included with every attempt</Text>
                       ) : k === "PAYG" ? (
                         <Text as="p">
                           €0/month • €{p.overageEURPerAttempt.toFixed(2)}/attempt • cap {formatEUR(p.usageCapEUR)}

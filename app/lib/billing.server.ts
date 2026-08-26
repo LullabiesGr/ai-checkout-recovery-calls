@@ -191,6 +191,7 @@ query BillingState {
       id
       name
       status
+      currentPeriodEnd
       lineItems {
         id
         plan {
@@ -245,6 +246,10 @@ query BillingState {
           pendingCouponId: null,
           pendingCouponCode: null,
           appliedCouponCode: null,
+          includedSecondsUsed: row.plan === "FREE" ? row.includedSecondsUsed : 0,
+          freeSecondsUsed: row.plan === "FREE" ? row.freeSecondsUsed : 0,
+          currentPeriodStart: null,
+          currentPeriodEnd: null,
         },
       });
       return;
@@ -266,6 +271,16 @@ query BillingState {
             ? "PAYG"
             : "FREE");
 
+    const nextPeriodEnd = ours?.currentPeriodEnd ? new Date(ours.currentPeriodEnd) : null;
+    const previousPeriodEnd = row.currentPeriodEnd ? new Date(row.currentPeriodEnd) : null;
+    const planChanged = normalizedPlan !== currentRowPlan;
+    const billingCycleChanged = Boolean(
+      status === "ACTIVE" &&
+      nextPeriodEnd &&
+      (!previousPeriodEnd || previousPeriodEnd.getTime() !== nextPeriodEnd.getTime())
+    );
+    const resetIncludedAttempts = planChanged || billingCycleChanged;
+
     await tx.shopBilling.update({
       where: { shop },
       data: {
@@ -275,6 +290,10 @@ query BillingState {
         subscriptionId: ours.id,
         usageLineItemId: usageLine?.id ?? null,
         recurringLineItemId: recurringLine?.id ?? null,
+        includedSecondsUsed: resetIncludedAttempts ? 0 : row.includedSecondsUsed,
+        freeSecondsUsed: normalizedPlan === "FREE" && planChanged ? 0 : row.freeSecondsUsed,
+        currentPeriodStart: resetIncludedAttempts ? new Date() : row.currentPeriodStart,
+        currentPeriodEnd: nextPeriodEnd,
       },
     });
 
@@ -550,6 +569,34 @@ mutation UpdateCap($id: ID!, $cappedAmount: MoneyInput!) {
   return { confirmationUrl };
 }
 
+export async function getAttemptAvailability(shop: string) {
+  const billing = await ensureBillingRow(shop);
+  const planKey: PlanKey = isPlanKey(billing.plan) ? (billing.plan as PlanKey) : "FREE";
+  const plan = PLANS[planKey] ?? PLANS.FREE;
+
+  if (planKey === "FREE") {
+    const used = Number(billing.freeSecondsUsed || 0);
+    const included = Number(PLANS.FREE.includedAttempts || 10);
+    return {
+      plan: planKey,
+      allowed: used < included,
+      included,
+      used,
+      remainingIncluded: Math.max(0, included - used),
+    };
+  }
+
+  const used = Number(billing.includedSecondsUsed || 0);
+  const included = Number(plan.includedAttempts || 0);
+  return {
+    plan: planKey,
+    allowed: true,
+    included,
+    used,
+    remainingIncluded: Math.max(0, included - used),
+  };
+}
+
 export async function applyBillingForCall(args: {
   shop: string;
   admin?: AdminLike;
@@ -584,9 +631,14 @@ export async function applyBillingForCall(args: {
     }
 
     if (planKey === "FREE") {
+      const freeUsed = Number(billing.freeSecondsUsed || 0);
+      const freeLimit = Number(PLANS.FREE.includedAttempts || 10);
+      if (freeUsed >= freeLimit) {
+        throw new Error("FREE_ATTEMPT_LIMIT_REACHED");
+      }
       await tx.shopBilling.update({
         where: { shop },
-        data: { freeSecondsUsed: Number(billing.freeSecondsUsed || 0) + 1 },
+        data: { freeSecondsUsed: freeUsed + 1 },
       });
       await tx.callCharge.create({
         data: {
