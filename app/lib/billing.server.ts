@@ -234,6 +234,15 @@ query BillingState {
     });
 
     if (!ours) {
+      const now = new Date();
+      const existingFreePeriodEnd = row.currentPeriodEnd ? new Date(row.currentPeriodEnd) : null;
+      const enteringFree = row.plan !== "FREE";
+      const freeCycleExpired = !existingFreePeriodEnd || existingFreePeriodEnd.getTime() <= now.getTime();
+      const resetFreeAttempts = enteringFree || freeCycleExpired;
+      const nextFreePeriodEnd = resetFreeAttempts
+        ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000)
+        : existingFreePeriodEnd;
+
       await tx.shopBilling.update({
         where: { shop },
         data: {
@@ -246,10 +255,10 @@ query BillingState {
           pendingCouponId: null,
           pendingCouponCode: null,
           appliedCouponCode: null,
-          includedSecondsUsed: row.plan === "FREE" ? row.includedSecondsUsed : 0,
-          freeSecondsUsed: row.plan === "FREE" ? row.freeSecondsUsed : 0,
-          currentPeriodStart: null,
-          currentPeriodEnd: null,
+          includedSecondsUsed: 0,
+          freeSecondsUsed: resetFreeAttempts ? 0 : row.freeSecondsUsed,
+          currentPeriodStart: resetFreeAttempts ? now : row.currentPeriodStart,
+          currentPeriodEnd: nextFreePeriodEnd,
         },
       });
       return;
