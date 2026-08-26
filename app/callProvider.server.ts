@@ -323,12 +323,12 @@ function makeSpeakableCouponCode(code: string | null | undefined) {
     .split("")
     .filter(Boolean)
     .map((ch) => {
-      if (/[A-Z]/.test(ch)) return ch;
+      if (/[A-Z]/.test(ch)) return natoWord(ch);
       if (/[0-9]/.test(ch)) return digitWord(ch);
       return ch;
     });
 
-  return parts.length ? parts.join(", ") : null;
+  return parts.length ? parts.join(" ... ") : null;
 }
 
 function buildToolSuccessResult(args: {
@@ -1266,7 +1266,7 @@ SMS / OFFER TOOL (tool use):
 - Say the SMS was sent ONLY when the tool result contains sms_sent=true.
 - If sms_sent=false, clearly say the text could not be sent. If the result contains a real code/code_speakable, you may give that exact code verbally.
 - Never invent, guess, shorten, or transform a coupon code. Only use code/code_speakable returned by the tool.
-- If the tool result includes code_speakable, read that exact form slowly. Commas indicate pauses only; never say the words dot, period, comma, separator, or punctuation.
+- If the tool result includes code_speakable, read that exact form slowly with short pauses.
 - Never read CHECKOUT_LINK aloud.
 - Never spell domains, query parameters, or URL characters aloud.
 - You may choose the final offer during the conversation, but you must stay within the configured limits.
@@ -1693,10 +1693,7 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
         couponPrefix: (extras?.coupon_prefix ?? "").trim() ? String(extras?.coupon_prefix).trim() : null,
         couponValidityHours: clamp(Number(extras?.coupon_validity_hours ?? 24), 1, 168),
         freeShippingEnabled: Boolean(extras?.free_shipping_enabled ?? false),
-        followupSmsEnabled: smsFeatureAllowedByPlan && Boolean(extras?.followup_sms_enabled ?? false),
       };
-
-      if (!playbook.followupSmsEnabled) throw new Error("SMS follow-up is disabled for this shop.");
 
       const recoveryUrl = extractRecoveryUrlFromCheckoutRaw(checkout.raw);
       if (!recoveryUrl) throw new Error("Missing recovery checkout URL.");
@@ -2069,7 +2066,6 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
 
   const smsEnabled =
     smsFeatureAllowedByPlan &&
-    Boolean(playbook.followupSmsEnabled) &&
     hasSmsTransport &&
     Boolean(compactRecoveryUrl) &&
     Boolean(customerNumber);
@@ -2148,7 +2144,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
         `When the customer clearly accepts receiving the SMS, do not send a normal assistant message first: your next action must be the send_checkout_offer tool call. ` +
         `Vapi will speak the request-start message automatically when the real tool begins. ` +
         `Afterward, treat the returned JSON as ground truth: say the text was sent only if sms_sent=true. ` +
-        `If sms_sent=false, say it could not be sent; if a real code/code_speakable is returned, you may give only that exact code. When reading code_speakable, commas are silent pauses only; never say dot, period, comma, separator, or punctuation. ` +
+        `If sms_sent=false, say it could not be sent; if a real code/code_speakable is returned, you may give only that exact code. ` +
         `Never invent a code, never output fake stage directions, and never claim a tool ran when no tool result exists. ` +
         `Never read the checkout URL aloud. Never spell the domain. Never read query parameters aloud.`,
     });
