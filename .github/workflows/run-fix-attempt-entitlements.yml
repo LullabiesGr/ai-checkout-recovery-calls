@@ -1,0 +1,38 @@
+name: Fix attempt entitlements
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.issue.title == '[RUN] FIX ATTEMPT ENTITLEMENTS'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.20.2'
+      - name: Apply patch
+        run: python .github/scripts/fix_attempt_entitlements.py
+      - name: Validate
+        run: |
+          git diff --check
+          npm install
+          npx prisma generate
+          npm run build
+      - name: Commit and push
+        shell: bash
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/lib/billingPlans.shared.ts app/lib/billing.server.ts app/routes/app.billing.tsx app/routes/api.run-calls.ts
+          git commit -m 'Make plan attempts functional and renew correctly'
+          git push origin HEAD:main
