@@ -1,0 +1,48 @@
+name: Apply attempts billing and universal SMS v2
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.issue.title == '[RUN] ATTEMPTS SMS ALL PLANS V2'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Apply patch
+        run: |
+          python .github/scripts/attempts_sms_all_plans_patch.py
+          python - <<'PY'
+          from pathlib import Path
+          for f in [
+            'app/lib/planFeatures.server.ts','app/lib/billingPlans.shared.ts','app/lib/billing.server.ts',
+            'app/routes/app.billing.tsx','app/routes/app.settings.tsx','app/routes/app.calls.tsx',
+            'app/components/calls/CallActivityView.tsx','app/callProvider.server.ts','app/routes/webhooks.vapi.tsx'
+          ]:
+            p=Path(f); p.write_text(p.read_text().rstrip()+"\n")
+          PY
+
+      - name: Validate
+        run: |
+          git diff --check
+          npm install
+          npx prisma generate
+          npm run build
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/lib/planFeatures.server.ts app/lib/billingPlans.shared.ts app/lib/billing.server.ts app/routes/app.billing.tsx app/routes/app.settings.tsx app/routes/app.calls.tsx app/components/calls/CallActivityView.tsx app/callProvider.server.ts app/routes/webhooks.vapi.tsx
+          git commit -m 'Use attempt billing and enable SMS on every plan'
+          git push origin HEAD:main
