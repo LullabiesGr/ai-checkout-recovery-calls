@@ -19,6 +19,7 @@ import {
   Divider,
   Banner,
   TextField,
+  ProgressBar,
 } from "@shopify/polaris";
 
 import { PLANS, isPlanKey, type PlanKey } from "../lib/billingPlans.shared";
@@ -102,8 +103,31 @@ function badgeToneFromStatus(status: string) {
   return "info" as const;
 }
 
+function merchantStatusLabel(status: string, plan: PlanKey) {
+  const s = String(status || "").toUpperCase();
+  if (plan === "FREE" && s === "NONE") return "Free plan";
+  if (s === "ACTIVE") return "Active";
+  if (s === "PENDING") return "Pending approval";
+  if (s === "CANCELLED") return "Cancelled";
+  return plan === "FREE" ? "Free plan" : "Subscription status";
+}
+
 function formatEUR(amount: number) {
   return new Intl.NumberFormat("el-GR", { style: "currency", currency: "EUR" }).format(amount);
+}
+
+function planPriceLine(planKey: PlanKey) {
+  const p = PLANS[planKey];
+  if (planKey === "FREE") return `€0/month • ${p.includedAttempts} attempts included`;
+  if (planKey === "PAYG") return `€0/month • €${p.overageEURPerAttempt.toFixed(2)} per attempt`;
+  return `${formatEUR(p.recurringMonthlyEUR)}/month • ${p.includedAttempts} attempts included`;
+}
+
+function planUsageLine(planKey: PlanKey) {
+  const p = PLANS[planKey];
+  if (planKey === "FREE") return "SMS included with every attempt";
+  if (planKey === "PAYG") return `SMS included • Monthly usage cap ${formatEUR(p.usageCapEUR)}`;
+  return `Then €${p.overageEURPerAttempt.toFixed(2)} per attempt • SMS included • Cap ${formatEUR(p.usageCapEUR)}`;
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -213,9 +237,6 @@ export async function action({ request }: ActionFunctionArgs) {
 
     return fail("Unknown intent");
   } catch (e) {
-    // Shopify's embedded redirect helper can throw a Response so React Router
-    // can preserve the special App Bridge navigation headers. Never convert
-    // that control-flow response into a billing error.
     if (e instanceof Response) throw e;
 
     console.error("[billing] action failed", e);
@@ -248,10 +269,18 @@ export default function BillingRoute() {
   const hasActivePaidPlan = status === "ACTIVE" && effectivePlanKey !== "FREE";
   const plan = PLANS[effectivePlanKey] ?? PLANS.FREE;
 
-  const freeRemainingAttempts = Math.max(0, PLANS.FREE.includedAttempts - Number(billing?.freeSecondsUsed || 0));
+  const freeAttemptsUsed = Number(billing?.freeSecondsUsed || 0);
+  const freeRemainingAttempts = Math.max(0, PLANS.FREE.includedAttempts - freeAttemptsUsed);
 
   const includedAttemptsUsed = Number(billing?.includedSecondsUsed || 0);
   const includedRemainingAttempts = Math.max(0, plan.includedAttempts - includedAttemptsUsed);
+
+  const totalIncludedAttempts = effectivePlanKey === "FREE" ? PLANS.FREE.includedAttempts : plan.includedAttempts;
+  const remainingAttempts = effectivePlanKey === "FREE" ? freeRemainingAttempts : includedRemainingAttempts;
+  const attemptsUsed = Math.max(0, totalIncludedAttempts - remainingAttempts);
+  const attemptsProgress = totalIncludedAttempts > 0
+    ? Math.min(100, Math.max(0, (attemptsUsed / totalIncludedAttempts) * 100))
+    : 0;
 
   const balanceUsed = usage?.balanceUsed ? Number(usage.balanceUsed.amount) : null;
   const capAmount = usage?.cappedAmount ? Number(usage.cappedAmount.amount) : null;
@@ -272,7 +301,7 @@ export default function BillingRoute() {
     status === "PENDING" && billing?.pendingCouponCode ? "Pending coupon" : "Coupon";
 
   return (
-    <Page title="Billing" subtitle={shop}>
+    <Page title="Billing" subtitle="Manage your plan and call attempts">
       <Layout>
         <Layout.Section>
           {billingError ? (
@@ -282,17 +311,37 @@ export default function BillingRoute() {
           ) : null}
 
           <Card>
-            <BlockStack gap="300">
-              <InlineStack align="space-between">
-                <Text as="h2" variant="headingMd">
-                  Current plan
-                </Text>
-                <Badge tone={badgeToneFromStatus(status)}>{status}</Badge>
+            <BlockStack gap="400">
+              <InlineStack align="space-between" blockAlign="center">
+                <BlockStack gap="100">
+                  <Text as="h2" variant="headingLg">
+                    {plan.title}
+                  </Text>
+                  <Text as="p" tone="subdued">
+                    {shop}
+                  </Text>
+                </BlockStack>
+                <Badge tone={badgeToneFromStatus(status)}>
+                  {merchantStatusLabel(status, effectivePlanKey)}
+                </Badge>
               </InlineStack>
 
-              <Text as="p">
-                Plan: <b>{effectivePlanKey}</b>
-              </Text>
+              <Divider />
+
+              <BlockStack gap="200">
+                <InlineStack align="space-between" blockAlign="center">
+                  <Text as="p" variant="headingMd">
+                    {remainingAttempts} / {totalIncludedAttempts} attempts remaining
+                  </Text>
+                  <Text as="p" tone="subdued">
+                    {attemptsUsed} used
+                  </Text>
+                </InlineStack>
+                <ProgressBar progress={attemptsProgress} size="small" />
+                <Text as="p" tone="subdued">
+                  One outbound call counts as one attempt. SMS is included with every attempt.
+                </Text>
+              </BlockStack>
 
               {prefillCoupon ? (
                 <Text as="p">
@@ -300,51 +349,37 @@ export default function BillingRoute() {
                 </Text>
               ) : null}
 
-              {effectivePlanKey === "FREE" ? (
+              {effectivePlanKey !== "FREE" && balanceUsed != null && capAmount != null ? (
                 <Text as="p">
-                  Free attempts remaining: <b>{freeRemainingAttempts}</b>
+                  Usage this cycle: <b>{formatEUR(balanceUsed)}</b> of <b>{formatEUR(capAmount)}</b> cap
                 </Text>
-              ) : (
+              ) : null}
+
+              {hasActivePaidPlan ? (
                 <>
-                  <Text as="p">
-                    Included attempts remaining (this cycle): <b>{includedRemainingAttempts}</b>
-                  </Text>
+                  <Divider />
+                  <InlineStack gap="200">
+                    <Form method="post">
+                      <input type="hidden" name="intent" value="cancel" />
+                      <Button tone="critical" submit loading={isBusy && activeIntent === "cancel"}>
+                        Cancel subscription
+                      </Button>
+                    </Form>
 
-                  {balanceUsed != null && capAmount != null ? (
-                    <Text as="p">
-                      Usage spend (this cycle): <b>{formatEUR(balanceUsed)}</b> / cap{" "}
-                      <b>{formatEUR(capAmount)}</b>
-                    </Text>
-                  ) : null}
+                    <Form method="post">
+                      <input type="hidden" name="intent" value="increase_cap" />
+                      <input
+                        type="hidden"
+                        name="newCapEUR"
+                        value={String((capAmount ?? plan.usageCapEUR) + 50)}
+                      />
+                      <Button submit loading={isBusy && activeIntent === "increase_cap"}>
+                        Increase cap +€50
+                      </Button>
+                    </Form>
+                  </InlineStack>
                 </>
-              )}
-
-              <Divider />
-
-              <InlineStack gap="200">
-                {hasActivePaidPlan ? (
-                  <Form method="post">
-                    <input type="hidden" name="intent" value="cancel" />
-                    <Button tone="critical" submit loading={isBusy && activeIntent === "cancel"}>
-                      Cancel subscription
-                    </Button>
-                  </Form>
-                ) : null}
-
-                {hasActivePaidPlan ? (
-                  <Form method="post">
-                    <input type="hidden" name="intent" value="increase_cap" />
-                    <input
-                      type="hidden"
-                      name="newCapEUR"
-                      value={String((capAmount ?? plan.usageCapEUR) + 50)}
-                    />
-                    <Button submit loading={isBusy && activeIntent === "increase_cap"}>
-                      Increase cap +€50
-                    </Button>
-                  </Form>
-                ) : null}
-              </InlineStack>
+              ) : null}
             </BlockStack>
           </Card>
         </Layout.Section>
@@ -352,16 +387,21 @@ export default function BillingRoute() {
         <Layout.Section>
           <Card>
             <BlockStack gap="400">
-              <Text as="h2" variant="headingMd">
-                Plans
-              </Text>
+              <BlockStack gap="100">
+                <Text as="h2" variant="headingLg">
+                  Choose a plan
+                </Text>
+                <Text as="p" tone="subdued">
+                  Pick the number of call attempts that fits your store. SMS is included on every plan.
+                </Text>
+              </BlockStack>
 
               <TextField
                 label="Coupon code"
                 value={coupon}
                 onChange={(v) => setCoupon(v)}
                 autoComplete="off"
-                helpText="Applies to subscription fee. Enter before selecting a plan."
+                helpText="Optional. Applied to the subscription fee before you confirm the plan."
               />
 
               {(["FREE", "STARTER", "PRO", "SCALE", "PAYG"] as PlanKey[]).map((k) => {
@@ -376,8 +416,8 @@ export default function BillingRoute() {
                 const badgeText =
                   status === "PENDING" && pendingPlanKey === k
                     ? "Pending"
-                    : status === "ACTIVE" && rawPlanKey === k
-                      ? "Active"
+                    : isSelected
+                      ? "Current plan"
                       : null;
 
                 const badgeTone =
@@ -389,33 +429,33 @@ export default function BillingRoute() {
 
                 return (
                   <Card key={k}>
-                    <BlockStack gap="200">
-                      <InlineStack align="space-between">
-                        <Text as="h3" variant="headingSm">
-                          {p.title} ({k})
-                        </Text>
+                    <BlockStack gap="300">
+                      <InlineStack align="space-between" blockAlign="start">
+                        <BlockStack gap="100">
+                          <Text as="h3" variant="headingMd">
+                            {p.title}
+                          </Text>
+                          <Text as="p" variant="headingSm">
+                            {planPriceLine(k)}
+                          </Text>
+                          <Text as="p" tone="subdued">
+                            {planUsageLine(k)}
+                          </Text>
+                        </BlockStack>
                         {badgeText ? <Badge tone={badgeTone}>{badgeText}</Badge> : null}
                       </InlineStack>
-
-                      {k === "FREE" ? (
-                        <Text as="p">€0/month • {p.includedAttempts} call attempts • SMS included with every attempt</Text>
-                      ) : k === "PAYG" ? (
-                        <Text as="p">
-                          €0/month • €{p.overageEURPerAttempt.toFixed(2)}/attempt • cap {formatEUR(p.usageCapEUR)}
-                        </Text>
-                      ) : (
-                        <Text as="p">
-                          {formatEUR(p.recurringMonthlyEUR)}/month • {p.includedAttempts} included attempts • €
-                          {p.overageEURPerAttempt.toFixed(2)}/attempt after • cap {formatEUR(p.usageCapEUR)}
-                        </Text>
-                      )}
 
                       <Form method="post">
                         <input type="hidden" name="intent" value="select_plan" />
                         <input type="hidden" name="plan" value={k} />
                         <input type="hidden" name="coupon" value={coupon.trim()} />
-                        <Button submit disabled={isSelected} loading={isThisSubmitting}>
-                          {isSelected ? "Selected" : "Select"}
+                        <Button
+                          submit
+                          variant={isSelected ? "secondary" : "primary"}
+                          disabled={isSelected}
+                          loading={isThisSubmitting}
+                        >
+                          {isSelected ? "Current plan" : `Choose ${p.title}`}
                         </Button>
                       </Form>
                     </BlockStack>
