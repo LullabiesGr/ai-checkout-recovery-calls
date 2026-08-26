@@ -44,6 +44,7 @@ export type CallActivityRow = {
   offerPercent: number | null;
   smsSentAt: string | null;
   smsMessageId: string | null;
+  smsText: string | null;
   recoveredOrderId: string | null;
   recoveredAmount: number | null;
   recoveredFinancial: string | null;
@@ -296,6 +297,14 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
                       <Text as="p" variant="bodySm" tone={selected.smsSentAt ? "success" : "subdued"}>
                         {selected.smsSentAt ? `SMS sent ${when(selected.smsSentAt)}` : "SMS not sent"}
                       </Text>
+                      {selected.smsText ? (
+                        <Box background="bg-surface" borderRadius="200" padding="250">
+                          <BlockStack gap="100">
+                            <Text as="p" variant="bodySm" fontWeight="semibold">Message sent</Text>
+                            <Text as="p" variant="bodySm">{selected.smsText}</Text>
+                          </BlockStack>
+                        </Box>
+                      ) : null}
                     </BlockStack>
                   </Box>
                 ) : null}

@@ -244,12 +244,10 @@ export default function BillingRoute() {
   const hasActivePaidPlan = status === "ACTIVE" && effectivePlanKey !== "FREE";
   const plan = PLANS[effectivePlanKey] ?? PLANS.FREE;
 
-  const freeRemainingSec = Math.max(0, 10 * 60 - Number(billing?.freeSecondsUsed || 0));
-  const freeRemainingMin = Math.floor(freeRemainingSec / 60);
+  const freeRemainingAttempts = Math.max(0, 10 - Number(billing?.freeSecondsUsed || 0));
 
-  const includedUsedSec = Number(billing?.includedSecondsUsed || 0);
-  const includedTotalSec = plan.includedMinutes * 60;
-  const includedRemainingMin = Math.max(0, Math.floor((includedTotalSec - includedUsedSec) / 60));
+  const includedAttemptsUsed = Number(billing?.includedSecondsUsed || 0);
+  const includedRemainingAttempts = Math.max(0, plan.includedAttempts - includedAttemptsUsed);
 
   const balanceUsed = usage?.balanceUsed ? Number(usage.balanceUsed.amount) : null;
   const capAmount = usage?.cappedAmount ? Number(usage.cappedAmount.amount) : null;
@@ -300,12 +298,12 @@ export default function BillingRoute() {
 
               {effectivePlanKey === "FREE" ? (
                 <Text as="p">
-                  Free minutes remaining: <b>{freeRemainingMin} min</b>
+                  Free attempts remaining: <b>{freeRemainingAttempts}</b>
                 </Text>
               ) : (
                 <>
                   <Text as="p">
-                    Included minutes remaining (this cycle): <b>{includedRemainingMin} min</b>
+                    Included attempts remaining (this cycle): <b>{includedRemainingAttempts}</b>
                   </Text>
 
                   {balanceUsed != null && capAmount != null ? (
@@ -396,15 +394,15 @@ export default function BillingRoute() {
                       </InlineStack>
 
                       {k === "FREE" ? (
-                        <Text as="p">€0/month • 10 free phone minutes (one-time)</Text>
+                        <Text as="p">€0/month • 10 call attempts • SMS included with every attempt</Text>
                       ) : k === "PAYG" ? (
                         <Text as="p">
-                          €0/month • €{p.overageEURPerMin.toFixed(2)}/min • cap {formatEUR(p.usageCapEUR)}
+                          €0/month • €{p.overageEURPerAttempt.toFixed(2)}/attempt • cap {formatEUR(p.usageCapEUR)}
                         </Text>
                       ) : (
                         <Text as="p">
-                          {formatEUR(p.recurringMonthlyEUR)}/month • {p.includedMinutes} included min • €
-                          {p.overageEURPerMin.toFixed(2)}/min after • cap {formatEUR(p.usageCapEUR)}
+                          {formatEUR(p.recurringMonthlyEUR)}/month • {p.includedAttempts} included attempts • €
+                          {p.overageEURPerAttempt.toFixed(2)}/attempt after • cap {formatEUR(p.usageCapEUR)}
                         </Text>
                       )}
 

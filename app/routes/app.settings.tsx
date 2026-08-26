@@ -323,7 +323,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const shop = session.shop;
 
   const billingPlan = await getShopPlan(shop);
-  const smsFeatureAllowed = hasSmsFeature(billingPlan);
+  const smsFeatureAllowed = true;
 
   const base = await ensureSettings(shop);
   const b: any = base as any;
@@ -360,7 +360,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     freeShippingEnabled: Boolean(extras?.free_shipping_enabled ?? false),
 
     followupEmailEnabled: Boolean(extras?.followup_email_enabled ?? true),
-    followupSmsEnabled: smsFeatureAllowed ? Boolean(extras?.followup_sms_enabled ?? false) : false,
+    followupSmsEnabled: true,
 
     promptMode: pickPromptMode((base as any).promptMode ?? "replace"),
     userPrompt: String((base as any).userPrompt ?? ""),
@@ -372,7 +372,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       ? String(extras?.sms_template_no_offer)
       : defaultNoOfferTemplate,
 
-    brevoSmsSender: smsFeatureAllowed ? String(extras?.brevoSmsSender ?? "").trim() : "",
+    brevoSmsSender: String(extras?.brevoSmsSender ?? "").trim(),
   };
 
   return {
@@ -389,7 +389,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const shop = session.shop;
 
   const billingPlan = await getShopPlan(shop);
-  const smsFeatureAllowed = hasSmsFeature(billingPlan);
+  const smsFeatureAllowed = true;
 
   const base = await ensureSettings(shop);
   const b: any = base as any;
@@ -433,8 +433,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const freeShippingEnabled = toBool(fd.get("freeShippingEnabled"));
 
   const followupEmailEnabled = toBool(fd.get("followupEmailEnabled"));
-  const requestedFollowupSmsEnabled = toBool(fd.get("followupSmsEnabled"));
-  const followupSmsEnabled = smsFeatureAllowed ? requestedFollowupSmsEnabled : false;
+  const followupSmsEnabled = true;
 
   const promptMode = pickPromptMode(fd.get("promptMode") ?? (base as any).promptMode ?? "replace");
   const userPrompt = String(fd.get("userPrompt") ?? "").trim();
@@ -446,9 +445,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const brevoSmsSender = normalizeBrevoSenderInput(fd.get("brevoSmsSender"));
 
-  const finalBrevoSmsSender = smsFeatureAllowed ? brevoSmsSender : null;
-  const finalSmsTemplateOffer = smsFeatureAllowed ? smsTemplateOffer : null;
-  const finalSmsTemplateNoOffer = smsFeatureAllowed ? smsTemplateNoOffer : null;
+  const finalBrevoSmsSender = brevoSmsSender;
+  const finalSmsTemplateOffer = smsTemplateOffer;
+  const finalSmsTemplateNoOffer = smsTemplateNoOffer;
 
   await db.settings.update({
     where: { shop },
@@ -791,12 +790,6 @@ const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTempla
                     Follow-ups
                   </Text>
 
-                  {!smsFeatureAllowed ? (
-                    <Banner tone="warning" title="SMS is locked on your current plan">
-                      <p>SMS follow-ups are available only on Pro and Business plans. Your current plan is {billingPlan}.</p>
-                    </Banner>
-                  ) : null}
-
                   <InlineStack gap="600">
                     <Checkbox
                       label="Allow follow-up email suggestion"
@@ -804,10 +797,10 @@ const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTempla
                       onChange={setFollowupEmailEnabled}
                     />
                     <Checkbox
-                      label="Allow follow-up SMS suggestion"
-                      checked={followupSmsEnabled}
-                      onChange={setFollowupSmsEnabled}
-                      disabled={!smsFeatureAllowed}
+                      label="Send SMS after every call"
+                      checked={true}
+                      onChange={() => {}}
+                      disabled
                     />
                   </InlineStack>
 
@@ -830,7 +823,7 @@ const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTempla
                       onChange={setBrevoSmsSender}
                       autoComplete="off"
                       helpText="Alphanumeric up to 11 chars (A-Z,0-9) or numeric up to 15 digits. Spaces/symbols are removed."
-                      disabled={!smsFeatureAllowed || !followupSmsEnabled}
+                      disabled={false}
                     />
                   </FormLayout>
 
@@ -860,7 +853,7 @@ const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTempla
                       multiline={6}
                       autoComplete="off"
                       helpText={`${Array.from(smsTemplateOffer).length}/${smsTemplateLimit(smsTemplateOffer)} template chars. Template limit: 100 characters to leave room for the Shopify checkout URL. Use {{discount_link}}.`}
-                      disabled={!smsFeatureAllowed || !followupSmsEnabled}
+                      disabled={false}
                     />
 
                     <TextField
@@ -872,7 +865,7 @@ const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTempla
                       multiline={4}
                       autoComplete="off"
                       helpText={`${Array.from(smsTemplateNoOffer).length}/${smsTemplateLimit(smsTemplateNoOffer)} template chars. Template limit: 100 characters to leave room for the Shopify checkout URL. Use {{checkout_link}}.`}
-                      disabled={!smsFeatureAllowed || !followupSmsEnabled}
+                      disabled={false}
                     />
                   </FormLayout>
                 </BlockStack>

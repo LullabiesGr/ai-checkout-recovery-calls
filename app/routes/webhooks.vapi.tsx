@@ -2,7 +2,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import db from "../db.server";
 import { applyBillingForCall } from "../lib/billing.server";
-import { handleVapiToolsWebhook } from "../callProvider.server";
+import { handleVapiToolsWebhook, ensureCheckoutSmsForCallJob } from "../callProvider.server";
 
 function requiredEnv(name: string) {
   const v = process.env[name];
@@ -543,6 +543,8 @@ export async function action({ request }: ActionFunctionArgs) {
 
       answeredForBilling = answered === true;
 
+      const currentJob = await db.callJob.findFirst({ where: { id: callJobId, shop } });
+
       await db.callJob.updateMany({
         where: { id: callJobId, shop },
         data: {
@@ -551,7 +553,10 @@ export async function action({ request }: ActionFunctionArgs) {
           reason,
           nextAction,
           followUp,
-          analysisJson: safeStr(JSON.stringify(analysis), 8000),
+          analysisJson: (() => {
+            const existing = tryParseJsonObject(String((currentJob as any)?.analysisJson ?? "")) ?? {};
+            return safeStr(JSON.stringify({ ...existing, aiAnalysis: analysis }), 8000);
+          })(),
           outcome: safeStr(
             `${sentiment ?? "unknown"} | ${tagsCsv ?? "-"} | ${shortSummary || reason || "no-reason"} | ${
               answered === true ? "answered" : answered === false ? "no_answer" : "unknown"
@@ -562,7 +567,12 @@ export async function action({ request }: ActionFunctionArgs) {
       });
     }
 
-    // BILLING (rounded minutes happens inside applyBillingForCall)
+    // Guarantee exactly one SMS for every call attempt. If the live-call tool already sent it, this is a no-op.
+    try {
+      await ensureCheckoutSmsForCallJob({ shop, callJobId });
+    } catch {}
+
+    // BILLING (attempt-based; call duration is stored for analytics only)
     try {
       const connectedSeconds = extractConnectedSeconds(msg, call, artifact);
       const voicemail = detectVoicemail(endedReason, msg, call, artifact);

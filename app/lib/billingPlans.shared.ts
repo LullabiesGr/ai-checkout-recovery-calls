@@ -9,8 +9,8 @@ export const PLANS: Record<
     key: PlanKey;
     title: string;
     recurringMonthlyEUR: number;
-    includedMinutes: number;
-    overageEURPerMin: number;
+    includedAttempts: number;
+    overageEURPerAttempt: number;
     usageCapEUR: number;
     isUsageOnly?: boolean;
   }
@@ -19,40 +19,40 @@ export const PLANS: Record<
     key: "FREE",
     title: "Free",
     recurringMonthlyEUR: 0,
-    includedMinutes: 0,
-    overageEURPerMin: 0,
+    includedAttempts: 0,
+    overageEURPerAttempt: 0,
     usageCapEUR: 0,
   },
   STARTER: {
     key: "STARTER",
     title: "Starter",
     recurringMonthlyEUR: 19,
-    includedMinutes: 30,
-    overageEURPerMin: 0.45,
+    includedAttempts: 30,
+    overageEURPerAttempt: 0.45,
     usageCapEUR: 99,
   },
   PRO: {
     key: "PRO",
     title: "Pro",
     recurringMonthlyEUR: 49,
-    includedMinutes: 120,
-    overageEURPerMin: 0.35,
+    includedAttempts: 120,
+    overageEURPerAttempt: 0.35,
     usageCapEUR: 199,
   },
   SCALE: {
     key: "SCALE",
     title: "Scale",
     recurringMonthlyEUR: 99,
-    includedMinutes: 400,
-    overageEURPerMin: 0.25,
+    includedAttempts: 400,
+    overageEURPerAttempt: 0.25,
     usageCapEUR: 399,
   },
   PAYG: {
     key: "PAYG",
     title: "Pay-as-you-go",
     recurringMonthlyEUR: 0,
-    includedMinutes: 0,
-    overageEURPerMin: 0.6,
+    includedAttempts: 0,
+    overageEURPerAttempt: 0.6,
     usageCapEUR: 100,
     isUsageOnly: true,
   },
@@ -61,8 +61,4 @@ export const PLANS: Record<
 export function isPlanKey(v: any): v is PlanKey {
   const s = String(v ?? "").trim().toUpperCase();
   return s === "FREE" || s === "STARTER" || s === "PRO" || s === "SCALE" || s === "PAYG";
-}
-
-export function minutesToSeconds(m: number) {
-  return Math.max(0, Math.floor(Number(m) || 0)) * 60;
 }

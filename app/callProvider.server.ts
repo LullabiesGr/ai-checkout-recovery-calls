@@ -2342,3 +2342,94 @@ export async function placeCall(_params: {
 }) {
   throw new Error("placeCall not wired. Use CallJob pipeline + /api/run-calls.");
 }
+
+export async function ensureCheckoutSmsForCallJob(params: { shop: string; callJobId: string }) {
+  const job = await db.callJob.findFirst({ where: { id: params.callJobId, shop: params.shop } });
+  if (!job) return { sent: false, reason: "job_not_found" };
+
+  const current = readAnalysisJsonObject(job.analysisJson ?? null);
+  const currentOffer = current?.offer && typeof current.offer === "object" ? current.offer : {};
+  if (currentOffer?.smsSentAt) {
+    return { sent: true, alreadySent: true, smsText: currentOffer?.smsText ?? null };
+  }
+
+  const checkout = await db.checkout.findFirst({ where: { shop: params.shop, checkoutId: job.checkoutId } });
+  if (!checkout) return { sent: false, reason: "checkout_not_found" };
+
+  const recoveryUrl = extractRecoveryUrlFromCheckoutRaw(checkout.raw);
+  if (!recoveryUrl) return { sent: false, reason: "missing_recovery_url" };
+
+  const to = String(job.phone ?? checkout.phone ?? "").trim();
+  if (!to || !to.startsWith("+")) return { sent: false, reason: "missing_phone" };
+
+  const extras = await readSettingsExtras(params.shop);
+  const sender = resolveBrevoSender(extras);
+  if (!pickBrevoApiKey() || !sender) return { sent: false, reason: "sms_transport_missing" };
+
+  const compactLink = compactCheckoutUrl(recoveryUrl);
+  const offerCode = String(currentOffer?.offerCode ?? "").trim() || null;
+  const discountLink = String(currentOffer?.discountLink ?? "").trim() || (offerCode ? checkoutUrlWithOfferCode(compactLink, offerCode) : compactLink);
+  const pct = currentOffer?.discountPercent == null ? "" : String(currentOffer.discountPercent);
+  const validity = String(currentOffer?.couponValidityHours ?? extras?.coupon_validity_hours ?? 24);
+
+  const smsText = buildSmsText({
+    templateOffer: extras?.sms_template_offer ?? null,
+    templateNoOffer: extras?.sms_template_no_offer ?? null,
+    vars: {
+      shop: params.shop,
+      shop_name: params.shop.replace(/\.myshopify\.com$/i, ""),
+      customer_name: String(checkout.customerName ?? "Customer").trim() || "Customer",
+      checkout_id: String(checkout.checkoutId),
+      checkout_link: compactLink,
+      discount_link: discountLink,
+      offer_code: offerCode ?? "",
+      percent: pct,
+      validity_hours: validity,
+    },
+    hasOffer: Boolean(offerCode),
+  });
+
+  try {
+    const br = await brevoSendSms({
+      toE164: to,
+      body: smsText,
+      sender,
+      type: process.env.BREVO_SMS_TYPE ?? "transactional",
+      tag: process.env.BREVO_SMS_TAG ?? "checkout-recovery",
+      organisationPrefix: process.env.BREVO_SMS_ORGANISATION_PREFIX ?? null,
+    });
+    const messageId = String(br?.messageId ?? "").trim() || null;
+    const sentAt = new Date().toISOString();
+    await db.callJob.update({
+      where: { id: job.id },
+      data: {
+        analysisJson: mergeAnalysisJson(job.analysisJson ?? null, {
+          offer: {
+            ...currentOffer,
+            checkoutLink: compactLink,
+            discountLink,
+            offerCode,
+            smsEnabled: true,
+            smsFrom: sender,
+            smsText,
+            smsSentAt: sentAt,
+            smsMessageSid: messageId,
+            autoSentAfterCall: true,
+          },
+        }),
+      },
+    });
+    return { sent: true, alreadySent: false, smsText, messageId };
+  } catch (e: any) {
+    const smsError = String(e?.message ?? e ?? "SMS send failed");
+    await db.callJob.update({
+      where: { id: job.id },
+      data: {
+        analysisJson: mergeAnalysisJson(job.analysisJson ?? null, {
+          offer: { ...currentOffer, smsText, smsSentAt: null, smsError, autoSentAfterCall: true },
+        }),
+      },
+    });
+    return { sent: false, reason: "sms_send_failed", error: smsError };
+  }
+}

@@ -13,9 +13,6 @@ function eurToCents(eur: number) {
   return Math.round(eur * 100);
 }
 
-function ceilMinutesFromSeconds(seconds: number) {
-  return Math.max(0, Math.ceil(seconds / 60));
-}
 
 function idempotencyKeyForCall(callJobId: string) {
   return (`call_${callJobId}`).slice(0, 255);
@@ -562,30 +559,7 @@ export async function applyBillingForCall(args: {
   voicemail?: boolean;
 }) {
   const { shop, admin, callJobId } = args;
-
   const rawSeconds = Math.max(0, Math.floor(Number(args.connectedSeconds) || 0));
-  const wasAnswered = !!args.answered;
-  const wasVoicemail = !!args.voicemail;
-
-  if (!wasAnswered || wasVoicemail || rawSeconds < 15) {
-    await db.callCharge.upsert({
-      where: { callJobId },
-      update: {},
-      create: {
-        shop,
-        callJobId,
-        connectedSeconds: rawSeconds,
-        minutesBilled: 0,
-        amountCents: 0,
-        currencyCode: BILLING_CURRENCY,
-        idempotencyKey: idempotencyKeyForCall(callJobId),
-      },
-    });
-    return;
-  }
-
-  const billableMinutes = Math.max(1, ceilMinutesFromSeconds(rawSeconds));
-  const billableSeconds = billableMinutes * 60;
 
   await db.$transaction(async (tx) => {
     const exists = await tx.callCharge.findUnique({ where: { callJobId } });
@@ -597,156 +571,53 @@ export async function applyBillingForCall(args: {
       create: { shop },
     });
 
-    const chargeAsFree = async (currentBilling: any) => {
-      const freeTotal = 10 * 60;
-      const freeUsed = Number(currentBilling?.freeSecondsUsed || 0);
-      const freeRemaining = Math.max(0, freeTotal - freeUsed);
-      const consumeFree = Math.min(billableSeconds, freeRemaining);
+    let planKey: PlanKey = isPlanKey(billing.plan) ? (billing.plan as PlanKey) : "FREE";
 
+    if (planKey !== "FREE" && !billing.usageLineItemId) {
+      try {
+        if (admin) await syncBillingFromShopify({ shop, admin });
+        billing = await tx.shopBilling.findUniqueOrThrow({ where: { shop } });
+        planKey = isPlanKey(billing.plan) ? (billing.plan as PlanKey) : "FREE";
+      } catch (e) {
+        throw new Error(`Billing sync failed: ${asErrorMessage(e)}`);
+      }
+    }
+
+    if (planKey === "FREE") {
       await tx.shopBilling.update({
         where: { shop },
-        data: { freeSecondsUsed: freeUsed + consumeFree },
+        data: { freeSecondsUsed: Number(billing.freeSecondsUsed || 0) + 1 },
       });
-
       await tx.callCharge.create({
         data: {
           shop,
           callJobId,
           connectedSeconds: rawSeconds,
-          minutesBilled: billableMinutes,
+          minutesBilled: 0,
           amountCents: 0,
           currencyCode: BILLING_CURRENCY,
           idempotencyKey: idempotencyKeyForCall(callJobId),
         },
       });
-    };
-
-    let planKey: PlanKey = isPlanKey(billing.plan) ? (billing.plan as PlanKey) : "FREE";
-    if (planKey === "FREE") {
-      await chargeAsFree(billing);
       return;
     }
 
-    if (!billing.usageLineItemId) {
-      try {
-        if (admin) {
-          await syncBillingFromShopify({ shop, admin });
-        } else {
-          const q = `#graphql
-query BillingState {
-  currentAppInstallation {
-    activeSubscriptions {
-      id
-      name
-      status
-      lineItems {
-        id
-        plan {
-          pricingDetails {
-            __typename
-            ... on AppUsagePricing {
-              cappedAmount { amount currencyCode }
-              balanceUsed { amount currencyCode }
-            }
-            ... on AppRecurringPricing {
-              interval
-              price { amount currencyCode }
-            }
-          }
-        }
-      }
-    }
-  }
-}`;
-
-          const j = await graphqlShop(shop, q, {}, undefined);
-          if (j?.errors?.length) {
-            throw new Error(j.errors.map((e: any) => e.message).join(" | "));
-          }
-
-          const subs = j?.data?.currentAppInstallation?.activeSubscriptions ?? [];
-          const ours = pickCurrentSubscription(subs);
-
-          if (ours) {
-            const { usageLine, recurringLine } = getSubscriptionLineItems(ours);
-            const existingRow = await tx.shopBilling.findUnique({ where: { shop } });
-
-            const detectedPlan = extractPlanFromSubscriptionName(ours.name);
-            const existingPlan = isPlanKey(existingRow?.plan) ? (existingRow?.plan as PlanKey) : "FREE";
-            const normalizedPlan: PlanKey =
-              detectedPlan ??
-              (existingPlan !== "FREE"
-                ? existingPlan
-                : recurringLine
-                  ? "STARTER"
-                  : usageLine
-                    ? "PAYG"
-                    : "FREE");
-
-            await tx.shopBilling.update({
-              where: { shop },
-              data: {
-                plan: normalizedPlan as any,
-                status: String(ours.status ?? "ACTIVE").toUpperCase() as any,
-                subscriptionId: ours.id,
-                usageLineItemId: usageLine?.id ?? null,
-                recurringLineItemId: recurringLine?.id ?? null,
-              },
-            });
-          } else {
-            await tx.shopBilling.update({
-              where: { shop },
-              data: {
-                plan: "FREE",
-                status: "NONE",
-                subscriptionId: null,
-                usageLineItemId: null,
-                recurringLineItemId: null,
-              },
-            });
-          }
-        }
-      } catch (e) {
-        throw new Error(`Billing sync failed: ${asErrorMessage(e)}`);
-      }
-
-      billing = await tx.shopBilling.findUniqueOrThrow({ where: { shop } });
-      planKey = isPlanKey(billing.plan) ? (billing.plan as PlanKey) : "FREE";
-
-      if (planKey === "FREE") {
-        await chargeAsFree(billing);
-        return;
-      }
-
-      if (!billing.usageLineItemId) {
-        throw new Error("No usage line item after sync");
-      }
-    }
-
     const p = PLANS[planKey];
-    if (!p) {
-      throw new Error(`Unknown billing plan: ${String(planKey)}`);
-    }
+    if (!p) throw new Error(`Unknown billing plan: ${String(planKey)}`);
 
-    const includedTotal = (p.includedMinutes || 0) * 60;
-    const includedUsed = Number(billing.includedSecondsUsed || 0);
-    const includedRemaining = Math.max(0, includedTotal - includedUsed);
-
-    const consumeIncluded = Math.min(billableSeconds, includedRemaining);
-    const chargeableSeconds = Math.max(0, billableSeconds - consumeIncluded);
-    const chargeableMinutes = Math.floor(chargeableSeconds / 60);
+    const used = Number(billing.includedSecondsUsed || 0);
+    const isIncluded = used < Number(p.includedAttempts || 0);
 
     await tx.shopBilling.update({
       where: { shop },
-      data: { includedSecondsUsed: includedUsed + consumeIncluded },
+      data: { includedSecondsUsed: used + 1 },
     });
 
-    const rateCents = eurToCents(p.overageEURPerMin);
-    const amountCents = chargeableMinutes * rateCents;
-
+    const amountCents = isIncluded ? 0 : eurToCents(p.overageEURPerAttempt);
     let usageRecordId: string | null = null;
 
     if (amountCents > 0) {
+      if (!billing.usageLineItemId) throw new Error("No usage line item after sync");
       const m = `#graphql
 mutation UsageCharge(
   $description: String!
@@ -764,31 +635,17 @@ mutation UsageCharge(
     appUsageRecord { id }
   }
 }`;
-
       const idempotencyKey = idempotencyKeyForCall(callJobId);
-
-      const json = await graphqlShop(
-        shop,
-        m,
-        {
-          description: `${p.title}: ${chargeableMinutes} min overage (call ${callJobId})`,
-          price: { amount: (amountCents / 100).toFixed(2), currencyCode: BILLING_CURRENCY },
-          subscriptionLineItemId: billing.usageLineItemId,
-          idempotencyKey,
-        },
-        admin
-      );
-
-      if (json?.errors?.length) {
-        throw new Error(json.errors.map((e: any) => e.message).join(" | "));
-      }
-
+      const json = await graphqlShop(shop, m, {
+        description: `${p.title}: 1 overage call attempt (${callJobId})`,
+        price: { amount: (amountCents / 100).toFixed(2), currencyCode: BILLING_CURRENCY },
+        subscriptionLineItemId: billing.usageLineItemId,
+        idempotencyKey,
+      }, admin);
+      if (json?.errors?.length) throw new Error(json.errors.map((e: any) => e.message).join(" | "));
       const payload = json?.data?.appUsageRecordCreate;
       const errs = payload?.userErrors ?? [];
-      if (errs.length) {
-        throw new Error(errs.map((e: any) => e.message).join(" | "));
-      }
-
+      if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
       usageRecordId = payload?.appUsageRecord?.id ?? null;
     }
 
@@ -797,7 +654,7 @@ mutation UsageCharge(
         shop,
         callJobId,
         connectedSeconds: rawSeconds,
-        minutesBilled: billableMinutes,
+        minutesBilled: 0,
         amountCents,
         currencyCode: BILLING_CURRENCY,
         usageRecordId,
@@ -809,12 +666,8 @@ mutation UsageCharge(
 
 function usageTermsForPlan(plan: PlanKey) {
   const p = PLANS[plan];
-
   if (plan === "PAYG") {
-    return `€${p.overageEURPerMin.toFixed(2)}/minute. Charged per started minute. Answered calls only. Monthly spending limit (cap) applies.`;
+    return `€${p.overageEURPerAttempt.toFixed(2)}/call attempt. One attempt is one outbound call; SMS is included with every attempt. Monthly spending cap applies.`;
   }
-
-  return `Includes ${p.includedMinutes} minutes per billing cycle. Then €${p.overageEURPerMin.toFixed(
-    2
-  )}/minute. Charged per started minute. Answered calls only. Usage charges are limited by the approved capped amount.`;
+  return `Includes ${p.includedAttempts} call attempts per billing cycle. Then €${p.overageEURPerAttempt.toFixed(2)}/attempt. SMS is included with every attempt. Usage charges are limited by the approved capped amount.`;
 }

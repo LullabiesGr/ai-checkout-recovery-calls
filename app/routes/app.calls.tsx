@@ -72,7 +72,7 @@ function parseJsonSafe(v: any): any {
 function parseCallOffer(v: any) {
   const j = parseJsonSafe(v);
   const offer = j?.offer && typeof j.offer === "object" ? j.offer : null;
-  if (!offer) return { code: null, type: null, percent: null, smsSentAt: null, smsMessageId: null };
+  if (!offer) return { code: null, type: null, percent: null, smsSentAt: null, smsMessageId: null, smsText: null };
   const pct = offer.discountPercent == null ? null : Number(offer.discountPercent);
   return {
     code: safeStr(offer.offerCode).trim() || null,
@@ -80,6 +80,7 @@ function parseCallOffer(v: any) {
     percent: Number.isFinite(pct as number) ? pct : null,
     smsSentAt: safeStr(offer.smsSentAt).trim() || null,
     smsMessageId: safeStr(offer.smsMessageSid).trim() || null,
+    smsText: safeStr(offer.smsText).trim() || null,
   };
 }
 
@@ -231,6 +232,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       offerPercent: offer.percent,
       smsSentAt: offer.smsSentAt,
       smsMessageId: offer.smsMessageId,
+      smsText: offer.smsText,
       recoveredOrderId: recoveredOrder?.orderId ? String(recoveredOrder.orderId) : null,
       recoveredAmount: recoveredOrder?.total == null ? null : Number(recoveredOrder.total),
       recoveredFinancial: recoveredOrder?.financial ? String(recoveredOrder.financial) : null,
