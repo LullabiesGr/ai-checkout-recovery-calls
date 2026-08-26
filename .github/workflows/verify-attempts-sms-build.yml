@@ -1,0 +1,17 @@
+name: Verify attempts SMS build
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  verify:
+    if: github.event.issue.title == '[VERIFY] ATTEMPTS SMS BUILD'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: npm install
+      - run: npx prisma generate
+      - run: npm run build
