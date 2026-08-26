@@ -748,6 +748,28 @@ async function shopifyGraphql(shop: string, accessToken: string, query: string, 
   return json;
 }
 
+function fallbackShopDisplayName(shop: string) {
+  const slug = String(shop ?? "").trim().replace(/\.myshopify\.com$/i, "");
+  if (!slug) return "the store";
+  return slug
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ") || "the store";
+}
+
+async function getShopDisplayName(shop: string): Promise<string> {
+  try {
+    const accessToken = await getOfflineAccessToken(shop);
+    const out = await shopifyGraphql(shop, accessToken, `query ShopName { shop { name } }`, {});
+    const name = String(out?.data?.shop?.name ?? "").trim();
+    if (name) return name;
+  } catch (e) {
+    console.warn("[vapi] could not load Shopify shop name; using domain fallback", { shop });
+  }
+  return fallbackShopDisplayName(shop);
+}
+
 function hoursFromNowIso(hours: number) {
   const h = Math.max(1, Math.min(168, Math.floor(Number(hours) || 24)));
   return new Date(Date.now() + h * 60 * 60 * 1000).toISOString();
@@ -1165,6 +1187,7 @@ function buildFactsBlock(args: {
 }
 
 function buildSystemPrompt(args: {
+  shopName?: string | null;
   merchantPrompt?: string | null;
   promptMode?: PromptMode;
   attemptNumber?: number;
@@ -1202,6 +1225,7 @@ function buildSystemPrompt(args: {
   };
 }) {
   const { merchantPrompt, checkout, playbook } = args;
+  const shopName = String(args.shopName ?? "").trim() || "the store";
 
   const mode = pickPromptMode(args.promptMode ?? "replace");
   const merchant = mode === "default_only" ? "" : String(merchantPrompt ?? "").trim();
@@ -1275,10 +1299,14 @@ SMS / OFFER TOOL (tool use):
       : "";
 
   const base = `
-You are the merchant's AI phone agent. Your job: recover an abandoned checkout politely and efficiently.
+You are the AI phone agent for ${shopName}. Your job: recover an abandoned checkout politely and efficiently.
 ${attemptN > 1 ? `This is a follow-up attempt (#${attemptN}).` : "This is the first attempt."}
 
 Hard rules:
+- Default to English. If the customer clearly speaks another language, immediately continue in that same language. Stay in the customer's current language unless they switch languages again. Do not ask which language they prefer.
+- Match the customer's language for every spoken response, including greetings, offer explanations, SMS confirmations, and closing remarks.
+- When identifying who you are calling from, use the store name exactly: ${shopName}. Never say "merchant", "merchant store", "merchant's store", or "your merchant's AI phone agent" to the customer.
+- A natural introduction is: "Hi, I'm calling from ${shopName}." Adapt that sentence to the customer's language when they speak another language.
 - Confirm identity and ask if it's a good time.
 - Keep it short. Target a maximum call length of ~${playbook.maxCallSeconds} seconds.
 - Do not be pushy. If not interested, end politely.
@@ -1318,6 +1346,7 @@ Playbook:
 ${smsBlock ? `\n\n${smsBlock}\n` : ""}
 
 Context:
+- storeName: ${shopName}
 - checkoutId: ${checkout.checkoutId}
 - customerName: ${checkout.customerName ?? "-"}
 - email: ${checkout.email ?? "-"}
@@ -2075,8 +2104,10 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
   const promptMode: PromptMode = merchantPrompt.trim() ? configuredPromptMode : "replace";
 
   const speakableName = firstNameOnly(checkout.customerName) ?? checkout.customerName ?? null;
+  const shopDisplayName = await getShopDisplayName(params.shop);
 
   const systemPrompt = buildSystemPrompt({
+    shopName: shopDisplayName,
     merchantPrompt,
     promptMode,
     attemptNumber,
@@ -2155,7 +2186,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     content:
       attemptNumber >= 2
         ? "Follow-up call. Reference previous context if relevant. Keep it short and move to a concrete next step."
-        : "Start the call now. Greet the customer, mention they almost completed checkout, and ask if they want help finishing the order.",
+        : `Start the call now in English. Say you are calling from ${shopDisplayName}, mention they almost completed checkout, and ask if they want help finishing the order. If the customer replies in another language, continue entirely in that language.`,
   });
 
   const nextAnalysisJson = mergeAnalysisJson(job.analysisJson ?? null, {
@@ -2238,6 +2269,11 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       },
 
       assistant: {
+        transcriber: {
+          provider: "deepgram",
+          model: "nova-3",
+          language: "multi",
+        },
         model: {
           provider: "openai",
           model: "gpt-4o-mini",
