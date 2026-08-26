@@ -17,6 +17,11 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.20.2'
+          cache: npm
+
       - name: Apply patch
         run: |
           python .github/scripts/attempts_sms_all_plans_patch.py
