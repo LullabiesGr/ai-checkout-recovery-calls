@@ -1,4 +1,4 @@
-name: Run SMS patch on issue
+name: Restore working in-call SMS
 
 on:
   issues:
@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   patch:
-    if: github.event.issue.title == '[RUN] SMS 100'
+    if: github.event.issue.title == '[RUN] RESTORE 14:24 SMS'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,7 +17,7 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Apply SMS 100 patch
+      - name: Restore working live-call SMS flow
         run: python .github/scripts/patch_sms_100.py
 
       - name: Validate diff
@@ -32,6 +32,6 @@ jobs:
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add app/routes/app.settings.tsx app/callProvider.server.ts
-          git commit -m 'Limit SMS templates to 100 chars and always send'
+          git add app/callProvider.server.ts
+          git commit -m 'Restore working live-call SMS flow'
           git push origin HEAD:main
