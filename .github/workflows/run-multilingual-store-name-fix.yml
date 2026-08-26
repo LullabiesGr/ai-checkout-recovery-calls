@@ -1,0 +1,103 @@
+name: Apply multilingual store name fix
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.issue.title == '[RUN] MULTILINGUAL STORE NAME FIX'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.20.2'
+          cache: npm
+      - name: Apply targeted patch
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('app/callProvider.server.ts')
+          s = p.read_text()
+
+          old = '''async function shopifyGraphql(shop: string, accessToken: string, query: string, variables: any) {'''
+          if old not in s:
+              raise SystemExit('shopifyGraphql anchor not found')
+
+          # Insert helper immediately before the next function after shopifyGraphql by anchoring its trailing return block.
+          anchor = '''  return json;\n}\n\nfunction hoursFromNowIso(hours: number) {'''
+          insert = '''  return json;\n}\n\nfunction fallbackShopDisplayName(shop: string) {\n  const slug = String(shop ?? "").trim().replace(/\\.myshopify\\.com$/i, "");\n  if (!slug) return "the store";\n  return slug\n    .split(/[-_]+/)\n    .filter(Boolean)\n    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))\n    .join(" ") || "the store";\n}\n\nasync function getShopDisplayName(shop: string): Promise<string> {\n  try {\n    const accessToken = await getOfflineAccessToken(shop);\n    const out = await shopifyGraphql(shop, accessToken, `query ShopName { shop { name } }`, {});\n    const name = String(out?.data?.shop?.name ?? "").trim();\n    if (name) return name;\n  } catch (e) {\n    console.warn("[vapi] could not load Shopify shop name; using domain fallback", { shop });\n  }\n  return fallbackShopDisplayName(shop);\n}\n\nfunction hoursFromNowIso(hours: number) {'''
+          if anchor not in s:
+              raise SystemExit('helper insertion anchor not found')
+          s = s.replace(anchor, insert, 1)
+
+          old_sig = '''function buildSystemPrompt(args: {\n  merchantPrompt?: string | null;'''
+          new_sig = '''function buildSystemPrompt(args: {\n  shopName?: string | null;\n  merchantPrompt?: string | null;'''
+          if old_sig not in s:
+              raise SystemExit('buildSystemPrompt signature anchor not found')
+          s = s.replace(old_sig, new_sig, 1)
+
+          old_destructure = '''  const { merchantPrompt, checkout, playbook } = args;\n\n  const mode = pickPromptMode(args.promptMode ?? "replace");'''
+          new_destructure = '''  const { merchantPrompt, checkout, playbook } = args;\n  const shopName = String(args.shopName ?? "").trim() || "the store";\n\n  const mode = pickPromptMode(args.promptMode ?? "replace");'''
+          if old_destructure not in s:
+              raise SystemExit('buildSystemPrompt destructure anchor not found')
+          s = s.replace(old_destructure, new_destructure, 1)
+
+          old_intro = '''You are the merchant's AI phone agent. Your job: recover an abandoned checkout politely and efficiently.'''
+          new_intro = '''You are the AI phone agent for ${shopName}. Your job: recover an abandoned checkout politely and efficiently.'''
+          if old_intro not in s:
+              raise SystemExit('system prompt intro anchor not found')
+          s = s.replace(old_intro, new_intro, 1)
+
+          hard_anchor = '''Hard rules:\n- Confirm identity and ask if it's a good time.\n- Keep it short.'''
+          hard_repl = '''Hard rules:\n- Default to English. If the customer clearly speaks another language, immediately continue in that same language. Stay in the customer's current language unless they switch languages again. Do not ask which language they prefer.\n- Match the customer's language for every spoken response, including greetings, offer explanations, SMS confirmations, and closing remarks.\n- When identifying who you are calling from, use the store name exactly: ${shopName}. Never say "merchant", "merchant store", "merchant's store", or "your merchant's AI phone agent" to the customer.\n- A natural introduction is: "Hi, I'm calling from ${shopName}." Adapt that sentence to the customer's language when they speak another language.\n- Confirm identity and ask if it's a good time.\n- Keep it short.'''
+          if hard_anchor not in s:
+              raise SystemExit('hard rules anchor not found')
+          s = s.replace(hard_anchor, hard_repl, 1)
+
+          context_anchor = '''Context:\n- checkoutId: ${checkout.checkoutId}'''
+          context_repl = '''Context:\n- storeName: ${shopName}\n- checkoutId: ${checkout.checkoutId}'''
+          if context_anchor not in s:
+              raise SystemExit('context anchor not found')
+          s = s.replace(context_anchor, context_repl, 1)
+
+          call_anchor = '''  const speakableName = firstNameOnly(checkout.customerName) ?? checkout.customerName ?? null;\n\n  const systemPrompt = buildSystemPrompt({\n    merchantPrompt,'''
+          call_repl = '''  const speakableName = firstNameOnly(checkout.customerName) ?? checkout.customerName ?? null;\n  const shopDisplayName = await getShopDisplayName(params.shop);\n\n  const systemPrompt = buildSystemPrompt({\n    shopName: shopDisplayName,\n    merchantPrompt,'''
+          if call_anchor not in s:
+              raise SystemExit('call systemPrompt anchor not found')
+          s = s.replace(call_anchor, call_repl, 1)
+
+          # Add automatic multilingual speech recognition at call-time while preserving the configured ElevenLabs voice from assistantId.
+          assistant_anchor = '''      assistant: {\n        model: {'''
+          assistant_repl = '''      assistant: {\n        transcriber: {\n          provider: "deepgram",\n          model: "nova-3",\n          language: "multi",\n        },\n        model: {'''
+          if assistant_anchor not in s:
+              raise SystemExit('assistant anchor not found')
+          s = s.replace(assistant_anchor, assistant_repl, 1)
+
+          # Make the first instruction explicitly use the store name and keep English as the default until the caller speaks another language.
+          start_old = '''        : "Start the call now. Greet the customer, mention they almost completed checkout, and ask if they want help finishing the order.",'''
+          start_new = '''        : `Start the call now in English. Say you are calling from ${shopDisplayName}, mention they almost completed checkout, and ask if they want help finishing the order. If the customer replies in another language, continue entirely in that language.`,'''
+          if start_old not in s:
+              raise SystemExit('start-call instruction anchor not found')
+          s = s.replace(start_old, start_new, 1)
+
+          p.write_text(s)
+      - name: Validate
+        run: |
+          npm ci
+          npx prisma generate
+          npm run build
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/callProvider.server.ts
+          git diff --cached --quiet && exit 0
+          git commit -m "Use store name and auto-switch call language"
+          git push origin main
