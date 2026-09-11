@@ -1,4 +1,7 @@
+import { recoveryOutcome } from "../lib/conversation.shared";
 import * as React from "react";
+import { Page, Card, Text, BlockStack, InlineGrid, Button, TextField, Pagination } from "@shopify/polaris";
+import { DetailDrawer } from "../components/DetailDrawer";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useLocation, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -55,6 +58,7 @@ function withSearch(path: string): string {
 }
 
 export type NormalizedOutcome =
+  | "awaiting_order"
   | "recovered"
   | "converted"
   | "not_recovered"
@@ -78,6 +82,8 @@ export function normalizeOutcome(outcome: string | null): NormalizedOutcome {
   if (!norm) return "none";
 
   switch (norm) {
+    case "awaiting_order":
+      return "awaiting_order";
     case "recovered":
       return "recovered";
     case "converted":
@@ -127,7 +133,7 @@ function toneForCheckoutStatus(status: string): BadgeTone {
 }
 function toneForJobStatus(status: string): BadgeTone {
   const s = safeStr(status).toUpperCase();
-  if (s === "COMPLETED") return "success";
+  if (s === "COMPLETED") return "info";
   if (s === "CALLING") return "warning";
   if (s === "QUEUED") return "warning";
   if (s === "FAILED") return "critical";
@@ -145,6 +151,8 @@ function toneForOutcome(outcome: string | null): BadgeTone {
 function outcomeLabel(outcome: string | null): string {
   const n = normalizeOutcome(outcome);
   switch (n) {
+    case "awaiting_order":
+      return "Awaiting order";
     case "none":
       return "OUTCOME —";
     case "recovered":
@@ -657,7 +665,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const sb: SupabaseCallSummary | null =
       (callId ? (sbMap.get(`call:${callId}`) as any) : null) ||
       (jobId ? (sbMap.get(`job:${jobId}`) as any) : null) ||
-      (checkoutId ? (sbMap.get(`co:${checkoutId}`) as any) : null) ||
+      (!jobId && checkoutId ? (sbMap.get(`co:${checkoutId}`) as any) : null) ||
       null;
 
     const buyProbabilityPct =
@@ -676,7 +684,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       order?.total == null ? null : Number.isFinite(Number(order.total)) ? Number(order.total) : null;
     const recoveredFinancial = order?.financial ?? null;
 
-    const effectiveStatus = recoveredOrderId ? "RECOVERED" : String(c.status);
+    const effectiveStatus = recoveredOrderId ? "RECOVERED" : ["RECOVERED", "CONVERTED"].includes(String(c.status).toUpperCase()) ? "ABANDONED" : String(c.status);
     const statusUpper = safeStr(effectiveStatus).toUpperCase();
 
     const hasContact = !!safeStr(c.phone).trim() || !!safeStr(c.email).trim();
@@ -721,7 +729,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       eligibleAtRisk,
 
       callStatus: j ? String(j.status) : null,
-      callOutcome: (sb as any)?.call_outcome ? String((sb as any).call_outcome) : null,
+      callOutcome: recoveryOutcome(sb?.call_outcome, !!recoveredOrderId),
       aiStatus: (sb as any)?.ai_status ? String((sb as any).ai_status) : null,
       buyProbabilityPct,
       recordingUrl,
@@ -773,42 +781,6 @@ function recoveredRowRevenue(r: Row) {
   const ra = r.recoveredAmount == null ? 0 : Number(r.recoveredAmount);
   const useRecovered = Number.isFinite(ra) && ra > 0;
   return useRecovered ? ra : Number(r.value || 0);
-}
-
-function urgencyScore(r: Row) {
-  let score = 0;
-
-  const status = safeStr(r.status).toUpperCase();
-  if (r.eligibleAtRisk) score += 95;
-  else if (status === "ABANDONED") score += 70;
-  else if (status === "OPEN") score += 35;
-
-  const callStatus = safeStr(r.callStatus).toUpperCase();
-  if (callStatus === "FAILED") score += 35;
-  if (!callStatus) score += 20;
-  if (callStatus === "QUEUED") score += 10;
-  if (callStatus === "CALLING") score += 6;
-
-  const n = normalizeOutcome(r.callOutcome);
-  if (n === "needs_followup") score += 24;
-  if (n === "voicemail" || n === "no_answer") score += 18;
-  if (n === "not_recovered" || n === "not_interested") score += 10;
-
-  const buy = typeof r.buyProbabilityPct === "number" ? r.buyProbabilityPct : 0;
-  score += Math.round(buy * 0.35);
-
-  const val = Number(r.value || 0);
-  score += Math.min(30, Math.round(val / 100));
-
-  const t = Date.parse(r.updatedAt);
-  if (Number.isFinite(t)) {
-    const ageHours = Math.max(0, (Date.now() - t) / (1000 * 60 * 60));
-    if (ageHours < 6) score += 6;
-    else if (ageHours < 24) score += 2;
-    else if (ageHours > 168) score -= 6;
-  }
-
-  return score;
 }
 
 type FilterKey = "all" | "open" | "abandoned" | "followups" | "high_intent" | "no_answer" | "discounts" | "recovered";
@@ -867,35 +839,11 @@ export default function Checkouts() {
     return pct(recoveredCount, denom);
   }, [recoveredCount, eligibleAtRiskCount]);
 
-  const latest = rows[0] ?? null;
-
-  const mostUrgentAtRisk = React.useMemo(() => {
-    if (eligibleAtRiskRows.length === 0) return null;
-    return eligibleAtRiskRows
-      .slice()
-      .sort((a, b) => {
-        const u = urgencyScore(b) - urgencyScore(a);
-        if (u !== 0) return u;
-        return Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
-      })[0] ?? null;
-  }, [eligibleAtRiskRows]);
-
-  const recoveredRecent = React.useMemo(() => {
-    return recoveredRows
-      .slice()
-      .sort((a, b) => {
-        const ta = Date.parse(a.recoveredAt || a.updatedAt);
-        const tb = Date.parse(b.recoveredAt || b.updatedAt);
-        return tb - ta;
-      })
-      .slice(0, 6);
-  }, [recoveredRows]);
-
   const baseWorkSorted = React.useMemo(() => {
     return rows
       .filter((r) => !isRecovered(r))
       .slice()
-      .sort((a, b) => urgencyScore(b) - urgencyScore(a));
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.checkoutId.localeCompare(a.checkoutId));
   }, [rows]);
 
   const hasDiscountFields = React.useMemo(() => {
@@ -951,27 +899,16 @@ export default function Checkouts() {
   }, [baseWorkSorted, activeFilter, recoveredRows, rows]);
 
   const toReviewCount = filteredWorkRows.length;
-  const tableRows = React.useMemo(() => filteredWorkRows.slice(0, 80), [filteredWorkRows]);
+  const [query, setQuery] = React.useState("");
+  const [page, setPage] = React.useState(0);
+  const searchedRows = React.useMemo(() => filteredWorkRows.slice().sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.checkoutId.localeCompare(a.checkoutId)).filter((r) =>
+    [r.customerName, r.checkoutId, r.cartPreview].some((v) => safeStr(v).toLowerCase().includes(query.trim().toLowerCase()))
+  ), [filteredWorkRows, query]);
+  React.useEffect(() => setPage(0), [query, activeFilter]);
+  const currentPage = Math.min(page, Math.max(0, Math.ceil(searchedRows.length / 30) - 1));
+  const tableRows = searchedRows.slice(currentPage * 30, (currentPage + 1) * 30);
 
-  const [selectedId, setSelectedId] = React.useState<string | null>(() => {
-    return tableRows[0]?.checkoutId ?? baseWorkSorted[0]?.checkoutId ?? latest?.checkoutId ?? null;
-  });
-
-  React.useEffect(() => {
-    const preferred = tableRows[0]?.checkoutId ?? baseWorkSorted[0]?.checkoutId ?? latest?.checkoutId ?? null;
-    if (!selectedId) {
-      setSelectedId(preferred);
-      return;
-    }
-    const exists = rows.some((r) => r.checkoutId === selectedId);
-    if (!exists) {
-      setSelectedId(preferred);
-      return;
-    }
-    if (filteredWorkRows.length > 0 && !filteredWorkRows.some((r) => r.checkoutId === selectedId)) {
-      setSelectedId(preferred);
-    }
-  }, [selectedId, rows, tableRows, baseWorkSorted, latest, filteredWorkRows]);
+  const [selectedId, setSelectedId] = React.useState<string | null>(null);
 
   const selected = React.useMemo(() => rows.find((r) => r.checkoutId === selectedId) ?? null, [rows, selectedId]);
 
@@ -981,9 +918,9 @@ export default function Checkouts() {
     detailsFetcher.load(withSearch(`/app/checkouts/${encodeURIComponent(selected.checkoutId)}`));
   }, [selected?.checkoutId]);
 
-  const details = detailsFetcher.data?.shop ? detailsFetcher.data : null;
+  const details = detailsFetcher.data?.checkoutId === selected?.checkoutId ? detailsFetcher.data : null;
   const sb = details?.sb ?? null;
-  const loadingDetails = detailsFetcher.state !== "idle" && !details;
+  const loadingDetails = !!selected && !details && detailsFetcher.state !== "idle";
 
   const itemsForDetails = React.useMemo(() => {
     const itemsJson = details?.checkout?.itemsJson ?? selected?.itemsJson ?? null;
@@ -992,7 +929,7 @@ export default function Checkouts() {
 
   const [modalKind, setModalKind] = React.useState<null | "transcript" | "raw" | "evidence">(null);
 
-  const compactCell: React.CSSProperties = { paddingTop: 6, paddingBottom: 6, verticalAlign: "top" };
+  const compactCell: React.CSSProperties = { paddingTop: 16, paddingBottom: 16, verticalAlign: "top" };
   const mono: React.CSSProperties = {
     margin: 0,
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
@@ -1002,173 +939,36 @@ export default function Checkouts() {
     wordBreak: "break-word",
   };
 
-  const effectiveRecordingUrl = safeStr(details?.recordingUrl ?? selected?.recordingUrl).trim() || "";
-  const effectiveLogUrl = safeStr(sb?.log_url).trim() || safeStr(selected?.logUrl).trim() || "";
-
-  function chipProps(key: FilterKey) {
-    const selected = activeFilter === key;
-    return {
-      selected,
-      onClick: () => setActiveFilter(key),
-    };
-  }
-
   return (
     <>
-      <s-page heading="Checkouts" inlineSize="large">
-        <s-section>
-          <s-grid gap="base" gridTemplateColumns="@container (inline-size < 960px) 1fr, 1.2fr 0.8fr">
-            <s-box border="base" borderRadius="base" padding="base">
-              <s-stack gap="tight">
-                <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center", flexWrap: "wrap" }}>
-                  <s-text variant="headingMd">Performance</s-text>
-                  <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap", alignItems: "center" }}>
-                    <s-badge tone="success">{recoveredCount} wins</s-badge>
-                    <s-badge tone="warning">{eligibleAtRiskCount} at-risk</s-badge>
-                    <s-badge tone="info">{winRate}% win rate</s-badge>
-                  </s-stack>
-                </s-stack>
-
-                <s-grid gap="base" gridTemplateColumns="@container (inline-size < 860px) 1fr, 1fr 1fr 1fr">
-                  <s-box border="base" borderRadius="base" padding="base" background="subdued">
-                    <s-stack gap="tight">
-                      <s-text tone="subdued" variant="bodySm">Recovered revenue</s-text>
-                      <s-text variant="headingLg">{fmtMoney(recoveredRevenue, currency)}</s-text>
-                      <s-text tone="subdued" variant="bodySm">
-                        Completed Shopify orders only
-                      </s-text>
-                    </s-stack>
-                  </s-box>
-
-                  <s-box border="base" borderRadius="base" padding="base" background="subdued">
-                    <s-stack gap="tight">
-                      <s-text tone="subdued" variant="bodySm">At-risk revenue</s-text>
-                      <s-text variant="headingLg">{fmtMoney(atRiskRevenue, currency)}</s-text>
-                      <s-text tone="subdued" variant="bodySm">
-                        Eligible abandoned checkouts
-                      </s-text>
-                    </s-stack>
-                  </s-box>
-
-                  <s-box border="base" borderRadius="base" padding="base" background="subdued">
-                    <s-stack gap="tight">
-                      <s-text tone="subdued" variant="bodySm">Win rate</s-text>
-                      <s-text variant="headingLg">{winRate}%</s-text>
-                      <s-text tone="subdued" variant="bodySm">
-                        Recovered / total recovery opportunities
-                      </s-text>
-                    </s-stack>
-                  </s-box>
-
-                  <s-box border="base" borderRadius="base" padding="base" background="subdued">
-                    <s-stack gap="tight">
-                      <s-text tone="subdued" variant="bodySm">
-                        {mostUrgentAtRisk ? "Most urgent at-risk" : "Most recent update"}
-                      </s-text>
-                      <s-text variant="headingMd">
-                        {mostUrgentAtRisk
-                          ? fmtMoney(Number(mostUrgentAtRisk.value || 0), mostUrgentAtRisk.currency)
-                          : latest
-                            ? fmtMoney(Number(latest.value || 0), latest.currency)
-                            : "—"}
-                      </s-text>
-                      <s-text tone="subdued" variant="bodySm" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        {mostUrgentAtRisk
-                          ? `${safeStr(mostUrgentAtRisk.customerName) || `Checkout #${mostUrgentAtRisk.checkoutId}`} • ${formatWhen(mostUrgentAtRisk.updatedAt)}`
-                          : latest
-                            ? `${safeStr(latest.customerName) || `Checkout #${latest.checkoutId}`} • ${formatWhen(latest.updatedAt)}`
-                            : "—"}
-                      </s-text>
-                    </s-stack>
-                  </s-box>
-                </s-grid>
-              </s-stack>
-            </s-box>
-
-            <s-box border="base" borderRadius="base" padding="base" style={{ background: "rgba(0,128,96,0.08)" }}>
-              <s-stack gap="tight">
-                <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center" }}>
-                  <s-text variant="headingMd">Recovered orders</s-text>
-                  <s-badge tone="success">{recoveredCount}</s-badge>
-                </s-stack>
-
-                <s-box border="base" borderRadius="base" style={{ overflow: "hidden", background: "rgba(255,255,255,0.7)" }}>
-                  <s-table style={{ tableLayout: "fixed", width: "100%" }}>
-                    <s-table-header-row>
-                      <s-table-header>Customer</s-table-header>
-                      <s-table-header format="numeric" style={{ width: 130 }}>Amount</s-table-header>
-                      <s-table-header style={{ width: 140 }}>When</s-table-header>
-                    </s-table-header-row>
-
-                    <s-table-body>
-                      {recoveredRecent.length === 0 ? (
-                        <s-table-row>
-                          <s-table-cell colSpan={3}>
-                            <s-text tone="subdued">No recovered checkouts yet.</s-text>
-                          </s-table-cell>
-                        </s-table-row>
-                      ) : (
-                        recoveredRecent.map((r) => {
-                          const id = r.checkoutId;
-                          const whenIso = r.recoveredAt || r.updatedAt;
-                          const amt = recoveredRowRevenue(r);
-                          return (
-                            <s-table-row key={id} clickDelegate={`win-${id}`}>
-                              <s-table-cell style={compactCell}>
-                                <s-stack gap="tight">
-<s-link
-                                  id={`win-${id}`}
-                                  href="#"
-                                  onClick={(e: any) => {
-                                    e.preventDefault();
-                                    setSelectedId(id);
-                                  }}
-                                >
-                                  <s-text fontWeight="semibold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                                    {safeStr(r.customerName) || `Checkout #${id}`}
-                                  </s-text>
-                                </s-link>
-                                <s-text tone="subdued" variant="bodySm">
-                                  {safeStr(r.recoveredOrderId) ? `ORDER ${r.recoveredOrderId}` : "RECOVERED"}
-                                </s-text>
-                                </s-stack>
-                              </s-table-cell>
-                              <s-table-cell style={compactCell}>{fmtMoney(amt, r.currency)}</s-table-cell>
-                              <s-table-cell style={compactCell}>{formatWhen(whenIso)}</s-table-cell>
-                            </s-table-row>
-                          );
-                        })
-                      )}
-                    </s-table-body>
-                  </s-table>
-                </s-box>
-              </s-stack>
-            </s-box>
-          </s-grid>
-        </s-section>
-
-        <s-section>
-          <s-grid gap="base" gridTemplateColumns="@container (inline-size < 1100px) 1fr, 1.15fr 0.85fr">
+      <Page fullWidth title="Checkouts" subtitle="Find the next recovery opportunity and follow every customer conversation.">
+        <InlineGrid columns={{ xs: 1, sm: 3 }} gap="400">
+          <Card><BlockStack gap="200"><Text as="h2" variant="headingSm">Recovered revenue</Text><Text as="p" variant="heading2xl">{fmtMoney(recoveredRevenue, currency)}</Text><Text as="p" tone="subdued">{recoveredCount} completed orders</Text></BlockStack></Card>
+          <Card><BlockStack gap="200"><Text as="h2" variant="headingSm">Revenue to recover</Text><Text as="p" variant="heading2xl">{fmtMoney(atRiskRevenue, currency)}</Text><Text as="p" tone="subdued">{eligibleAtRiskCount} eligible checkouts</Text></BlockStack></Card>
+          <Card><BlockStack gap="200"><Text as="h2" variant="headingSm">Recovery rate</Text><Text as="p" variant="heading2xl">{winRate}%</Text><Text as="p" tone="subdued">Recovered / total recovery opportunities</Text></BlockStack></Card>
+        </InlineGrid>
+        <div className="ce-checkout-queue">
             <s-section>
               <s-stack gap="tight">
                 <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center", flexWrap: "wrap" }}>
                   <s-text variant="headingMd">Recovery queue</s-text>
                   <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap", alignItems: "center" }}>
                     <s-badge tone="info">{toReviewCount} to review</s-badge>
-                    <s-badge tone="neutral">Urgency sorted</s-badge>
+                    <s-badge tone="neutral">Newest first</s-badge>
                   </s-stack>
                 </s-stack>
 
+                <TextField label="Search checkouts" labelHidden value={query} onChange={setQuery} placeholder="Search customer, checkout or product" autoComplete="off" clearButton onClearButtonClick={() => setQuery("")} />
                 <s-box border="base" borderRadius="base" padding="base" background="subdued">
                   <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap", alignItems: "center" }}>
-                    <s-chip {...chipProps("all")}>All ({counts.all})</s-chip>
-                    {counts.open > 0 ? <s-chip {...chipProps("open")}>Open ({counts.open})</s-chip> : null}
-                    <s-chip {...chipProps("abandoned")}>Abandoned ({counts.abandoned})</s-chip>
-                    <s-chip {...chipProps("followups")}>Follow-ups ({counts.followups})</s-chip>
-                    <s-chip {...chipProps("high_intent")}>High intent ({counts.high_intent})</s-chip>
-                    <s-chip {...chipProps("no_answer")}>No answer ({counts.no_answer})</s-chip>
-                    {hasDiscountFields ? <s-chip {...chipProps("discounts")}>Discounts ({counts.discounts})</s-chip> : null}
-                    {counts.recovered > 0 ? <s-chip {...chipProps("recovered")}>Recovered ({counts.recovered})</s-chip> : null}
+                    <Button pressed={activeFilter === "all"} onClick={() => setActiveFilter("all")}>{`All (${counts.all})`}</Button>
+                    {counts.open > 0 ? <Button pressed={activeFilter === "open"} onClick={() => setActiveFilter("open")}>{`Open (${counts.open})`}</Button> : null}
+                    <Button pressed={activeFilter === "abandoned"} onClick={() => setActiveFilter("abandoned")}>{`Abandoned (${counts.abandoned})`}</Button>
+                    <Button pressed={activeFilter === "followups"} onClick={() => setActiveFilter("followups")}>{`Follow-ups (${counts.followups})`}</Button>
+                    <Button pressed={activeFilter === "high_intent"} onClick={() => setActiveFilter("high_intent")}>{`High intent (${counts.high_intent})`}</Button>
+                    <Button pressed={activeFilter === "no_answer"} onClick={() => setActiveFilter("no_answer")}>{`No answer (${counts.no_answer})`}</Button>
+                    {hasDiscountFields ? <Button pressed={activeFilter === "discounts"} onClick={() => setActiveFilter("discounts")}>{`Discounts (${counts.discounts})`}</Button> : null}
+                    {counts.recovered > 0 ? <Button pressed={activeFilter === "recovered"} onClick={() => setActiveFilter("recovered")}>{`Recovered (${counts.recovered})`}</Button> : null}
                   </s-stack>
                 </s-box>
 
@@ -1195,7 +995,6 @@ export default function Checkouts() {
                           const id = r.checkoutId;
 
                           const checkoutTone = toneForCheckoutStatus(r.status);
-                          const callTone = r.callStatus ? toneForJobStatus(r.callStatus) : "neutral";
                           const outcomeTone = toneForOutcome(r.callOutcome);
 
                           const customer = safeStr(r.customerName) || "—";
@@ -1204,9 +1003,6 @@ export default function Checkouts() {
                           const nba = safeStr(r.nextBestAction).trim();
                           const follow = safeStr(r.followUpMessage).trim();
                           const nextStep = nba || (follow ? "Send follow-up message" : "—");
-
-                          const buyBadge =
-                            typeof r.buyProbabilityPct === "number" ? `BUY ${r.buyProbabilityPct}%` : "BUY —";
 
                           return (
                             <s-table-row
@@ -1225,16 +1021,7 @@ export default function Checkouts() {
                               <s-table-cell style={compactCell}>
                                 <s-stack gap="tight">
                                   <s-stack direction="inline" gap="tight" style={{ alignItems: "center", flexWrap: "wrap" }}>
-                                    <s-link
-                                      id={`open-${id}`}
-                                      href="#"
-                                      onClick={(e: any) => {
-                                        e.preventDefault();
-                                        setSelectedId(id);
-                                      }}
-                                    >
-                                      <s-text fontWeight="semibold">{customer}</s-text>
-                                    </s-link>
+                                    <Button variant="plain" onClick={() => setSelectedId(id)}>{customer === "—" ? "Guest customer" : customer}</Button>
                                     <s-text tone="subdued" variant="bodySm">Checkout …{id.slice(-10)}</s-text>
                                     {r.eligibleAtRisk ? <s-badge tone="warning">AT-RISK</s-badge> : null}
                                   </s-stack>
@@ -1264,7 +1051,7 @@ export default function Checkouts() {
                                   <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
                                     <s-badge tone={checkoutTone}>{safeStr(r.status).toUpperCase()}</s-badge>
                                     {r.callOutcome ? <s-badge tone={outcomeTone}>{outcomeLabel(r.callOutcome)}</s-badge> : null}
-                                    {r.offerCode ? <s-badge tone="success">{`CODE ${r.offerCode}`}</s-badge> : null}
+
                                   </s-stack>
                                   {r.offerPercent ? <s-text tone="subdued" variant="bodySm">{`${r.offerPercent}% offer${r.smsSentAt ? " · SMS sent" : ""}`}</s-text> : null}
                                 </s-stack>
@@ -1281,27 +1068,9 @@ export default function Checkouts() {
                                   </s-text>
 
                                   <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
-                                    <s-button variant="secondary" onClick={() => setSelectedId(id)}>
-                                      Open
-                                    </s-button>
-                                    <s-button
-                                      variant="tertiary"
-                                      disabled={!r.recordingUrl}
-                                      onClick={() => {
-                                        if (r.recordingUrl) window.open(r.recordingUrl, "_blank", "noreferrer");
-                                      }}
-                                    >
-                                      Recording
-                                    </s-button>
-                                    <s-button
-                                      variant="tertiary"
-                                      disabled={!r.logUrl}
-                                      onClick={() => {
-                                        if (r.logUrl) window.open(r.logUrl, "_blank", "noreferrer");
-                                      }}
-                                    >
-                                      Logs
-                                    </s-button>
+                                    <Button id={`open-${id}`} onClick={() => setSelectedId(id)}>
+                                      View details
+                                    </Button>
                                   </s-stack>
                                 </s-stack>
                               </s-table-cell>
@@ -1315,7 +1084,8 @@ export default function Checkouts() {
               </s-stack>
             </s-section>
 
-            <s-box style={{ position: "sticky", top: 16, alignSelf: "start" }}>
+            {searchedRows.length > 30 ? <Pagination hasPrevious={currentPage > 0} onPrevious={() => setPage(currentPage - 1)} hasNext={(currentPage + 1) * 30 < searchedRows.length} onNext={() => setPage(currentPage + 1)} /> : null}
+            <DetailDrawer open={!!selected} onClose={() => setSelectedId(null)} title={selected?.customerName || "Checkout details"}>
               <s-section>
                 <s-box border="base" borderRadius="base" padding="base">
                   <s-stack gap="base">
@@ -1350,8 +1120,8 @@ export default function Checkouts() {
                             <s-badge tone="neutral">NO JOB</s-badge>
                           )}
 
-                          <s-badge tone={toneForOutcome(sb?.call_outcome ?? selected.callOutcome)}>
-                            {outcomeLabel(sb?.call_outcome ?? selected.callOutcome)}
+                          <s-badge tone={toneForOutcome(recoveryOutcome(sb?.call_outcome ?? selected.callOutcome, !!selected.recoveredOrderId))}>
+                            {outcomeLabel(recoveryOutcome(sb?.call_outcome ?? selected.callOutcome, !!selected.recoveredOrderId))}
                           </s-badge>
 
                           {sb?.ai_status ? (
@@ -1450,29 +1220,7 @@ export default function Checkouts() {
                         ) : null}
 
                         <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
-                          <s-button
-                            variant="primary"
-                            disabled={!effectiveRecordingUrl}
-                            onClick={() => {
-                              if (effectiveRecordingUrl) window.open(effectiveRecordingUrl, "_blank", "noreferrer");
-                            }}
-                          >
-                            Recording
-                          </s-button>
-
-                          <s-button
-                            variant="secondary"
-                            disabled={!effectiveLogUrl}
-                            onClick={() => {
-                              if (effectiveLogUrl) window.open(effectiveLogUrl, "_blank", "noreferrer");
-                            }}
-                          >
-                            Logs
-                          </s-button>
-
-                          <s-button variant="secondary" disabled={!safeStr(sb?.transcript).trim()} onClick={() => setModalKind("transcript")}>
-                            Transcript
-                          </s-button>
+                          <Button onClick={() => setModalKind("transcript")}>View conversation</Button>
                         </s-stack>
 
                         <s-box border="base" borderRadius="base" padding="base" style={{ background: "rgba(0,91,211,0.06)" }}>
@@ -1593,22 +1341,19 @@ export default function Checkouts() {
                   </s-stack>
                 </s-box>
               </s-section>
-            </s-box>
-          </s-grid>
-        </s-section>
-      </s-page>
+            </DetailDrawer>
+        </div>
+      </Page>
 
-      <s-modal
-        id="checkouts-modal"
-        heading={
+      <DetailDrawer
+        title={
           modalKind === "transcript" ? "Transcript" : modalKind === "evidence" ? "Evidence" : modalKind === "raw" ? "Raw payload" : "Details"
         }
-        padding="base"
         open={!!modalKind}
         onClose={() => setModalKind(null)}
       >
         {modalKind === "transcript" ? (
-          <pre style={mono}>{safeStr(sb?.transcript) || "—"}</pre>
+          <pre style={mono}>{details?.transcript || "The written conversation is not available yet. It will appear here when the call report has been received."}</pre>
         ) : modalKind === "evidence" ? (
           <s-stack gap="base">
             <s-grid gap="base" gridTemplateColumns="@container (inline-size < 900px) 1fr, 1fr 1fr">
@@ -1686,7 +1431,7 @@ export default function Checkouts() {
         <s-button slot="secondary-actions" variant="secondary" onClick={() => setModalKind(null)}>
           Close
         </s-button>
-      </s-modal>
+      </DetailDrawer>
     </>
   );
 }

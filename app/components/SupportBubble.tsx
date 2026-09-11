@@ -170,7 +170,7 @@ export function SupportBubble({ shop }: { shop: string }) {
               <InlineStack align="space-between" blockAlign="center" gap="200">
                 <BlockStack gap="050">
                   <InlineStack gap="150" blockAlign="center">
-                    <Text as="h3" variant="headingMd">CheckoutCall support</Text>
+                    <Text as="h3" variant="headingMd">CartEcho support</Text>
                     {unread ? <Badge tone="attention">New reply</Badge> : <Badge tone="success">Online</Badge>}
                   </InlineStack>
                   <Text as="p" variant="bodySm" tone="subdued">We’ll help with your recovery setup and calls.</Text>
@@ -196,7 +196,7 @@ export function SupportBubble({ shop }: { shop: string }) {
                   <div style={{ maxHeight: 320, overflowY: "auto" }}>
                     <BlockStack gap="200">
                       {messages.map((m) => (
-                        <Box key={m.id} background={m.sender_role === "admin" ? "bg-surface-info" : "bg-surface"} borderRadius="300" padding="250">
+                        <Box key={m.id} background={m.sender_role === "admin" ? "bg-surface-info" : "bg-surface"} borderRadius="300" padding="300">
                           <BlockStack gap="100">
                             <InlineStack align="space-between" gap="200">
                               <Text as="p" variant="bodySm" fontWeight="semibold">{m.sender_role === "admin" ? "Support" : "You"}</Text>

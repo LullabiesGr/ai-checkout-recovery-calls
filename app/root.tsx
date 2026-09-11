@@ -11,11 +11,12 @@ import {
   useNavigation,
 } from "react-router";
 
+import cartEchoStyles from "./styles/cartecho.css?url";
 import polarisStyles from "@shopify/polaris/build/esm/styles.css?url";
 import { AppProvider as PolarisAppProvider } from "@shopify/polaris";
 import enTranslations from "@shopify/polaris/locales/en.json";
 
-export const links: LinksFunction = () => [{ rel: "stylesheet", href: polarisStyles }];
+export const links: LinksFunction = () => [{ rel: "stylesheet", href: polarisStyles }, { rel: "stylesheet", href: cartEchoStyles }];
 
 export async function loader({ request }: LoaderFunctionArgs) {
   return {
@@ -57,7 +58,7 @@ function BootLoader({ hidden, note }: { hidden: boolean; note: string }) {
           }}
         />
         <div style={{ fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial", color: "#111827" }}>
-          <div style={{ fontSize: 14, fontWeight: 600 }}>Loading app</div>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>Loading CartEcho</div>
           <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>{note}</div>
         </div>
       </div>
@@ -157,6 +158,7 @@ export default function Root() {
           }
         `}</style>
 
+        <title>CartEcho · AI Cart Recovery</title>
         <Meta />
         <Links />
       </head>

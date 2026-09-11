@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "b14c2c0645270d506c4bbc827807a208"
-name = "Ai Checkout Recovery Calls"
+name = "CartEcho"
 application_url = "https://checkout-call-recovery-ai.onrender.com"
 embedded = true
 

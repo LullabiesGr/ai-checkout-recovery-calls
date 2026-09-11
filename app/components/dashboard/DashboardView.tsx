@@ -1,5 +1,4 @@
 // app/components/dashboard/DashboardView.tsx
-import * as React from "react";
 import { Form } from "react-router";
 import {
   Badge,
@@ -196,35 +195,11 @@ export function DashboardView(props: DashboardViewProps) {
     .map((key) => props.metrics.find((metric) => metric.key === key))
     .filter(Boolean) as DashboardViewProps["metrics"];
 
-  const visibleMetrics = keyMetrics.length >= 3 ? keyMetrics.slice(0, 4) : props.metrics.slice(0, 4);
+  const visibleMetrics = (keyMetrics.length >= 3 ? keyMetrics : props.metrics)
+    .filter((metric) => !props.hero.show || metric.key !== "recovered_revenue").slice(0, 4);
   const visiblePriorities = props.priorities.filter((row) => row.count > 0).slice(0, 4);
   const visibleActivity = props.liveRows.slice(0, 5);
   const visibleRecoveries = props.recentRecoveries.slice(0, 5);
-
-  const priorityRows = visiblePriorities.map((row, index) => (
-    <IndexTable.Row id={row.key} key={row.key} position={index}>
-      <IndexTable.Cell>
-        <BlockStack gap="100">
-          <Text as="span" variant="bodyMd" fontWeight="medium">
-            {row.label}
-          </Text>
-          {row.nextBestAction ? (
-            <Text as="span" variant="bodySm" tone="subdued">
-              {row.nextBestAction}
-            </Text>
-          ) : null}
-        </BlockStack>
-      </IndexTable.Cell>
-      <IndexTable.Cell>
-        <Badge tone={badgeTone(row.tone)}>{String(row.count)}</Badge>
-      </IndexTable.Cell>
-      <IndexTable.Cell>
-        <Button url={row.href} variant="plain" size="slim">
-          Review
-        </Button>
-      </IndexTable.Cell>
-    </IndexTable.Row>
-  ));
 
   const activityRows = visibleActivity.map((row, index) => (
     <IndexTable.Row id={row.key} key={row.key} position={index}>
@@ -269,8 +244,9 @@ export function DashboardView(props: DashboardViewProps) {
 
   return (
     <Page
-      title="CheckoutCall AI"
-      subtitle="Your abandoned checkout recovery at a glance"
+      fullWidth
+      title="CartEcho"
+      subtitle="Bring customers back. Turn conversations into recovered orders."
       titleMetadata={
         <Badge tone={props.settings.enabled ? "success" : "info"}>
           {props.settings.enabled ? "Automation active" : "Automation paused"}
@@ -308,7 +284,8 @@ export function DashboardView(props: DashboardViewProps) {
         </InlineStack>
 
         {props.hero.show ? (
-          <Card>
+          <div className="ce-revenue-hero">
+            <span className="ce-eyebrow">RECOVERY OVERVIEW</span>
             <InlineStack align="space-between" blockAlign="center" gap="400">
               <BlockStack gap="100">
                 <Text as="p" variant="bodySm" tone="subdued">
@@ -323,10 +300,10 @@ export function DashboardView(props: DashboardViewProps) {
               </BlockStack>
               <Button url={props.hero.href}>View recovered orders</Button>
             </InlineStack>
-          </Card>
+          </div>
         ) : null}
 
-        <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="300">
+        <InlineGrid columns={{ xs: 1, sm: 2, md: visibleMetrics.length }} gap="300">
           {visibleMetrics.map((metric) => (
             <MetricCard key={metric.key} metric={metric} />
           ))}
@@ -344,21 +321,18 @@ export function DashboardView(props: DashboardViewProps) {
                 </Text>
               </BlockStack>
             </Box>
-            <IndexTable
-              resourceName={{ singular: "priority", plural: "priorities" }}
-              itemCount={visiblePriorities.length}
-              headings={[{ title: "Item" }, { title: "Count" }, { title: "" }]}
-              selectable={false}
-              emptyState={
-                <Box padding="500">
-                  <Text as="p" tone="subdued" alignment="center">
-                    Nothing needs your attention right now.
-                  </Text>
-                </Box>
-              }
-            >
-              {priorityRows}
-            </IndexTable>
+            <div className="ce-priorities">
+              {visiblePriorities.length ? visiblePriorities.map((row) => (
+                <div className="ce-priority" key={row.key}>
+                  <div className="ce-priority-copy">
+                    <Text as="h3" variant="headingSm">{row.label}</Text>
+                    {row.nextBestAction ? <Text as="p" tone="subdued">{row.nextBestAction}</Text> : null}
+                  </div>
+                  <Badge tone={badgeTone(row.tone)}>{String(row.count)}</Badge>
+                  <Button url={row.href} accessibilityLabel={`Review ${row.label.toLowerCase()}`}>Review</Button>
+                </div>
+              )) : <Box padding="500"><Text as="p" tone="subdued">You’re all caught up. Nothing needs your attention.</Text></Box>}
+            </div>
           </Card>
 
           <Card padding="0">
