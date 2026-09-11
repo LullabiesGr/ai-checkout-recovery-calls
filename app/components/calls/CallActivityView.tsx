@@ -1,4 +1,5 @@
 import * as React from "react";
+import { DetailDrawer } from "../DetailDrawer";
 import { Form, useRevalidator, useSearchParams } from "react-router";
 import {
   Badge,
@@ -14,6 +15,8 @@ import {
   Page,
   Text,
   Thumbnail,
+  TextField,
+  Pagination,
 } from "@shopify/polaris";
 
 export type CallActivityRow = {
@@ -30,6 +33,7 @@ export type CallActivityRow = {
   nextAction: string | null;
   followUp: string | null;
   recordingUrl: string | null;
+  transcript: string;
   openaiOutcome: string | null;
   sentSystemPrompt: string | null;
   customerName: string | null;
@@ -78,7 +82,7 @@ const money = (v: number | null | undefined, c: string) => {
 
 function statusTone(v: string) {
   const x = s(v).toUpperCase();
-  if (x === "COMPLETED") return "success" as const;
+  if (x === "COMPLETED") return "info" as const;
   if (x === "CALLING") return "info" as const;
   if (x === "QUEUED") return "attention" as const;
   if (x === "FAILED") return "critical" as const;
@@ -87,7 +91,8 @@ function statusTone(v: string) {
 
 function outcomeTone(v: string | null) {
   const x = s(v).toLowerCase();
-  if (x.includes("recovered") || x.includes("converted")) return "success" as const;
+  if (["recovered", "order_recovered", "converted"].includes(x)) return "success" as const;
+  if (["not_recovered", "not recovered"].includes(x)) return undefined;
   if (x.includes("follow") || x.includes("voicemail")) return "attention" as const;
   if (x.includes("no_answer") || x.includes("failed") || x.includes("not_interested")) return "critical" as const;
   return undefined;
@@ -132,21 +137,17 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
         ? "failed"
         : "all";
 
-  const filteredRows = React.useMemo(() => {
-    if (filter === "all") return rows;
-    return rows.filter((row) => s(row.status).toLowerCase() === filter);
-  }, [rows, filter]);
+  const [query, setQuery] = React.useState("");
+  const [page, setPage] = React.useState(0);
+  const filteredRows = React.useMemo(() => rows.filter((row) =>
+    (filter === "all" || s(row.status).toLowerCase() === filter) &&
+    [row.customerName, row.email, row.phone, row.checkoutId, row.cartPreview].some((value) => s(value).toLowerCase().includes(query.trim().toLowerCase()))
+  ), [rows, filter, query]);
+  React.useEffect(() => setPage(0), [filter, query]);
+  const currentPage = Math.min(page, Math.max(0, Math.ceil(filteredRows.length / 30) - 1));
 
-  const shown = filteredRows.slice(0, 30);
-  const [selectedId, setSelectedId] = React.useState<string | null>(shown[0]?.id ?? null);
-
-  React.useEffect(() => {
-    if (!shown.length) {
-      setSelectedId(null);
-      return;
-    }
-    if (!selectedId || !shown.some((r) => r.id === selectedId)) setSelectedId(shown[0].id);
-  }, [shown, selectedId]);
+  const shown = filteredRows.slice(currentPage * 30, (currentPage + 1) * 30);
+  const [selectedId, setSelectedId] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     if (stats.calling <= 0 && stats.queued <= 0) return;
@@ -167,10 +168,12 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
   );
 
   return (
+    <div className="ce-calls-page">
     <Page
+      fullWidth
       title="Calls"
       subtitle="See who the AI contacted, what was offered and what should happen next."
-      backAction={{ content: "Dashboard", url: "/app/dashboard" }}
+      backAction={{ content: "Dashboard", url: `/app/dashboard?${searchParams.toString()}` }}
     >
       <BlockStack gap="400">
         <Card>
@@ -206,7 +209,8 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
           <Text as="p" variant="bodySm" tone="subdued">Showing {shown.length} of {filteredRows.length}</Text>
         </InlineStack>
 
-        <InlineGrid columns={{ xs: 1, lg: "2fr 1fr" }} gap="400">
+        <TextField label="Search calls" labelHidden placeholder="Search customer, email, phone or cart" value={query} onChange={setQuery} autoComplete="off" clearButton onClearButtonClick={() => setQuery("")} />
+        <div className="ce-call-table">
           <Card padding="0">
             <Box padding="400">
               <BlockStack gap="100">
@@ -236,19 +240,19 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
                   <IndexTable.Cell>
                     <BlockStack gap="050">
                       <Text as="span" fontWeight="semibold">{money(r.cartTotal, r.currency)}</Text>
-                      <Text as="span" variant="bodySm" tone="subdued">{r.cartPreview || "Cart details unavailable"}</Text>
+                      <div className="ce-cart-preview" title={r.cartPreview || undefined}><Text as="span" variant="bodySm" tone="subdued">{r.cartPreview || "Cart details unavailable"}</Text></div>
                     </BlockStack>
                   </IndexTable.Cell>
                   <IndexTable.Cell>
                     <BlockStack gap="100">
-                      <div><Badge tone={statusTone(r.status)}>{s(r.status).toUpperCase()}</Badge></div>
+                      <div><Badge tone={statusTone(r.status)}>{outcomeLabel(r.status)}</Badge></div>
                       <Text as="span" variant="bodySm" tone="subdued">{outcomeLabel(r.openaiOutcome || r.callOutcome)}</Text>
                     </BlockStack>
                   </IndexTable.Cell>
                   <IndexTable.Cell>
                     {r.offerCode ? (
                       <BlockStack gap="050">
-                        <div><Badge tone="success">{r.offerCode}</Badge></div>
+                        <div><Badge>{r.offerCode}</Badge></div>
                         <Text as="span" variant="bodySm">{r.offerPercent ? `${r.offerPercent}% off` : "Offer"}</Text>
                         <Text as="span" variant="bodySm" tone={r.smsSentAt ? "success" : "subdued"}>{r.smsSentAt ? "SMS sent" : "SMS not sent"}</Text>
                       </BlockStack>
@@ -265,9 +269,9 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
             </IndexTable>
           </Card>
 
-          <Card>
+          <DetailDrawer open={!!selected} onClose={() => setSelectedId(null)} title={selected?.customerName || "Call details"}>
             {selected ? (
-              <BlockStack gap="350">
+              <BlockStack gap="400">
                 <InlineStack align="space-between" blockAlign="center">
                   <Text as="h2" variant="headingMd">Customer & checkout</Text>
                   <Badge tone={statusTone(selected.status)}>{s(selected.status).toUpperCase()}</Badge>
@@ -291,14 +295,14 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
                     <BlockStack gap="100">
                       <Text as="h3" variant="headingSm">Offer & SMS</Text>
                       <InlineStack gap="150">
-                        {selected.offerCode ? <Badge tone="success">Coupon {selected.offerCode}</Badge> : null}
-                        {selected.offerPercent ? <Badge tone="info">{selected.offerPercent}% off</Badge> : null}
+                        {selected.offerCode ? <Badge tone="success">{`Coupon ${selected.offerCode}`}</Badge> : null}
+                        {selected.offerPercent ? <Badge tone="info">{`${selected.offerPercent}% off`}</Badge> : null}
                       </InlineStack>
                       <Text as="p" variant="bodySm" tone={selected.smsSentAt ? "success" : "subdued"}>
                         {selected.smsSentAt ? `SMS sent ${when(selected.smsSentAt)}` : "SMS not sent"}
                       </Text>
                       {selected.smsText ? (
-                        <Box background="bg-surface" borderRadius="200" padding="250">
+                        <Box background="bg-surface" borderRadius="200" padding="300">
                           <BlockStack gap="100">
                             <Text as="p" variant="bodySm" fontWeight="semibold">Message sent</Text>
                             <Text as="p" variant="bodySm">{selected.smsText}</Text>
@@ -333,7 +337,7 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
                 </BlockStack>
 
                 <InlineStack gap="200">
-                  {selected.recordingUrl ? <Button url={selected.recordingUrl} external>Recording</Button> : null}
+                  <details><summary>View conversation</summary><pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit", lineHeight: 1.6 }}>{selected.transcript || "The written conversation is not available yet."}</pre></details>
                   <Form method="post">
                     <input type="hidden" name="intent" value="manual_call" />
                     <input type="hidden" name="callJobId" value={selected.id} />
@@ -342,9 +346,11 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
                 </InlineStack>
               </BlockStack>
             ) : <Box paddingBlock="800"><Text as="p" alignment="center" tone="subdued">Select a call to see details.</Text></Box>}
-          </Card>
-        </InlineGrid>
+          </DetailDrawer>
+        </div>
+        {filteredRows.length > 30 ? <InlineStack align="center"><Pagination hasPrevious={currentPage > 0} onPrevious={() => setPage(currentPage - 1)} hasNext={(currentPage + 1) * 30 < filteredRows.length} onNext={() => setPage(currentPage + 1)} /></InlineStack> : null}
       </BlockStack>
     </Page>
+    </div>
   );
 }

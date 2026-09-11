@@ -1,3 +1,4 @@
+import { conversationText, recoveryOutcome } from "../lib/conversation.shared";
 import * as React from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useLoaderData, useRouteError } from "react-router";
@@ -66,6 +67,7 @@ type LoaderData = {
     providerCallId: string | null;
     recordingUrl: string | null;
   };
+  transcript: string;
   offer: OfferInfo;
   sb: SupabaseCallSummary | null;
   recordingUrl: string | null;
@@ -154,7 +156,8 @@ function checkoutTone(status: string) {
 
 function outcomeTone(value: unknown) {
   const v = safeStr(value).toLowerCase();
-  if (v.includes("recovered") || v.includes("converted")) return "success" as const;
+  if (["recovered", "order_recovered", "converted"].includes(v)) return "success" as const;
+  if (["not_recovered", "not recovered"].includes(v)) return "info" as const;
   if (v.includes("follow") || v.includes("voicemail")) return "attention" as const;
   if (v.includes("failed") || v.includes("no_answer") || v.includes("not_interested")) return "critical" as const;
   return "info" as const;
@@ -199,6 +202,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
         providerCallId: true,
         recordingUrl: true,
         analysisJson: true,
+        transcript: true,
       },
     }),
     db.order.findFirst({
@@ -224,7 +228,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const sb: SupabaseCallSummary | null =
     (callId ? (sbMap.get(`call:${callId}`) as any) : null) ||
     (jobId ? (sbMap.get(`job:${jobId}`) as any) : null) ||
-    (sbMap.get(`co:${checkoutId}`) as any) ||
+    (!jobId ? (sbMap.get(`co:${checkoutId}`) as any) : null) ||
     null;
 
   const recordingUrl = (pickRecordingUrl(sb) ?? (j?.recordingUrl ? String(j.recordingUrl) : null)) ?? null;
@@ -232,8 +236,9 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   return {
     shop,
     checkoutId,
+    transcript: conversationText(j?.transcript, sb, j?.analysisJson),
     checkout: {
-      status: recoveredOrder ? "RECOVERED" : String(checkout.status),
+      status: recoveredOrder ? "RECOVERED" : ["RECOVERED", "CONVERTED"].includes(String(checkout.status).toUpperCase()) ? "ABANDONED" : String(checkout.status),
       updatedAt: new Date(checkout.updatedAt).toISOString(),
       abandonedAt: checkout.abandonedAt ? new Date(checkout.abandonedAt).toISOString() : null,
       customerName: checkout.customerName ?? null,
@@ -292,7 +297,7 @@ export default function CheckoutDetail() {
 
   const buyPct =
     typeof sb?.buy_probability === "number" && Number.isFinite(sb.buy_probability) ? Math.round(sb.buy_probability) : null;
-  const outcome = safeStr(sb?.call_outcome).trim();
+  const outcome = recoveryOutcome(sb?.call_outcome, !!data.recoveredOrder);
   const total = data.recoveredOrder?.total ?? data.checkout.value;
   const currency = data.recoveredOrder?.currency ?? data.checkout.currency;
 
@@ -333,7 +338,7 @@ export default function CheckoutDetail() {
               ) : null}
               <InlineStack gap="200">
                 {data.checkout.recoveryUrl ? <Button url={data.checkout.recoveryUrl} external>Open checkout</Button> : null}
-                {data.recordingUrl ? <Button url={data.recordingUrl} external>Recording</Button> : null}
+                <details><summary>View conversation</summary><pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit" }}>{data.transcript || "The written conversation is not available yet."}</pre></details>
               </InlineStack>
             </BlockStack>
           </Card>
@@ -352,7 +357,7 @@ export default function CheckoutDetail() {
                     <Text as="p" variant="bodyMd">{money(data.recoveredOrder.total, data.recoveredOrder.currency || data.checkout.currency)}</Text>
                     <Text as="p" variant="bodySm" tone="subdued">Completed {formatWhen(data.recoveredOrder.createdAt)}</Text>
                     <InlineStack gap="150" blockAlign="center">
-                      <Button size="slim" onClick={() => copy("order", data.recoveredOrder?.orderId)}>Copy order ID</Button>
+                      <Button size="slim" onClick={() => copy("order", data.recoveredOrder?.orderId ?? null)}>Copy order ID</Button>
                       {copied === "order" ? <Badge tone="success">Copied</Badge> : null}
                     </InlineStack>
                   </BlockStack>
@@ -366,8 +371,8 @@ export default function CheckoutDetail() {
                   <BlockStack gap="150">
                     <Text as="h3" variant="headingSm">Offer & SMS</Text>
                     <InlineStack gap="150" blockAlign="center">
-                      {data.offer.code ? <Badge tone="success">Coupon {data.offer.code}</Badge> : null}
-                      {data.offer.percent ? <Badge tone="info">{data.offer.percent}% off</Badge> : null}
+                      {data.offer.code ? <Badge tone="success">{`Coupon ${data.offer.code}`}</Badge> : null}
+                      {data.offer.percent ? <Badge tone="info">{`${data.offer.percent}% off`}</Badge> : null}
                     </InlineStack>
                     <Text as="p" variant="bodySm" tone={data.offer.smsSentAt ? "success" : "subdued"}>
                       {data.offer.smsSentAt ? `SMS sent ${formatWhen(data.offer.smsSentAt)}` : "SMS not sent"}
@@ -394,7 +399,7 @@ export default function CheckoutDetail() {
             {items.length === 0 ? (
               <Text as="p" tone="subdued">Product information is not available for this checkout.</Text>
             ) : (
-              <BlockStack gap="250">
+              <BlockStack gap="300">
                 {items.slice(0, 12).map((item, index) => {
                   const title = safeStr(item.title ?? item.name).trim() || "Product";
                   const qty = Number(item.quantity ?? item.qty ?? 1);
@@ -403,7 +408,7 @@ export default function CheckoutDetail() {
                     <React.Fragment key={`${title}-${index}`}>
                       {index > 0 ? <Divider /> : null}
                       <InlineStack align="space-between" blockAlign="center" gap="300" wrap={false}>
-                        <InlineStack gap="250" blockAlign="center" wrap={false}>
+                        <InlineStack gap="300" blockAlign="center" wrap={false}>
                           {image ? <Thumbnail source={image} alt={title} size="medium" /> : <Box background="bg-surface-secondary" borderRadius="200" padding="300"><Text as="span" tone="subdued">No image</Text></Box>}
                           <BlockStack gap="050">
                             <Text as="p" variant="bodyMd" fontWeight="semibold">{title}</Text>
@@ -435,7 +440,7 @@ export default function CheckoutDetail() {
           </Card>
 
           <Card>
-            <BlockStack gap="250">
+            <BlockStack gap="300">
               <Text as="h2" variant="headingMd">Next step</Text>
               <Text as="p" variant="bodyMd" tone={safeStr(sb?.next_best_action || sb?.best_next_action) ? undefined : "subdued"}>
                 {safeStr(sb?.next_best_action || sb?.best_next_action) || "No follow-up is required right now."}

@@ -1,0 +1,55 @@
+.cartecho-app { --ce-accent: #6741c0; --ce-border: #e5e3ec; min-height: 100vh; padding-bottom: 72px; background: #f6f6f9; }
+.cartecho-app .Polaris-Page { max-width: 1280px; margin-inline: auto; }
+.cartecho-app .Polaris-Page-Header { padding-block: 28px 24px; }
+.cartecho-app .Polaris-Page-Header__TitleWrapper h1 { letter-spacing: -.6px; }
+.cartecho-app .Polaris-IndexTable__TableCell { padding-block: 16px; }
+.cartecho-app .Polaris-IndexTable__TableHeading { background: #faf9fc; }
+.cartecho-app .Polaris-IndexTable__TableRow:hover { background: #f8f6fc; }
+.ce-revenue-hero { padding: 28px 32px; border: 1px solid #ded5f0; border-radius: 16px; background: linear-gradient(115deg, #fff 35%, #eee8fa); box-shadow: 0 4px 18px #3d246008; }
+.ce-eyebrow { display: block; font-size: 11px; font-weight: 650; letter-spacing: 1.6px; color: #6741c0; margin-bottom: 16px; }
+.ce-revenue-hero .Polaris-Text--heading2xl { font-size: clamp(32px, 4vw, 44px); line-height: 1.2; letter-spacing: -1.5px; margin-block: 4px 8px; font-variant-numeric: tabular-nums; }
+.ce-priority { display: flex; align-items: center; gap: 12px; padding: 18px 20px; border-top: 1px solid #eeecf2; }
+.ce-priority-copy { flex: 1; min-width: 0; }
+.ce-priority-copy p { margin-top: 4px; }
+.ce-call-table { min-width: 0; }
+.ce-cart-preview { max-width: 270px; min-width: 140px; white-space: normal; line-height: 1.5; overflow-wrap: anywhere; }
+.ce-drawer { position: fixed; inset: 0 0 0 auto; width: min(600px, 100%); max-width: 100%; height: 100dvh; max-height: 100dvh; margin: 0; padding: 0; border: 0; background: #fff; color: #303030; box-shadow: -12px 0 50px #1a123126; }
+.ce-drawer::backdrop { background: #19112755; }
+.ce-drawer-header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 24px; background: #fff; border-bottom: 1px solid #e5e3ec; }
+.ce-drawer-header > div { min-width: 0; overflow-wrap: anywhere; }
+.ce-drawer-content { padding: 24px; overflow-wrap: anywhere; }
+.ce-drawer-content .Polaris-InlineStack > * { min-width: 0; }
+.ce-checkout-overview { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, .8fr); gap: 20px; }
+.ce-checkout-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.ce-checkout-queue { margin-top: 24px; }
+.ce-checkout-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+.ce-checkout-metrics s-text[fontweight="semibold"] { font-size: 24px; }
+.ce-plan-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.ce-plan { display: flex; flex-direction: column; gap: 20px; padding: 24px; background: #fff; border: 1px solid #e5e3ec; border-radius: 14px; }
+.ce-plan[data-current="true"] { border: 2px solid #6741c0; padding: 23px; background: #fbf9ff; }
+.ce-plan form { margin-top: auto; }
+.ce-plan-price { font-size: 32px; font-weight: 650; line-height: 1.2; letter-spacing: -1px; }
+.ce-plan-price span { font-size: 13px; font-weight: 400; color: #616161; letter-spacing: 0; }
+.ce-plan-terms { display: grid; gap: 10px; padding: 0; margin: 0; list-style: none; color: #616161; }
+.ce-plan-terms li { padding-top: 10px; border-top: 1px solid #eeecf2; }
+.ce-coupon { max-width: 480px; }
+.ce-coupon summary { cursor: pointer; font-weight: 550; padding-block: 12px; }
+@media (max-width: 1000px) { .ce-checkout-overview { grid-template-columns: minmax(0, 1fr); } .ce-plan-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .ce-revenue-hero { padding: 24px 20px; } .ce-plan-grid, .ce-checkout-metrics { grid-template-columns: minmax(0, 1fr); } .ce-drawer-content, .ce-drawer-header { padding: 20px 16px; } .ce-priority { flex-wrap: wrap; } .ce-priority-copy { flex-basis: 65%; } }
+@media (prefers-reduced-motion: reduce) { #boot-loader [aria-hidden="true"] { animation: none !important; } }
+
+/* Keep Calls aligned with the embedded viewport; contain wide table content. */
+.ce-calls-page { width: 100%; min-width: 0; }
+.cartecho-app .ce-calls-page > .Polaris-Page { width: 100%; max-width: none; margin-inline: 0; box-sizing: border-box; padding-inline: 24px; }
+.ce-calls-page .Polaris-BlockStack { min-width: 0; }
+.ce-calls-page .ce-call-table { width: 100%; max-width: 100%; overflow-x: auto; }
+.ce-calls-page .Polaris-IndexTable__Table { width: 100%; min-width: 900px; table-layout: fixed; }
+.ce-calls-page .Polaris-IndexTable__TableCell { white-space: normal; overflow-wrap: anywhere; vertical-align: top; }
+.ce-calls-page .Polaris-IndexTable__TableHeading:nth-child(1) { width: 22%; }
+.ce-calls-page .Polaris-IndexTable__TableHeading:nth-child(2) { width: 26%; }
+.ce-calls-page .Polaris-IndexTable__TableHeading:nth-child(3) { width: 16%; }
+.ce-calls-page .Polaris-IndexTable__TableHeading:nth-child(4) { width: 12%; }
+.ce-calls-page .Polaris-IndexTable__TableHeading:nth-child(5) { width: 16%; }
+.ce-calls-page .Polaris-IndexTable__TableHeading:nth-child(6) { width: 8%; }
+.ce-calls-page .ce-cart-preview { min-width: 0; max-width: 100%; }
+@media (max-width: 600px) { .cartecho-app .ce-calls-page > .Polaris-Page { padding-inline: 16px; } }

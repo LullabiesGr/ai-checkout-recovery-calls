@@ -113,21 +113,7 @@ function merchantStatusLabel(status: string, plan: PlanKey) {
 }
 
 function formatEUR(amount: number) {
-  return new Intl.NumberFormat("el-GR", { style: "currency", currency: "EUR" }).format(amount);
-}
-
-function planPriceLine(planKey: PlanKey) {
-  const p = PLANS[planKey];
-  if (planKey === "FREE") return `€0/month • ${p.includedAttempts} attempts included`;
-  if (planKey === "PAYG") return `€0/month • €${p.overageEURPerAttempt.toFixed(2)} per attempt`;
-  return `${formatEUR(p.recurringMonthlyEUR)}/month • ${p.includedAttempts} attempts included`;
-}
-
-function planUsageLine(planKey: PlanKey) {
-  const p = PLANS[planKey];
-  if (planKey === "FREE") return "SMS included with every attempt";
-  if (planKey === "PAYG") return `SMS included • Monthly usage cap ${formatEUR(p.usageCapEUR)}`;
-  return `Then €${p.overageEURPerAttempt.toFixed(2)} per attempt • SMS included • Cap ${formatEUR(p.usageCapEUR)}`;
+  return new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR" }).format(amount);
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -301,7 +287,7 @@ export default function BillingRoute() {
     status === "PENDING" && billing?.pendingCouponCode ? "Pending coupon" : "Coupon";
 
   return (
-    <Page title="Billing" subtitle="Manage your plan and call attempts">
+    <Page fullWidth title="Plan & usage" subtitle="Simple pricing. Every outbound call is one attempt.">
       <Layout>
         <Layout.Section>
           {billingError ? (
@@ -329,6 +315,7 @@ export default function BillingRoute() {
               <Divider />
 
               <BlockStack gap="200">
+                {effectivePlanKey === "PAYG" ? <Text as="p" variant="headingLg">{formatEUR(plan.overageEURPerAttempt)} per attempt</Text> : <>
                 <InlineStack align="space-between" blockAlign="center">
                   <Text as="p" variant="headingMd">
                     {remainingAttempts} / {totalIncludedAttempts} attempts remaining
@@ -338,8 +325,9 @@ export default function BillingRoute() {
                   </Text>
                 </InlineStack>
                 <ProgressBar progress={attemptsProgress} size="small" />
+                </>}
                 <Text as="p" tone="subdued">
-                  One outbound call counts as one attempt. SMS is included with every attempt.
+                  One outbound call = one attempt, whether or not the customer answers. SMS is included.
                 </Text>
               </BlockStack>
 
@@ -351,7 +339,7 @@ export default function BillingRoute() {
 
               {effectivePlanKey !== "FREE" && balanceUsed != null && capAmount != null ? (
                 <Text as="p">
-                  Usage this cycle: <b>{formatEUR(balanceUsed)}</b> of <b>{formatEUR(capAmount)}</b> cap
+                  Additional attempt charges this cycle: <b>{formatEUR(balanceUsed)}</b> of <b>{formatEUR(capAmount)}</b> cap
                 </Text>
               ) : null}
 
@@ -396,13 +384,17 @@ export default function BillingRoute() {
                 </Text>
               </BlockStack>
 
+              <details className="ce-coupon">
+              <summary>Have a coupon code?</summary>
               <TextField
                 label="Coupon code"
                 value={coupon}
                 onChange={(v) => setCoupon(v)}
                 autoComplete="off"
-                helpText="Optional. Applied to the subscription fee before you confirm the plan."
+                helpText="Applied to the subscription fee before you confirm the plan."
               />
+              </details>
+              <div className="ce-plan-grid">
 
               {(["FREE", "STARTER", "PRO", "SCALE", "PAYG"] as PlanKey[]).map((k) => {
                 const p = PLANS[k];
@@ -428,29 +420,32 @@ export default function BillingRoute() {
                 const isThisSubmitting = isBusy && activeIntent === "select_plan" && activePlan === k;
 
                 return (
-                  <Card key={k}>
+                  <article className="ce-plan" data-current={isSelected} key={k}>
                     <BlockStack gap="300">
                       <InlineStack align="space-between" blockAlign="start">
                         <BlockStack gap="100">
                           <Text as="h3" variant="headingMd">
                             {p.title}
                           </Text>
-                          <Text as="p" variant="headingSm">
-                            {planPriceLine(k)}
-                          </Text>
-                          <Text as="p" tone="subdued">
-                            {planUsageLine(k)}
-                          </Text>
+                          <p className="ce-plan-price">{formatEUR(p.recurringMonthlyEUR)}<span> / month</span></p>
                         </BlockStack>
                         {badgeText ? <Badge tone={badgeTone}>{badgeText}</Badge> : null}
                       </InlineStack>
 
+                      <ul className="ce-plan-terms">
+                        <li><strong>{k === "PAYG" ? "Pay for each attempt" : `${p.includedAttempts} attempts included`}</strong></li>
+                        <li>{k === "FREE" ? "No additional attempts on this plan" : `${formatEUR(p.overageEURPerAttempt)} per ${k === "PAYG" ? "" : "additional "}attempt`}</li>
+                        <li>SMS included with every attempt</li>
+                        {k !== "FREE" ? <li>Attempt usage cap: {formatEUR(p.usageCapEUR)} / cycle</li> : null}
+                      </ul>
+                    </BlockStack>
                       <Form method="post">
                         <input type="hidden" name="intent" value="select_plan" />
                         <input type="hidden" name="plan" value={k} />
                         <input type="hidden" name="coupon" value={coupon.trim()} />
                         <Button
                           submit
+                          fullWidth
                           variant={isSelected ? "secondary" : "primary"}
                           disabled={isSelected}
                           loading={isThisSubmitting}
@@ -458,10 +453,10 @@ export default function BillingRoute() {
                           {isSelected ? "Current plan" : `Choose ${p.title}`}
                         </Button>
                       </Form>
-                    </BlockStack>
-                  </Card>
+                  </article>
                 );
               })}
+              </div>
             </BlockStack>
           </Card>
         </Layout.Section>

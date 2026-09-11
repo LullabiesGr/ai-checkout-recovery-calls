@@ -1,3 +1,4 @@
+import { conversationText, recoveryOutcome } from "../lib/conversation.shared";
 // app/routes/app.calls.tsx
 import * as React from "react";
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
@@ -147,6 +148,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         providerCallId: true,
         recordingUrl: true,
         analysisJson: true,
+        transcript: true,
       },
     }),
   ]);
@@ -198,7 +200,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const sb =
       (callId ? sbMap.get(`call:${callId}`) : null) ||
       (jobId ? sbMap.get(`job:${jobId}`) : null) ||
-      (coId ? sbMap.get(`co:${coId}`) : null) ||
+      (!jobId && coId ? sbMap.get(`co:${coId}`) : null) ||
       null;
 
     const openaiOutcome = pickOpenAIOutcome(sb as any);
@@ -212,13 +214,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       createdAt: new Date(j.createdAt).toISOString(),
       attempts: Number(j.attempts ?? 0),
       providerCallId: j.providerCallId ? String(j.providerCallId) : null,
-      callOutcome: sb?.call_outcome ? String(sb.call_outcome) : null,
+      callOutcome: recoveryOutcome(sb?.call_outcome, !!recoveredOrder),
       aiStatus: sb?.ai_status ? String(sb.ai_status) : null,
       summary: safeStr((sb as any)?.summary_clean || (sb as any)?.summary).trim() || null,
       nextAction: safeStr((sb as any)?.next_best_action || (sb as any)?.best_next_action).trim() || null,
       followUp: safeStr((sb as any)?.follow_up_message).trim() || null,
       recordingUrl: (pickRecordingUrl(sb as any) ?? (j.recordingUrl ? String(j.recordingUrl) : null)) ?? null,
-      openaiOutcome,
+      openaiOutcome: recoveryOutcome(openaiOutcome, !!recoveredOrder),
+      transcript: conversationText(j.transcript, sb, j.analysisJson),
       sentSystemPrompt,
       customerName: checkout?.customerName ?? null,
       phone: checkout?.phone ?? null,

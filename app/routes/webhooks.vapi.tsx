@@ -1,3 +1,4 @@
+import { conversationText } from "../lib/conversation.shared";
 // app/routes/webhooks.vapi.ts
 import type { ActionFunctionArgs } from "react-router";
 import db from "../db.server";
@@ -500,7 +501,7 @@ export async function action({ request }: ActionFunctionArgs) {
   if (messageType === "end-of-call-report") {
     const endedReason = safeStr(msg?.endedReason ?? "", 200);
     const artifact = msg?.artifact ?? {};
-    const transcript = safeStr(artifact?.transcript ?? "", 20000);
+    const transcript = conversationText(artifact, msg?.transcript).slice(0, 20000);
 
     const recordingUrl =
       artifact?.recording?.url ?? artifact?.recording?.downloadUrl ?? artifact?.recording?.recordingUrl ?? null;
@@ -510,7 +511,7 @@ export async function action({ request }: ActionFunctionArgs) {
       data: {
         status: "COMPLETED",
         endedReason: endedReason || null,
-        transcript: transcript || null,
+        ...(transcript ? { transcript } : {}),
         recordingUrl: recordingUrl ? safeStr(recordingUrl, 2000) : null,
         outcome: safeStr("VAPI_END_OF_CALL_REPORT", 2000),
       },

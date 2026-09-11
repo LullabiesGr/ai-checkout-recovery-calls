@@ -283,38 +283,6 @@ function digitWord(ch: string) {
   }
 }
 
-function natoWord(ch: string) {
-  switch (String(ch).toUpperCase()) {
-    case "A": return "Alpha";
-    case "B": return "Bravo";
-    case "C": return "Charlie";
-    case "D": return "Delta";
-    case "E": return "Echo";
-    case "F": return "Foxtrot";
-    case "G": return "Golf";
-    case "H": return "Hotel";
-    case "I": return "India";
-    case "J": return "Juliett";
-    case "K": return "Kilo";
-    case "L": return "Lima";
-    case "M": return "Mike";
-    case "N": return "November";
-    case "O": return "Oscar";
-    case "P": return "Papa";
-    case "Q": return "Quebec";
-    case "R": return "Romeo";
-    case "S": return "Sierra";
-    case "T": return "Tango";
-    case "U": return "Uniform";
-    case "V": return "Victor";
-    case "W": return "Whiskey";
-    case "X": return "X-ray";
-    case "Y": return "Yankee";
-    case "Z": return "Zulu";
-    default: return ch;
-  }
-}
-
 function makeSpeakableCouponCode(code: string | null | undefined) {
   const raw = String(code ?? "").trim().toUpperCase();
   if (!raw) return null;
@@ -323,12 +291,12 @@ function makeSpeakableCouponCode(code: string | null | undefined) {
     .split("")
     .filter(Boolean)
     .map((ch) => {
-      if (/[A-Z]/.test(ch)) return natoWord(ch);
+      if (/[A-Z]/.test(ch)) return ({ A: "Ay", B: "Bee", C: "See", D: "Dee", E: "Ee", F: "Ef", G: "Jee", H: "Aitch", I: "Eye", J: "Jay", K: "Kay", L: "El", M: "Em", N: "En", O: "Oh", P: "Pee", Q: "Cue", R: "Ar", S: "Ess", T: "Tee", U: "You", V: "Vee", W: "Double you", X: "Ex", Y: "Why", Z: "Zee" } as Record<string, string>)[ch];
       if (/[0-9]/.test(ch)) return digitWord(ch);
       return ch;
     });
 
-  return parts.length ? parts.join(" ... ") : null;
+  return parts.length ? parts.join(" ") : null;
 }
 
 function buildToolSuccessResult(args: {
@@ -1290,7 +1258,7 @@ SMS / OFFER TOOL (tool use):
 - Say the SMS was sent ONLY when the tool result contains sms_sent=true.
 - If sms_sent=false, clearly say the text could not be sent. If the result contains a real code/code_speakable, you may give that exact code verbally.
 - Never invent, guess, shorten, or transform a coupon code. Only use code/code_speakable returned by the tool.
-- If the tool result includes code_speakable, read that exact form slowly with short pauses.
+- If the tool result includes code_speakable, read that exact form slowly with short pauses. Use ordinary letter names and individual digits, never NATO words or spoken dots. For C123 say "See One Two Three".
 - Never read CHECKOUT_LINK aloud.
 - Never spell domains, query parameters, or URL characters aloud.
 - You may choose the final offer during the conversation, but you must stay within the configured limits.

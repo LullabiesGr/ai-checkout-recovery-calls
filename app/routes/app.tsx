@@ -109,7 +109,7 @@ export default function App() {
         {showAdminInbox ? <a href={href("/app/admin/support")}>Support Inbox</a> : null}
       </ui-nav-menu>
 
-      <Outlet />
+      <main className="cartecho-app"><Outlet /></main>
 
       {isLoading ? (
         <div
@@ -117,18 +117,20 @@ export default function App() {
           aria-busy="true"
           style={{
             position: "fixed",
-            inset: 0,
+            bottom: 24,
+            left: "50%",
+            transform: "translateX(-50%)",
+            pointerEvents: "none",
             zIndex: 9999,
             display: "grid",
             placeItems: "center",
-            background: "rgba(255,255,255,0.58)",
-            backdropFilter: "blur(2px)",
+
           }}
         >
           <Card>
             <InlineStack gap="300" blockAlign="center" wrap={false}>
-              <Spinner accessibilityLabel="Loading CheckoutCall" size="small" />
-              <Text as="p" variant="bodyMd" fontWeight="medium">Updating CheckoutCall…</Text>
+              <Spinner accessibilityLabel="Loading CartEcho" size="small" />
+              <Text as="p" variant="bodyMd" fontWeight="medium">Updating CartEcho…</Text>
             </InlineStack>
           </Card>
         </div>
