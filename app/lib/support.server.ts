@@ -15,8 +15,8 @@ export function isPlatformAdminEmail(email?: string | null) {
 
 // Fallback αν λείπει SUPPORT_CHANNEL_SECRET: δεν σκάει το app, απλώς το channel είναι προβλέψιμο.
 export function supportChannelForShop(shop: string) {
-  const secret = String(process.env.SUPPORT_CHANNEL_SECRET ?? "").trim();
-  if (!secret) return `support:${shop}`;
+  const secret = String(process.env.SUPPORT_CHANNEL_SECRET ?? process.env.SHOPIFY_API_SECRET ?? "").trim();
+  if (!secret) throw new Error("Support channel configuration unavailable");
   const sig = crypto.createHmac("sha256", secret).update(shop).digest("hex").slice(0, 24);
   return `support:${shop}:${sig}`;
 }

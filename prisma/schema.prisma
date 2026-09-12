@@ -285,3 +285,36 @@ model AttemptPurchase {
   billing ShopBilling @relation(fields: [shop], references: [shop], onDelete: Cascade)
   @@index([shop, creditedAt])
 }
+
+model PrivacyRequest {
+  id String @id
+  shop String
+  topic String
+  status String @default("PENDING")
+  payload Json?
+  report Json?
+  error String?
+  attempts Int @default(0)
+  lockedUntil DateTime?
+  expiresAt DateTime?
+  completedAt DateTime?
+  createdAt DateTime @default(now())
+  @@index([shop, createdAt])
+  @@index([status, createdAt])
+}
+model PrivacySuppression {
+  id String @id @default(cuid())
+  shop String
+  digest String
+  expiresAt DateTime
+  @@unique([shop, digest])
+}
+model SupportInquiry {
+  id String @id @default(cuid())
+  shop String?
+  email String
+  message String
+  status String @default("OPEN")
+  createdAt DateTime @default(now())
+  @@index([email, createdAt])
+}

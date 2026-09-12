@@ -1,3 +1,4 @@
+import { isPrivacySuppressed } from "./lib/privacy.server";
 import { reserveAttempt, releaseAttempt } from "./lib/billing.server";
 import db from "./db.server";
 import { randomBytes } from "node:crypto";
@@ -682,7 +683,7 @@ function buildSmsText(args: {
 /* =========================
    Shopify Discount Creation
    ========================= */
-const SHOPIFY_ADMIN_API_VERSION = process.env.SHOPIFY_ADMIN_API_VERSION ?? "2025-07";
+const SHOPIFY_ADMIN_API_VERSION = process.env.SHOPIFY_ADMIN_API_VERSION ?? "2026-04";
 
 async function getOfflineAccessToken(shop: string): Promise<string> {
   const sessions = await sessionStorage.findSessionsByShop(shop);
@@ -1987,6 +1988,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     checkout = await db.checkout.findFirst({ where: { shop: params.shop, checkoutId: job.checkoutId } });
   }
   if (!checkout) throw new Error("Checkout not found");
+  if (await isPrivacySuppressed(params.shop, checkout)) throw new Error("CUSTOMER_ERASURE_REQUESTED");
 
   const checkoutPhoneRaw = (checkout as any).phone ?? null;
   const jobPhoneRaw = (job as any).phone ?? null;

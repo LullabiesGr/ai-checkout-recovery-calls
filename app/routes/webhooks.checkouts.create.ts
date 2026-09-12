@@ -1,3 +1,5 @@
+import { isPrivacySuppressed } from "../lib/privacy.server";
+import dbPrivacy from "../db.server";
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -112,7 +114,6 @@ export async function action({ request }: ActionFunctionArgs) {
     rawLen: rawText.length,
     rawParsed: Boolean(rawJson),
     rawKeys: keysOf(rawJson),
-    rawHead: head(rawText),
   });
 
   let topic: any, shop: any, payload: any;
@@ -123,7 +124,8 @@ export async function action({ request }: ActionFunctionArgs) {
     payload = (auth as any)?.payload;
   } catch (e: any) {
     console.error("[CHECKOUTS_CREATE] authenticate.webhook failed", String(e?.message ?? e));
-    return new Response("OK", { status: 200 });
+    if (e instanceof Response) throw e;
+    return new Response("Unauthorized", { status: 401 });
   }
 
   console.log("[CHECKOUTS_CREATE] authed", {
@@ -141,6 +143,7 @@ export async function action({ request }: ActionFunctionArgs) {
     null;
 
   const c = root;
+  if (!await dbPrivacy.session.count({ where: { shop } }) || await isPrivacySuppressed(shop, c)) return new Response("Ignored", { status: 200 });
 
   console.log("[CHECKOUTS_CREATE] shape", {
     rootType: typeof root,
@@ -228,8 +231,9 @@ export async function action({ request }: ActionFunctionArgs) {
     console.error("[CHECKOUTS_CREATE] upsert FAILED", {
       shop,
       checkoutId,
-      err: String(e?.message ?? e),
+      error: "Database write failed",
     });
+    return new Response("Temporary failure", { status: 500 });
   }
 
   return new Response("OK", { status: 200 });

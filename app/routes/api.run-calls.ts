@@ -39,6 +39,7 @@ function adjustToWindow(target: Date, startHHMM: string, endHHMM: string) {
 // POST /api/run-calls
 export async function action({ request }: ActionFunctionArgs) {
   const want = process.env.RUN_CALLS_SECRET || "";
+  if (!want) return new Response("Service not configured", { status: 503 });
   if (want) {
     const got = request.headers.get("x-run-calls-secret") || "";
     if (got !== want) return new Response("Unauthorized", { status: 401 });
@@ -92,6 +93,10 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     const settings = await ensureSettings(job.shop);
+    if (!settings.enabled) {
+      await db.callJob.update({ where: { id: job.id }, data: { status: "QUEUED", attempts: { decrement: 1 }, scheduledFor: new Date(Date.now()+15*60*1000), outcome: "AUTOMATION_PAUSED" } });
+      continue;
+    }
     const maxAttempts = Number((settings as any).maxAttempts ?? 1);
 
     try {

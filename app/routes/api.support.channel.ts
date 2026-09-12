@@ -13,7 +13,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const { session } = await authenticate.admin(request);
 
     const shop = String(session.shop ?? "").trim();
-    const email = session.email ?? null;
+    const email = session.onlineAccessInfo?.associated_user?.email ?? null;
 
     if (!shop) {
       return jsonResponse({ ok: false, error: "Unauthorized" }, { status: 401 });

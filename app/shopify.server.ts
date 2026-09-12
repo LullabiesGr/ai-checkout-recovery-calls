@@ -17,7 +17,7 @@ const required = (name: string) => {
 const shopify = shopifyApp({
   apiKey: required("SHOPIFY_API_KEY"),
   apiSecretKey: required("SHOPIFY_API_SECRET"),
-  apiVersion: ApiVersion.July25,
+  apiVersion: ApiVersion.April26,
   scopes: (process.env.SCOPES || "").split(",").map((s) => s.trim()).filter(Boolean),
   appUrl: required("SHOPIFY_APP_URL"),
   authPathPrefix: "/auth",
@@ -33,7 +33,7 @@ const shopify = shopifyApp({
 
 export default shopify;
 
-export const apiVersion = ApiVersion.July25;
+export const apiVersion = ApiVersion.April26;
 export const addDocumentResponseHeaders = shopify.addDocumentResponseHeaders;
 export const authenticate = shopify.authenticate;
 export const unauthenticated = shopify.unauthenticated;

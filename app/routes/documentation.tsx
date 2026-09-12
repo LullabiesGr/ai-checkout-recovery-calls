@@ -1,0 +1,12 @@
+import { PublicPage } from "../components/PublicPage";
+import { PLANS, EXTRA_ATTEMPT_PACK } from "../lib/billingPlans.shared";
+export const meta=()=>[{title:"CartEcho Documentation"}];
+export default function Documentation(){return <PublicPage title="Using CartEcho">
+  <p>CartEcho helps merchants follow up on abandoned Shopify checkouts using AI-assisted calls and SMS.</p>
+  <h2>Set up your store</h2><ol><li>Install CartEcho through Shopify and approve the requested access.</li><li>Open Automation and configure the delay, call window, minimum checkout value, conversation instructions and any discount limits.</li><li>Only enable recovery after confirming that your intended calls, messages and any recording are permitted for your shoppers and markets.</li><li>Choose the attempt plan that fits your store. New stores start with recovery disabled.</li><li>Use your own permitted test contact and a new abandoned checkout to verify the experience before enabling normal operation.</li></ol>
+  <h2>Plans and extra attempts</h2><ul>{(["FREE","STARTER","PRO","SCALE"] as const).map(k=><li key={k}>{PLANS[k].title}: €{PLANS[k].recurringMonthlyEUR} per 30-day cycle, {PLANS[k].includedAttempts} attempts included.</li>)}</ul>
+  <p>One outbound call is one attempt, whether or not the shopper answers. SMS is included; there is no separate SMS or talk-time price. Monthly-plan merchants can buy {EXTRA_ATTEMPT_PACK.attempts} extra attempts for €{EXTRA_ATTEMPT_PACK.priceEUR}, approved as a one-time charge in Shopify. Unused extra attempts carry over; monthly attempts are used first. There are no automatic overage charges.</p>
+  <p>When attempts run out, queued calls wait for an eligible plan or balance and are retried on a later worker run. Billing allows changing or cancelling the subscription through Shopify. Shopify displays the actual charge for approval before a paid purchase.</p>
+  <h2>Understand the results</h2><p>Checkouts shows the newest checkouts first. Calls shows attempt status and the written conversation when available. Completed means that the call ended; Recovered requires a matching Shopify order. Awaiting order is not confirmed recovered revenue.</p>
+  <h2>Privacy and support</h2><p>Open Privacy requests in the app to download a requested customer export or follow a deletion request. Exports expire after 30 days. Privacy requests can need external-provider review. Use the in-app support chat or our <a href="/support">support form</a> for help. Read the <a href="/privacy">privacy policy</a> for data handling.</p>
+</PublicPage>;}

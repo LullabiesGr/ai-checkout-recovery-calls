@@ -1,3 +1,4 @@
+import { processPrivacyQueue } from "../lib/privacy.server";
 // app/routes/api.cron.ts
 import type { ActionFunctionArgs } from "react-router";
 import db from "../db.server";
@@ -12,11 +13,13 @@ function json(body: any, status = 200) {
 
 export async function action({ request }: ActionFunctionArgs) {
   const want = process.env.CRON_TOKEN || "";
+  if (!want) return new Response("Service not configured", { status: 503 });
   if (want) {
     const got = request.headers.get("x-cron-token") || "";
     if (got !== want) return new Response("Unauthorized", { status: 401 });
   }
 
+  await processPrivacyQueue();
   const serverNow = new Date();
 
   const settingsShops = (await db.settings.findMany({ select: { shop: true } })).map((x) => x.shop);
