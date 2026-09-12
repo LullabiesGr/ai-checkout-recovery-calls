@@ -10,8 +10,6 @@ export const PLANS: Record<
     title: string;
     recurringMonthlyEUR: number;
     includedAttempts: number;
-    overageEURPerAttempt: number;
-    usageCapEUR: number;
     isUsageOnly?: boolean;
   }
 > = {
@@ -20,40 +18,30 @@ export const PLANS: Record<
     title: "Free",
     recurringMonthlyEUR: 0,
     includedAttempts: 10,
-    overageEURPerAttempt: 0,
-    usageCapEUR: 0,
   },
   STARTER: {
     key: "STARTER",
     title: "Starter",
     recurringMonthlyEUR: 19,
     includedAttempts: 30,
-    overageEURPerAttempt: 0.45,
-    usageCapEUR: 99,
   },
   PRO: {
     key: "PRO",
     title: "Pro",
     recurringMonthlyEUR: 49,
     includedAttempts: 120,
-    overageEURPerAttempt: 0.35,
-    usageCapEUR: 199,
   },
   SCALE: {
     key: "SCALE",
     title: "Scale",
     recurringMonthlyEUR: 99,
     includedAttempts: 400,
-    overageEURPerAttempt: 0.25,
-    usageCapEUR: 399,
   },
   PAYG: {
     key: "PAYG",
     title: "Pay-as-you-go",
     recurringMonthlyEUR: 0,
     includedAttempts: 0,
-    overageEURPerAttempt: 0.6,
-    usageCapEUR: 100,
     isUsageOnly: true,
   },
 };
@@ -62,3 +50,6 @@ export function isPlanKey(v: any): v is PlanKey {
   const s = String(v ?? "").trim().toUpperCase();
   return s === "FREE" || s === "STARTER" || s === "PRO" || s === "SCALE" || s === "PAYG";
 }
+
+// PAYG is retained only to recognize existing subscriptions; it cannot be purchased.
+export const EXTRA_ATTEMPT_PACK = { attempts: 25, priceEUR: 20 } as const;

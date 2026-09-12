@@ -1,3 +1,4 @@
+import { reserveAttempt, releaseAttempt } from "./lib/billing.server";
 import db from "./db.server";
 import { randomBytes } from "node:crypto";
 import { sessionStorage } from "./shopify.server";
@@ -2220,6 +2221,8 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     process.env.VAPI_PHONE_NUMBER_ID ||
     requiredEnv("VAPI_PHONE_NUMBER_ID");
 
+  await reserveAttempt(params.shop, job.id);
+
   const res = await fetch("https://api.vapi.ai/call/phone", {
     method: "POST",
     headers: {
@@ -2314,6 +2317,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
   const json = await res.json().catch(() => null);
 
   if (!res.ok) {
+    if (res.status >= 400 && res.status < 500) await releaseAttempt(params.shop, job.id);
     await db.callJob.update({
       where: { id: job.id },
       data: { status: "FAILED", outcome: `VAPI_ERROR: ${JSON.stringify(json)}` },

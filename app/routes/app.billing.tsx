@@ -22,13 +22,14 @@ import {
   ProgressBar,
 } from "@shopify/polaris";
 
-import { PLANS, isPlanKey, type PlanKey } from "../lib/billingPlans.shared";
+import { PLANS, EXTRA_ATTEMPT_PACK, isPlanKey, type PlanKey } from "../lib/billingPlans.shared";
 import {
   ensureBillingRow,
   syncBillingFromShopify,
   createSubscriptionForPlan,
   cancelActiveSubscription,
-  requestCapIncrease,
+  createAttemptPurchase,
+  reconcileAttemptPurchases,
 } from "../lib/billing.server";
 
 type LoaderData = {
@@ -132,6 +133,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   try {
     const sync = await syncBillingFromShopify({ shop, admin });
     usage = sync?.usage ?? null;
+    await reconcileAttemptPurchases(shop, admin);
   } catch (e) {
     syncErr = asErrorMessage(e);
   }
@@ -164,29 +166,10 @@ export async function action({ request }: ActionFunctionArgs) {
   try {
     if (intent === "select_plan") {
       const planRaw = String(fd.get("plan") || "").toUpperCase();
-      if (!isPlanKey(planRaw)) return fail("Invalid plan");
+      if (!isPlanKey(planRaw) || planRaw === "PAYG") return fail("Invalid plan");
 
       if (planRaw === "FREE") {
         await cancelActiveSubscription({ shop, admin, prorate: false });
-        await db.shopBilling.update({
-          where: { shop },
-          data: {
-            plan: "FREE",
-            status: "NONE",
-            subscriptionId: null,
-            usageLineItemId: null,
-            recurringLineItemId: null,
-            pendingPlan: null,
-            pendingCouponId: null,
-            pendingCouponCode: null,
-            appliedCouponCode: null,
-            includedSecondsUsed: 0,
-            freeSecondsUsed: 0,
-            currentPeriodStart: null,
-            currentPeriodEnd: null,
-          },
-        });
-
         return backToBilling({ ok: "1" });
       }
 
@@ -208,11 +191,11 @@ export async function action({ request }: ActionFunctionArgs) {
       return redirect(confirmationUrl, { target: "_top" });
     }
 
-    if (intent === "increase_cap") {
-      const newCapEUR = Number(fd.get("newCapEUR"));
-      if (!Number.isFinite(newCapEUR) || newCapEUR <= 0) return fail("Invalid cap amount");
-
-      const { confirmationUrl } = await requestCapIncrease({ shop, admin, newCapEUR });
+    if (intent === "buy_attempts") {
+      const test = process.env.SHOPIFY_BILLING_TEST === "true" ||
+        (process.env.NODE_ENV !== "production" && process.env.SHOPIFY_BILLING_TEST !== "false");
+      const { confirmationUrl } = await createAttemptPurchase({ shop, admin,
+        returnUrl: billingReturnUrlOnApp(request, shop), test });
       return redirect(confirmationUrl, { target: "_top" });
     }
 
@@ -231,7 +214,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function BillingRoute() {
-  const { shop, billing, usage, billingError } = useLoaderData<typeof loader>();
+  const { shop, billing, billingError } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
 
   const isBusy = navigation.state === "submitting" || navigation.state === "loading";
@@ -268,8 +251,7 @@ export default function BillingRoute() {
     ? Math.min(100, Math.max(0, (attemptsUsed / totalIncludedAttempts) * 100))
     : 0;
 
-  const balanceUsed = usage?.balanceUsed ? Number(usage.balanceUsed.amount) : null;
-  const capAmount = usage?.cappedAmount ? Number(usage.cappedAmount.amount) : null;
+
 
   const prefillCoupon = String(
     status === "PENDING"
@@ -315,7 +297,7 @@ export default function BillingRoute() {
               <Divider />
 
               <BlockStack gap="200">
-                {effectivePlanKey === "PAYG" ? <Text as="p" variant="headingLg">{formatEUR(plan.overageEURPerAttempt)} per attempt</Text> : <>
+                <>
                 <InlineStack align="space-between" blockAlign="center">
                   <Text as="p" variant="headingMd">
                     {remainingAttempts} / {totalIncludedAttempts} attempts remaining
@@ -325,7 +307,7 @@ export default function BillingRoute() {
                   </Text>
                 </InlineStack>
                 <ProgressBar progress={attemptsProgress} size="small" />
-                </>}
+                </>
                 <Text as="p" tone="subdued">
                   One outbound call = one attempt, whether or not the customer answers. SMS is included.
                 </Text>
@@ -337,11 +319,8 @@ export default function BillingRoute() {
                 </Text>
               ) : null}
 
-              {effectivePlanKey !== "FREE" && balanceUsed != null && capAmount != null ? (
-                <Text as="p">
-                  Additional attempt charges this cycle: <b>{formatEUR(balanceUsed)}</b> of <b>{formatEUR(capAmount)}</b> cap
-                </Text>
-              ) : null}
+              <Text as="p">Extra attempts available: <b>{Number(billing?.extraAttempts || 0)}</b></Text>
+              {rawPlanKey === "PAYG" ? <Banner tone="warning"><p>This plan has been retired. Choose a monthly plan to continue.</p></Banner> : null}
 
               {hasActivePaidPlan ? (
                 <>
@@ -354,20 +333,28 @@ export default function BillingRoute() {
                       </Button>
                     </Form>
 
-                    <Form method="post">
-                      <input type="hidden" name="intent" value="increase_cap" />
-                      <input
-                        type="hidden"
-                        name="newCapEUR"
-                        value={String((capAmount ?? plan.usageCapEUR) + 50)}
-                      />
-                      <Button submit loading={isBusy && activeIntent === "increase_cap"}>
-                        Increase cap +€50
-                      </Button>
-                    </Form>
+
                   </InlineStack>
                 </>
               ) : null}
+            </BlockStack>
+          </Card>
+        </Layout.Section>
+
+        <Layout.Section>
+          <Card>
+            <BlockStack gap="300">
+              <Text as="h2" variant="headingLg">Buy extra attempts</Text>
+              <Text as="p">{EXTRA_ATTEMPT_PACK.attempts} extra attempts for {formatEUR(EXTRA_ATTEMPT_PACK.priceEUR)} — {formatEUR(EXTRA_ATTEMPT_PACK.priceEUR / EXTRA_ATTEMPT_PACK.attempts)} per attempt. SMS included.</Text>
+              <Text as="p" tone="subdued">One-time purchase, approved in Shopify. Unused extra attempts carry over. Monthly attempts are used first. Calls stop when your attempts run out.</Text>
+              <Text as="p">A larger monthly plan gives you a lower price per attempt.</Text>
+              <Form method="post">
+                <input type="hidden" name="intent" value="buy_attempts" />
+                <Button submit variant="primary" disabled={!hasActivePaidPlan || rawPlanKey === "PAYG" || isBusy} loading={isBusy && activeIntent === "buy_attempts"}>
+                  Buy 25 attempts — €20
+                </Button>
+              </Form>
+              {!hasActivePaidPlan || rawPlanKey === "PAYG" ? <Text as="p" tone="subdued">Choose a monthly plan to buy extra attempts.</Text> : null}
             </BlockStack>
           </Card>
         </Layout.Section>
@@ -396,7 +383,7 @@ export default function BillingRoute() {
               </details>
               <div className="ce-plan-grid">
 
-              {(["FREE", "STARTER", "PRO", "SCALE", "PAYG"] as PlanKey[]).map((k) => {
+              {(["FREE", "STARTER", "PRO", "SCALE"] as PlanKey[]).map((k) => {
                 const p = PLANS[k];
                 const isSelected =
                   status === "ACTIVE"
@@ -433,10 +420,10 @@ export default function BillingRoute() {
                       </InlineStack>
 
                       <ul className="ce-plan-terms">
-                        <li><strong>{k === "PAYG" ? "Pay for each attempt" : `${p.includedAttempts} attempts included`}</strong></li>
-                        <li>{k === "FREE" ? "No additional attempts on this plan" : `${formatEUR(p.overageEURPerAttempt)} per ${k === "PAYG" ? "" : "additional "}attempt`}</li>
+                        <li><strong>{`${p.includedAttempts} attempts included`}</strong></li>
+                        <li>{k === "FREE" ? "Upgrade to buy extra attempts" : "Extra attempts available as a one-time purchase"}</li>
                         <li>SMS included with every attempt</li>
-                        {k !== "FREE" ? <li>Attempt usage cap: {formatEUR(p.usageCapEUR)} / cycle</li> : null}
+                        <li>No automatic extra charges</li>
                       </ul>
                     </BlockStack>
                       <Form method="post">
