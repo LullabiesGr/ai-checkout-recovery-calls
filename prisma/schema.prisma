@@ -186,6 +186,8 @@ model ShopBilling {
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
 
+  extraAttempts Int @default(0)
+  purchases AttemptPurchase[]
   charges CallCharge[]
 }
 
@@ -194,6 +196,8 @@ model CallCharge {
   shop             String
   callJobId        String   @unique
   connectedSeconds Int
+  attemptSource    String @default("LEGACY")
+  attemptPeriodEnd DateTime?
   minutesBilled    Int
   amountCents      Int
   currencyCode     String
@@ -267,4 +271,17 @@ model BillingCouponRedemption {
   @@unique([couponId, shop])
   @@index([shop])
   @@index([couponId])
+}
+
+model AttemptPurchase {
+  id String @id @default(cuid())
+  shop String
+  shopifyPurchaseId String? @unique
+  attempts Int
+  amountCents Int
+  test Boolean @default(false)
+  creditedAt DateTime?
+  createdAt DateTime @default(now())
+  billing ShopBilling @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  @@index([shop, creditedAt])
 }

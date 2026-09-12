@@ -1,7 +1,7 @@
 // app/lib/billing.server.ts
 import db from "../db.server";
 import { sessionStorage } from "../shopify.server";
-import { BILLING_CURRENCY, PLANS, type PlanKey, isPlanKey } from "./billingPlans.server";
+import { BILLING_CURRENCY, PLANS, type PlanKey, isPlanKey, EXTRA_ATTEMPT_PACK } from "./billingPlans.server";
 
 type AdminLike = {
   graphql: (query: string, options?: any) => Promise<any>;
@@ -16,17 +16,6 @@ function eurToCents(eur: number) {
 
 function idempotencyKeyForCall(callJobId: string) {
   return (`call_${callJobId}`).slice(0, 255);
-}
-
-function asErrorMessage(e: unknown) {
-  if (e instanceof Error) return e.message;
-  if (typeof e === "string") return e;
-  try {
-    const s = JSON.stringify(e);
-    return s === "{}" ? "Unknown error" : s;
-  } catch {
-    return String(e);
-  }
 }
 
 function normalizeCouponCode(v: unknown) {
@@ -181,7 +170,7 @@ async function resolveCouponForPlan(args: { shop: string; plan: PlanKey; couponC
   return { couponId: coupon.id, code: coupon.code, discountInput } as CouponResolve;
 }
 
-export async function syncBillingFromShopify(args: { shop: string; admin: AdminLike }) {
+export async function syncBillingFromShopify(args: { shop: string; admin?: AdminLike }) {
   const { shop, admin } = args;
 
   const q = `#graphql
@@ -226,7 +215,9 @@ query BillingState {
     return usageLine?.plan?.pricingDetails ?? null;
   })();
 
+  await ensureBillingRow(shop);
   await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "shop" FROM "ShopBilling" WHERE "shop" = ${shop} FOR UPDATE`;
     const row = await tx.shopBilling.upsert({
       where: { shop },
       update: {},
@@ -306,7 +297,7 @@ query BillingState {
       },
     });
 
-    if (status === "ACTIVE" && row.pendingCouponId) {
+    if (status === "ACTIVE" && row.pendingCouponId && row.pendingPlan === normalizedPlan) {
       const already = await tx.billingCouponRedemption.findUnique({
         where: { couponId_shop: { couponId: row.pendingCouponId, shop } },
       });
@@ -350,7 +341,7 @@ export async function createSubscriptionForPlan(args: {
 }) {
   const { shop, admin, plan, returnUrl, test } = args;
   const p = PLANS[plan];
-  if (!p) throw new Error("Unknown plan");
+  if (!p || plan === "PAYG" || plan === "FREE") throw new Error("Choose a monthly plan");
 
   const coupon = await resolveCouponForPlan({
     shop,
@@ -373,17 +364,6 @@ export async function createSubscriptionForPlan(args: {
     lineItems.push({
       plan: {
         appRecurringPricingDetails: recurring,
-      },
-    });
-  }
-
-  if (p.usageCapEUR > 0) {
-    lineItems.push({
-      plan: {
-        appUsagePricingDetails: {
-          terms: usageTermsForPlan(plan),
-          cappedAmount: { amount: p.usageCapEUR, currencyCode: BILLING_CURRENCY },
-        },
       },
     });
   }
@@ -440,17 +420,11 @@ mutation AppSubscriptionCreate(
     throw new Error(errs.map((e: any) => e.message).join(" | "));
   }
 
-  const sub = payload?.appSubscription;
-  const { usageLine, recurringLine } = getSubscriptionLineItems(sub);
-
   await db.shopBilling.update({
     where: { shop },
     data: {
       pendingPlan: plan as any,
-      status: "PENDING",
-      subscriptionId: sub?.id ?? null,
-      usageLineItemId: usageLine?.id ?? null,
-      recurringLineItemId: recurringLine?.id ?? null,
+
       pendingCouponId: coupon?.couponId ?? null,
       pendingCouponCode: coupon?.code ?? null,
     },
@@ -523,212 +497,118 @@ mutation CancelSub($id: ID!, $prorate: Boolean) {
   }
 }
 
-export async function requestCapIncrease(args: { shop: string; admin: AdminLike; newCapEUR: number }) {
-  const { shop, admin, newCapEUR } = args;
-
-  let billing = await ensureBillingRow(shop);
-
-  if (billing.status !== "ACTIVE" || !billing.usageLineItemId) {
-    await syncBillingFromShopify({ shop, admin });
-    billing = await db.shopBilling.findUniqueOrThrow({ where: { shop } });
-  }
-
-  if (billing.status !== "ACTIVE") {
-    throw new Error("No active subscription");
-  }
-
-  if (!billing.usageLineItemId) {
-    throw new Error("No active usage line item");
-  }
-
-  const m = `#graphql
-mutation UpdateCap($id: ID!, $cappedAmount: MoneyInput!) {
-  appSubscriptionLineItemUpdate(id: $id, cappedAmount: $cappedAmount) {
-    userErrors { field message }
-    confirmationUrl
-    appSubscription { id }
-  }
-}`;
-
-  const json = await graphqlShop(
-    shop,
-    m,
-    {
-      id: billing.usageLineItemId,
-      cappedAmount: { amount: newCapEUR, currencyCode: BILLING_CURRENCY },
-    },
-    admin
-  );
-
-  if (json?.errors?.length) {
-    throw new Error(json.errors.map((e: any) => e.message).join(" | "));
-  }
-
-  const payload = json?.data?.appSubscriptionLineItemUpdate;
-  const errs = payload?.userErrors ?? [];
-  if (errs.length) {
-    throw new Error(errs.map((e: any) => e.message).join(" | "));
-  }
-
-  const confirmationUrl = payload?.confirmationUrl as string | undefined;
-  if (!confirmationUrl) {
-    throw new Error("Missing confirmationUrl");
-  }
-
-  return { confirmationUrl };
-}
-
+// All new calls consume prepaid attempts before the provider is contacted.
 export async function getAttemptAvailability(shop: string) {
   const billing = await ensureBillingRow(shop);
-  const planKey: PlanKey = isPlanKey(billing.plan) ? (billing.plan as PlanKey) : "FREE";
-  const plan = PLANS[planKey] ?? PLANS.FREE;
-
-  if (planKey === "FREE") {
-    const used = Number(billing.freeSecondsUsed || 0);
-    const included = Number(PLANS.FREE.includedAttempts || 10);
-    return {
-      plan: planKey,
-      allowed: used < included,
-      included,
-      used,
-      remainingIncluded: Math.max(0, included - used),
-    };
-  }
-
-  const used = Number(billing.includedSecondsUsed || 0);
-  const included = Number(plan.includedAttempts || 0);
-  return {
-    plan: planKey,
-    allowed: true,
-    included,
-    used,
-    remainingIncluded: Math.max(0, included - used),
-  };
+  const key = isPlanKey(billing.plan) ? billing.plan : "FREE";
+  const active = key !== "PAYG" && (key === "FREE" || (billing.status === "ACTIVE" && !!billing.currentPeriodEnd && billing.currentPeriodEnd > new Date()));
+  const included = PLANS[key].includedAttempts;
+  const used = key === "FREE" ? billing.freeSecondsUsed : billing.includedSecondsUsed;
+  const remainingIncluded = active ? Math.max(0, included - used) : 0;
+  return { plan: key, included, used, remainingIncluded, extraAttempts: billing.extraAttempts,
+    allowed: active && remainingIncluded + billing.extraAttempts > 0 };
 }
 
-export async function applyBillingForCall(args: {
-  shop: string;
-  admin?: AdminLike;
-  callJobId: string;
-  connectedSeconds: number;
-  answered: boolean;
-  voicemail?: boolean;
-}) {
-  const { shop, admin, callJobId } = args;
-  const rawSeconds = Math.max(0, Math.floor(Number(args.connectedSeconds) || 0));
-
-  await db.$transaction(async (tx) => {
-    const exists = await tx.callCharge.findUnique({ where: { callJobId } });
-    if (exists) return;
-
-    let billing = await tx.shopBilling.upsert({
-      where: { shop },
-      update: {},
-      create: { shop },
-    });
-
-    let planKey: PlanKey = isPlanKey(billing.plan) ? (billing.plan as PlanKey) : "FREE";
-
-    if (planKey !== "FREE" && !billing.usageLineItemId) {
-      try {
-        if (admin) await syncBillingFromShopify({ shop, admin });
-        billing = await tx.shopBilling.findUniqueOrThrow({ where: { shop } });
-        planKey = isPlanKey(billing.plan) ? (billing.plan as PlanKey) : "FREE";
-      } catch (e) {
-        throw new Error(`Billing sync failed: ${asErrorMessage(e)}`);
-      }
+export async function reserveAttempt(shop: string, callJobId: string) {
+  // Refresh subscription status and billing-cycle allowance using the shop's offline session.
+  await syncBillingFromShopify({ shop });
+  return db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "shop" FROM "ShopBilling" WHERE "shop" = ${shop} FOR UPDATE`;
+    const job = await tx.callJob.findFirst({ where: { id: callJobId, shop } });
+    if (!job || job.providerCallId) throw new Error("CALL_ALREADY_STARTED_OR_INVALID");
+    if (await tx.callCharge.findUnique({ where: { callJobId } })) throw new Error("ATTEMPT_ALREADY_RESERVED");
+    const row = await tx.shopBilling.findUniqueOrThrow({ where: { shop } });
+    const key = isPlanKey(row.plan) ? row.plan : "FREE";
+    if (key === "PAYG") throw new Error("MONTHLY_PLAN_REQUIRED");
+    if (key !== "FREE" && (row.status !== "ACTIVE" || !row.currentPeriodEnd || row.currentPeriodEnd <= new Date())) {
+      throw new Error("ACTIVE_SUBSCRIPTION_REQUIRED");
     }
-
-    if (planKey === "FREE") {
-      const freeUsed = Number(billing.freeSecondsUsed || 0);
-      const freeLimit = Number(PLANS.FREE.includedAttempts || 10);
-      if (freeUsed >= freeLimit) {
-        throw new Error("FREE_ATTEMPT_LIMIT_REACHED");
-      }
-      await tx.shopBilling.update({
-        where: { shop },
-        data: { freeSecondsUsed: freeUsed + 1 },
-      });
-      await tx.callCharge.create({
-        data: {
-          shop,
-          callJobId,
-          connectedSeconds: rawSeconds,
-          minutesBilled: 0,
-          amountCents: 0,
-          currencyCode: BILLING_CURRENCY,
-          idempotencyKey: idempotencyKeyForCall(callJobId),
-        },
-      });
-      return;
-    }
-
-    const p = PLANS[planKey];
-    if (!p) throw new Error(`Unknown billing plan: ${String(planKey)}`);
-
-    const used = Number(billing.includedSecondsUsed || 0);
-    const isIncluded = used < Number(p.includedAttempts || 0);
-
-    await tx.shopBilling.update({
-      where: { shop },
-      data: { includedSecondsUsed: used + 1 },
-    });
-
-    const amountCents = isIncluded ? 0 : eurToCents(p.overageEURPerAttempt);
-    let usageRecordId: string | null = null;
-
-    if (amountCents > 0) {
-      if (!billing.usageLineItemId) throw new Error("No usage line item after sync");
-      const m = `#graphql
-mutation UsageCharge(
-  $description: String!
-  $price: MoneyInput!
-  $subscriptionLineItemId: ID!
-  $idempotencyKey: String
-) {
-  appUsageRecordCreate(
-    description: $description
-    price: $price
-    subscriptionLineItemId: $subscriptionLineItemId
-    idempotencyKey: $idempotencyKey
-  ) {
-    userErrors { field message }
-    appUsageRecord { id }
-  }
-}`;
-      const idempotencyKey = idempotencyKeyForCall(callJobId);
-      const json = await graphqlShop(shop, m, {
-        description: `${p.title}: 1 overage call attempt (${callJobId})`,
-        price: { amount: (amountCents / 100).toFixed(2), currencyCode: BILLING_CURRENCY },
-        subscriptionLineItemId: billing.usageLineItemId,
-        idempotencyKey,
-      }, admin);
-      if (json?.errors?.length) throw new Error(json.errors.map((e: any) => e.message).join(" | "));
-      const payload = json?.data?.appUsageRecordCreate;
-      const errs = payload?.userErrors ?? [];
-      if (errs.length) throw new Error(errs.map((e: any) => e.message).join(" | "));
-      usageRecordId = payload?.appUsageRecord?.id ?? null;
-    }
-
-    await tx.callCharge.create({
-      data: {
-        shop,
-        callJobId,
-        connectedSeconds: rawSeconds,
-        minutesBilled: 0,
-        amountCents,
-        currencyCode: BILLING_CURRENCY,
-        usageRecordId,
-        idempotencyKey: idempotencyKeyForCall(callJobId),
-      },
-    });
+    const used = key === "FREE" ? row.freeSecondsUsed : row.includedSecondsUsed;
+    const included = used < PLANS[key].includedAttempts;
+    if (!included && row.extraAttempts <= 0) throw new Error("ATTEMPT_LIMIT_REACHED");
+    const source = included ? (key === "FREE" ? "FREE" : "INCLUDED") : "EXTRA";
+    await tx.shopBilling.update({ where: { shop }, data: source === "FREE"
+      ? { freeSecondsUsed: { increment: 1 } } : source === "INCLUDED"
+      ? { includedSecondsUsed: { increment: 1 } } : { extraAttempts: { decrement: 1 } } });
+    await tx.callCharge.create({ data: { shop, callJobId, connectedSeconds: 0, minutesBilled: 0,
+      amountCents: 0, currencyCode: BILLING_CURRENCY, idempotencyKey: idempotencyKeyForCall(callJobId),
+      attemptSource: source, attemptPeriodEnd: row.currentPeriodEnd } });
   });
 }
 
-function usageTermsForPlan(plan: PlanKey) {
-  const p = PLANS[plan];
-  if (plan === "PAYG") {
-    return `€${p.overageEURPerAttempt.toFixed(2)}/call attempt. One attempt is one outbound call; SMS is included with every attempt. Monthly spending cap applies.`;
+// Only a definitive provider rejection releases a reservation. Ambiguous network errors retain it.
+export async function releaseAttempt(shop: string, callJobId: string) {
+  await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "shop" FROM "ShopBilling" WHERE "shop" = ${shop} FOR UPDATE`;
+    const charge = await tx.callCharge.findUnique({ where: { callJobId } });
+    if (!charge || charge.shop !== shop || charge.attemptSource === "LEGACY") return;
+    const row = await tx.shopBilling.findUniqueOrThrow({ where: { shop } });
+    const sameCycle = row.currentPeriodEnd?.getTime() === charge.attemptPeriodEnd?.getTime();
+    if (charge.attemptSource === "EXTRA") {
+      await tx.shopBilling.update({ where: { shop }, data: { extraAttempts: { increment: 1 } } });
+    } else if (sameCycle) {
+      const field = charge.attemptSource === "FREE" ? "freeSecondsUsed" : "includedSecondsUsed";
+      await tx.shopBilling.update({ where: { shop }, data: { [field]: { decrement: 1 } } });
+    }
+    await tx.callCharge.delete({ where: { callJobId } });
+  });
+}
+
+export async function applyBillingForCall(args: {
+  shop: string; admin?: AdminLike; callJobId: string; connectedSeconds: number; answered: boolean; voicemail?: boolean;
+}) {
+  // Webhook replays update analytics only. No automatic overage charges are created.
+  await db.callCharge.updateMany({ where: { shop: args.shop, callJobId: args.callJobId },
+    data: { connectedSeconds: Math.max(0, Math.floor(Number(args.connectedSeconds) || 0)) } });
+}
+
+export async function createAttemptPurchase(args: { shop: string; admin: AdminLike; returnUrl: string; test: boolean }) {
+  await syncBillingFromShopify(args);
+  const row = await ensureBillingRow(args.shop);
+  if (row.status !== "ACTIVE" || !["STARTER", "PRO", "SCALE"].includes(row.plan)) {
+    throw new Error("Choose a monthly plan before buying extra attempts");
   }
-  return `Includes ${p.includedAttempts} call attempts per billing cycle. Then €${p.overageEURPerAttempt.toFixed(2)}/attempt. SMS is included with every attempt. Usage charges are limited by the approved capped amount.`;
+  const purchase = await db.attemptPurchase.create({ data: { shop: args.shop,
+    attempts: EXTRA_ATTEMPT_PACK.attempts, amountCents: eurToCents(EXTRA_ATTEMPT_PACK.priceEUR), test: args.test } });
+  const returnUrl = new URL(args.returnUrl);
+  returnUrl.searchParams.set("purchase", purchase.id);
+  const json = await graphqlShop(args.shop, `#graphql
+    mutation BuyAttempts($name: String!, $price: MoneyInput!, $returnUrl: URL!, $test: Boolean!) {
+      appPurchaseOneTimeCreate(name: $name, price: $price, returnUrl: $returnUrl, test: $test) {
+        appPurchaseOneTime { id } confirmationUrl userErrors { message }
+      }
+    }`, { name: `CartEcho: ${purchase.attempts} extra attempts`, price: { amount: EXTRA_ATTEMPT_PACK.priceEUR, currencyCode: BILLING_CURRENCY },
+      returnUrl: returnUrl.toString(), test: args.test }, args.admin);
+  const payload = json?.data?.appPurchaseOneTimeCreate;
+  const errors = [...(json?.errors ?? []), ...(payload?.userErrors ?? [])];
+  if (errors.length) throw new Error(errors.map((e: any) => e.message).join(" | "));
+  if (!payload?.appPurchaseOneTime?.id || !payload.confirmationUrl) throw new Error("Purchase confirmation unavailable");
+  await db.attemptPurchase.update({ where: { id: purchase.id }, data: { shopifyPurchaseId: payload.appPurchaseOneTime.id } });
+  return { confirmationUrl: payload.confirmationUrl as string };
+}
+
+export async function confirmAttemptPurchase(shop: string, admin: AdminLike, id: string) {
+  const purchase = await db.attemptPurchase.findFirst({ where: { id, shop } });
+  if (!purchase?.shopifyPurchaseId) throw new Error("Purchase not found");
+  if (purchase.creditedAt) return;
+  const json = await graphqlShop(shop, `#graphql
+    query VerifyAttemptPurchase($id: ID!) {
+      node(id: $id) { ... on AppPurchaseOneTime { id status test price { amount currencyCode } } }
+    }`, { id: purchase.shopifyPurchaseId }, admin);
+  if (json?.errors?.length) throw new Error(json.errors.map((e: any) => e.message).join(" | "));
+  const remote = json?.data?.node;
+  if (remote?.status !== "ACTIVE") throw new Error("Purchase has not been approved; no attempts were added");
+  if (remote.id !== purchase.shopifyPurchaseId || remote.test !== purchase.test || remote.price?.currencyCode !== BILLING_CURRENCY ||
+      eurToCents(Number(remote.price?.amount)) !== purchase.amountCents) throw new Error("Purchase verification failed");
+  await db.$transaction(async (tx) => {
+    const claimed = await tx.attemptPurchase.updateMany({ where: { id, shop, creditedAt: null }, data: { creditedAt: new Date() } });
+    if (claimed.count) await tx.shopBilling.update({ where: { shop }, data: { extraAttempts: { increment: purchase.attempts } } });
+  });
+}
+
+export async function reconcileAttemptPurchases(shop: string, admin: AdminLike) {
+  const pending = await db.attemptPurchase.findMany({ where: { shop, creditedAt: null, shopifyPurchaseId: { not: null } }, orderBy: { createdAt: "desc" }, take: 50 });
+  for (const purchase of pending) {
+    try { await confirmAttemptPurchase(shop, admin, purchase.id); } catch { /* Unapproved purchases grant nothing; retry on next visit. */ }
+  }
 }

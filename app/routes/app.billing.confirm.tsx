@@ -3,7 +3,7 @@ import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
 import { authenticate } from "../shopify.server";
-import { syncBillingFromShopify } from "../lib/billing.server";
+import { syncBillingFromShopify, confirmAttemptPurchase } from "../lib/billing.server";
 
 function requiredEnv(name: string) {
   const v = process.env[name];
@@ -46,6 +46,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const shop = session.shop;
 
   try {
+    const purchase = new URL(request.url).searchParams.get("purchase");
+    if (purchase) await confirmAttemptPurchase(shop, admin, purchase);
     await syncBillingFromShopify({ shop, admin });
 
     return new Response(null, {
