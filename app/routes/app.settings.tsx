@@ -812,7 +812,7 @@ const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTempla
               <Card>
                 <BlockStack gap="300">
                   <Text as="h2" variant="headingMd">
-                    Brevo SMS sender (per shop)
+                    SMS sender
                   </Text>
 
                   <FormLayout>
@@ -828,7 +828,7 @@ const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTempla
                   </FormLayout>
 
                   <Text as="p" variant="bodySm" tone="subdued">
-                    If empty, the server falls back to ENV sender (if configured).
+                    If empty, the sender will be named as "Aterwin".
                   </Text>
                 </BlockStack>
               </Card>
@@ -874,7 +874,7 @@ const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTempla
               <Card>
                 <BlockStack gap="300">
                   <Text as="h2" variant="headingMd">
-                    Custom merchant prompt
+                    Custom prompt
                   </Text>
 
                   <FormLayout>
