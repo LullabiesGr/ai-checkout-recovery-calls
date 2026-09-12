@@ -42,7 +42,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   if (shop !== PLATFORM_ADMIN_SHOP) throw new Response("Not Found", { status: 404 });
 
-  return { viewerShop: shop, viewerEmail: session.email ?? null };
+  return { viewerShop: shop, viewerEmail: session.onlineAccessInfo?.associated_user?.email ?? null };
 }
 
 async function readJsonSafe<T = any>(res: Response): Promise<T | null> {
@@ -161,23 +161,9 @@ export default function AdminSupportInbox() {
 
     const channel = sb.channel("support-admin-global");
 
-    channel.on("broadcast", { event: "support:new_message" }, (payload) => {
-      const p = (payload as any)?.payload;
-      if (!p?.threadId || !p?.message) return;
-
+    channel.on("broadcast", { event: "support:new_message" }, () => {
       void loadThreads();
-
-      setMessages((prev) => {
-        if (!active?.id) return prev;
-        if (active.id !== p.threadId) return prev;
-
-        const current = prev ?? [];
-        if (current.some((m) => m.id === p.message.id)) return current;
-
-        const next = [...current, p.message];
-        requestAnimationFrame(() => scrollToBottom());
-        return next;
-      });
+      if (active?.id) void loadThread(active.id);
     });
 
     channel.subscribe();
@@ -185,7 +171,7 @@ export default function AdminSupportInbox() {
     return () => {
       sb.removeChannel(channel);
     };
-  }, [mounted, active?.id, loadThreads, scrollToBottom]);
+  }, [mounted, active?.id, loadThreads, loadThread]);
 
   const send = React.useCallback(async () => {
     if (!active?.id) return;
@@ -275,7 +261,7 @@ export default function AdminSupportInbox() {
                       {t.shop}
                     </Text>
                     {t.unread_by_admin > 0 ? (
-                      <Badge tone="attention">{t.unread_by_admin}</Badge>
+                      <Badge tone="attention">{String(t.unread_by_admin)}</Badge>
                     ) : (
                       <Badge>{t.status}</Badge>
                     )}

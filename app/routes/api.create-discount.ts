@@ -9,7 +9,7 @@ function requiredEnv(name: string) {
   return v;
 }
 
-const SHOPIFY_ADMIN_API_VERSION = process.env.SHOPIFY_ADMIN_API_VERSION ?? "2025-07";
+const SHOPIFY_ADMIN_API_VERSION = process.env.SHOPIFY_ADMIN_API_VERSION ?? "2026-04";
 
 async function getOfflineAccessToken(shop: string): Promise<string> {
   const sessions = await sessionStorage.findSessionsByShop(shop);

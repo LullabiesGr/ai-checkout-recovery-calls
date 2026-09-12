@@ -27,14 +27,14 @@ export async function action({ request }: ActionFunctionArgs) {
     const threadId = String(payload?.threadId ?? "").trim();
     const body = String(payload?.body ?? "").trim();
 
-    if (!threadId || !body) {
+    if (!threadId || !body || body.length > 5000) {
       return jsonResponse({ ok: false, error: "Missing threadId or body" }, { status: 400 });
     }
 
     const message = await insertMessage({
       threadId,
       role: "admin",
-      name: session.email ?? "admin",
+      name: session.onlineAccessInfo?.associated_user?.email ?? "admin",
       body,
     });
 
@@ -50,13 +50,13 @@ export async function action({ request }: ActionFunctionArgs) {
       await sb.channel(supportChannelForShop(shop)).send({
         type: "broadcast",
         event: "support:new_message",
-        payload: { threadId, message, shop },
+        payload: { changed: true },
       });
 
       await sb.channel("support-admin-global").send({
         type: "broadcast",
         event: "support:new_message",
-        payload: { threadId, message, shop },
+        payload: { changed: true },
       });
     } catch (e) {
       console.error("[api.admin.support.message] broadcast skipped", e);

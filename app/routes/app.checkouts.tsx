@@ -565,16 +565,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     if (callJobIds.length) orParts.push(`call_job_id.in.(${callJobIds.join(",")})`);
     if (checkoutIds.length) orParts.push(`checkout_id.in.(${checkoutIds.join(",")})`);
 
-    function makeParams(select: string, includeShopFilter: boolean) {
+    function makeParams(select: string) {
       const p = new URLSearchParams();
       p.set("select", select);
       p.set("or", `(${orParts.join(",")})`);
       p.set("order", "last_received_at.desc,received_at.desc");
-      if (includeShopFilter) p.set("shop", `eq.${opts.shop}`);
+      p.set("shop", `eq.${opts.shop}`);
       return p;
     }
 
     async function doFetch(p: URLSearchParams) {
+      if (!url || !key) return { ok: false as const, status: 503, text: "Summary service unavailable" };
       const endpoint = `${url}/rest/v1/vapi_call_summaries?${p.toString()}`;
       const r = await fetch(endpoint, {
         method: "GET",
@@ -597,12 +598,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     async function fetchWithSelect(selectFields: string[]) {
       const select = selectFields.join(",");
-      const withShop = makeParams(select, true);
-      const withoutShop = makeParams(select, false);
-
-      let res = await doFetch(withShop);
-      if (res.ok && res.data.length === 0) res = await doFetch(withoutShop);
-      return res;
+      return doFetch(makeParams(select));
     }
 
     let res = await fetchWithSelect(extendedSelectFields);

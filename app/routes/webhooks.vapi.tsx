@@ -449,6 +449,9 @@ export async function action({ request }: ActionFunctionArgs) {
     return new Response("OK", { status: 200 });
   }
 
+  const existingPrivacyJob = await db.callJob.findFirst({ where: { id: callJobId, shop }, select: { outcome: true } });
+  if (!existingPrivacyJob || existingPrivacyJob.outcome === "PRIVACY_ERASURE_PENDING") return new Response("OK", { status: 200 });
+
   /* =========================
      tool-calls handler (shared)
      ========================= */

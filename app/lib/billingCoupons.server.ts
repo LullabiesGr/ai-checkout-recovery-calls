@@ -26,20 +26,20 @@ export async function validateBillingCoupon(args: {
   const row = await db.billingCoupon.findUnique({ where: { code: couponCode } });
   if (!row) throw new Error("Invalid coupon code");
 
-  if (!row.isActive) throw new Error("Coupon is not active");
+  if (!row.active) throw new Error("Coupon is not active");
 
   const now = new Date();
   if (row.startsAt && now < row.startsAt) throw new Error("Coupon is not active yet");
   if (row.endsAt && now > row.endsAt) throw new Error("Coupon has expired");
 
-  if (row.plans) {
-    const allowed = Array.isArray(row.plans) ? row.plans : [];
+  if (row.appliesToPlans) {
+    const allowed = Array.isArray(row.appliesToPlans) ? row.appliesToPlans : [];
     if (allowed.length && !allowed.includes(args.plan)) {
       throw new Error("Coupon is not valid for this plan");
     }
   }
 
-  const percent = Number(row.percentOff);
+  const percent = Number(row.percentage) * 100;
   if (!Number.isFinite(percent) || percent <= 0 || percent > 100) {
     throw new Error("Coupon misconfigured (percentOff)");
   }

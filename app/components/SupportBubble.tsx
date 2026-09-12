@@ -108,10 +108,8 @@ export function SupportBubble({ shop }: { shop: string }) {
         const channelName = String(payload?.channel ?? "").trim();
         if (!channelName) return;
         const ch = sb.channel(channelName);
-        ch.on("broadcast", { event: "support:new_message" }, (payload) => {
-          if (!active) return;
-          const message = (payload as any)?.payload?.message as Msg | undefined;
-          if (message?.id) appendMessage(message);
+        ch.on("broadcast", { event: "support:new_message" }, () => {
+          if (active) void load();
         });
         ch.subscribe();
         cleanup = () => void sb.removeChannel(ch);
@@ -124,7 +122,7 @@ export function SupportBubble({ shop }: { shop: string }) {
       active = false;
       cleanup?.();
     };
-  }, [open, appendMessage]);
+  }, [open, load]);
 
   const send = React.useCallback(async () => {
     const body = draft.trim();

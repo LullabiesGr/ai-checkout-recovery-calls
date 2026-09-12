@@ -108,6 +108,7 @@ export async function fetchSupabaseSummaries(opts: {
   withShopParams.set("shop", `eq.${shop}`);
 
   async function doFetch(p: URLSearchParams) {
+    if (!url || !key) return [];
     const endpoint = `${url}/rest/v1/vapi_call_summaries?${p.toString()}`;
     const r = await fetch(endpoint, {
       method: "GET",
@@ -127,8 +128,7 @@ export async function fetchSupabaseSummaries(opts: {
     return Array.isArray(data) ? data : [];
   }
 
-  let data = await doFetch(withShopParams);
-  if (data && data.length === 0) data = await doFetch(params);
+  const data = await doFetch(withShopParams);
 
   for (const row of data || []) {
     if (!row) continue;

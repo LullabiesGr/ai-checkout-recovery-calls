@@ -27,7 +27,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const bodyJson = (await request.json().catch(() => null)) as { body?: string } | null;
     const body = String(bodyJson?.body ?? "").trim();
 
-    if (!body) {
+    if (!body || body.length > 5000) {
       return jsonResponse({ ok: false, error: "Empty message" }, { status: 400 });
     }
 
@@ -36,7 +36,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const message = await insertMessage({
       threadId: thread.id,
       role: "merchant",
-      name: session.email ?? shop,
+      name: session.onlineAccessInfo?.associated_user?.email ?? shop,
       body,
     });
 
@@ -49,13 +49,13 @@ export async function action({ request }: ActionFunctionArgs) {
       await sb.channel(supportChannelForShop(shop)).send({
         type: "broadcast",
         event: "support:new_message",
-        payload: { threadId: thread.id, message, shop },
+        payload: { changed: true },
       });
 
       await sb.channel("support-admin-global").send({
         type: "broadcast",
         event: "support:new_message",
-        payload: { threadId: thread.id, message, shop },
+        payload: { changed: true },
       });
     } catch (e) {
       console.error("[api.support.message] broadcast skipped", e);

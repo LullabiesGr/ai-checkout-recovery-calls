@@ -1,3 +1,4 @@
+import { isPrivacySuppressed } from "../lib/privacy.server";
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -18,6 +19,7 @@ export async function action({ request }: ActionFunctionArgs) {
   if (topic !== "ORDERS_CREATE") return new Response("Ignored", { status: 200 });
 
   const o = payload as any;
+  if (!await db.session.count({ where: { shop } }) || await isPrivacySuppressed(shop, o, "order")) return new Response("Ignored", { status: 200 });
 
   const orderId = clean(o?.id);
   if (!orderId) return new Response("Invalid payload", { status: 200 });

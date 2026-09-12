@@ -7,7 +7,7 @@ type AdminLike = {
   graphql: (query: string, options?: any) => Promise<any>;
 };
 
-const API_VERSION = process.env.SHOPIFY_API_VERSION ?? "2025-07";
+const API_VERSION = process.env.SHOPIFY_API_VERSION ?? "2026-04";
 
 function eurToCents(eur: number) {
   return Math.round(eur * 100);

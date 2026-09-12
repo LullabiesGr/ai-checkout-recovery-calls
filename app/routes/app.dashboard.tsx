@@ -739,7 +739,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   ];
 
   const customerByCheckoutId = new Map(
-    recentCheckouts.map((c) => [String(c.checkoutId), String(c.customerName ?? "").trim()]).filter(([, name]) => Boolean(name)),
+    recentCheckouts.map((c) => [String(c.checkoutId), String(c.customerName ?? "").trim()] as const).filter(([, name]) => Boolean(name)),
   );
 
   const shortCheckout = (id: string) => {
@@ -986,7 +986,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       : { show: false as const };
 
   const blockersTotal = totalCalls7d;
-  const blockers = [
+  const blockers: DashboardViewProps["blockers"]["rows"] = [
     {
       key: "no_answer",
       label: "No answer",
