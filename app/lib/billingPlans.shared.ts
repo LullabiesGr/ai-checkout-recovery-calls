@@ -35,7 +35,7 @@ export const PLANS: Record<
     key: "SCALE",
     title: "Scale",
     recurringMonthlyEUR: 99,
-    includedAttempts: 400,
+    includedAttempts: 250,
   },
   PAYG: {
     key: "PAYG",

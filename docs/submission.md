@@ -51,7 +51,7 @@ Set the listing name to **CartEcho** and use actual current screenshots. Pricing
 | Free | €0 | 10 |
 | Starter | €19 | 30 |
 | Pro | €49 | 120 |
-| Scale | €99 | 400 |
+| Scale | €99 | 250 |
 
 Additional-charge description: **Optional one-time purchase: 25 extra call attempts for €20 (€0.80 per attempt). SMS included. Unused extra attempts carry over. No automatic overage charges.**
 
