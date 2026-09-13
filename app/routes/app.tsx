@@ -106,7 +106,6 @@ export default function App() {
         <a href={href("/app/calls")}>Calls</a>
         <a href={href("/app/settings")}>Automation</a>
         <a href={href("/app/billing")}>Billing</a>
-        <a href={href("/app/privacy")}>Privacy requests</a>
         {showAdminInbox ? <a href={href("/app/admin/privacy")}>Privacy & public support</a> : null}
         {showAdminInbox ? <a href={href("/app/admin/support")}>Support Inbox</a> : null}
       </ui-nav-menu>
