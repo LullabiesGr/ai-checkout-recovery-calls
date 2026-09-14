@@ -4,20 +4,76 @@ export function objectData(value: any): any {
   try { return JSON.parse(value); } catch { return {}; }
 }
 const text = (value: any) => typeof value === "string" ? value.trim() : "";
-export function checkoutName(value: any): string | null {
-  const c = objectData(value);
-  for (const a of [c.shipping_address, c.shippingAddress, c.billing_address, c.billingAddress, c.customer, c.customer?.default_address, c.customer?.defaultAddress]) {
-    if (!a) continue;
-    const name = [text(a.first_name) || text(a.firstName), text(a.last_name) || text(a.lastName)].filter(Boolean).join(" ");
-    if (name) return name;
-    const full = text(a.name) || text(a.displayName);
+
+function personName(value: any, allowFullName = true): string | null {
+  if (!value || typeof value !== "object") return null;
+
+  const first = text(value.first_name) || text(value.firstName);
+  const last = text(value.last_name) || text(value.lastName);
+  const parts = [first, last].filter(Boolean).join(" ").trim();
+  if (parts) return parts;
+
+  if (allowFullName) {
+    const full = text(value.name) || text(value.displayName) || text(value.fullName);
+    // Shopify sometimes returns a blank default-address name as " ". text() removes that.
     if (full) return full;
   }
+
   return null;
 }
+
+export function checkoutName(value: any): string | null {
+  const c = objectData(value);
+
+  // Prefer the name the shopper entered for delivery/shipping over the account profile.
+  // Shopify uses different field names between REST checkout webhooks, Admin GraphQL,
+  // newer checkout shapes and customer/default-address snapshots.
+  const candidates = [
+    c.shipping_address,
+    c.shippingAddress,
+    c.delivery_address,
+    c.deliveryAddress,
+    c.billing_address,
+    c.billingAddress,
+    c.customer?.shipping_address,
+    c.customer?.shippingAddress,
+    c.customer?.delivery_address,
+    c.customer?.deliveryAddress,
+    c.customer?.default_address,
+    c.customer?.defaultAddress,
+    c.buyerIdentity?.customer?.defaultAddress,
+    c.buyer_identity?.customer?.default_address,
+    c.customer,
+    c.buyerIdentity?.customer,
+    c.buyer_identity?.customer,
+  ];
+
+  for (const candidate of candidates) {
+    const name = personName(candidate, true);
+    if (name) return name;
+  }
+
+  // Some checkout variants expose first/last name at the checkout root. Do not use
+  // root `name`, because in REST checkout payloads it can be an order-like value (#1234).
+  return personName(c, false);
+}
+
 export function checkoutPhone(value: any): string | null {
   const c = objectData(value);
-  for (const a of [c, c.shipping_address, c.shippingAddress, c.billing_address, c.billingAddress, c.customer, c.customer?.default_address, c.customer?.defaultAddress]) {
+  for (const a of [
+    c,
+    c.shipping_address,
+    c.shippingAddress,
+    c.delivery_address,
+    c.deliveryAddress,
+    c.billing_address,
+    c.billingAddress,
+    c.customer,
+    c.customer?.default_address,
+    c.customer?.defaultAddress,
+    c.buyerIdentity?.customer,
+    c.buyer_identity?.customer,
+  ]) {
     const phone = text(a?.phone) || text(a?.defaultPhoneNumber?.phoneNumber);
     if (phone) return phone;
   }
