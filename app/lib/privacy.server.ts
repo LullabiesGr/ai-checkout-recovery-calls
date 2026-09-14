@@ -92,7 +92,8 @@ export async function processPrivacyRequest(id: string) {
   const now=new Date();
   const initial=await db.privacyRequest.findUniqueOrThrow({where:{id}});
   const claimed=await db.$transaction(async tx=>{
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`privacy:${initial.shop}`}))`;
+    // pg_advisory_xact_lock returns PostgreSQL void. Select a supported integer instead so Prisma can deserialize it.
+    await tx.$queryRaw<Array<{ locked: number }>>`SELECT 1::int AS "locked" FROM pg_advisory_xact_lock(hashtext(${`privacy:${initial.shop}`}))`;
     if(await tx.privacyRequest.findFirst({where:{shop:initial.shop,id:{not:id},status:"PROCESSING",lockedUntil:{gt:now}}}))return {count:0};
     return tx.privacyRequest.updateMany({where:{id,status:{in:["PENDING","FAILED","PROCESSING"]},OR:[{lockedUntil:null},{lockedUntil:{lt:now}}]},
       data:{status:"PROCESSING",lockedUntil:new Date(Date.now()+10*60*1000),attempts:{increment:1},error:null}});
