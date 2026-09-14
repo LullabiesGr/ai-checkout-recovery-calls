@@ -1,18 +1,39 @@
 // app/lib/billing.server.ts
 import db from "../db.server";
-import { sessionStorage } from "../shopify.server";
+import { unauthenticated } from "../shopify.server";
 import { BILLING_CURRENCY, PLANS, type PlanKey, isPlanKey, EXTRA_ATTEMPT_PACK } from "./billingPlans.server";
 
 type AdminLike = {
   graphql: (query: string, options?: any) => Promise<any>;
 };
 
-const API_VERSION = process.env.SHOPIFY_API_VERSION ?? "2026-04";
+function graphqlErrorMessages(value: unknown): string[] {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value
+      .map((entry: any) => String(entry?.message ?? entry ?? "").trim())
+      .filter(Boolean);
+  }
+  if (typeof value === "object") {
+    const direct = String((value as any)?.message ?? "").trim();
+    if (direct) return [direct];
+    try {
+      return [JSON.stringify(value)];
+    } catch {
+      return [String(value)];
+    }
+  }
+  return [String(value).trim()].filter(Boolean);
+}
+
+function throwGraphqlErrors(json: any) {
+  const errors = graphqlErrorMessages(json?.errors);
+  if (errors.length) throw new Error(errors.join(" | "));
+}
 
 function eurToCents(eur: number) {
   return Math.round(eur * 100);
 }
-
 
 function idempotencyKeyForCall(callJobId: string) {
   return (`call_${callJobId}`).slice(0, 255);
@@ -76,28 +97,11 @@ function pickCurrentSubscription(subs: any[]) {
 }
 
 async function graphqlShop(shop: string, query: string, variables: any, admin?: AdminLike) {
-  if (admin) {
-    const resp = await admin.graphql(query, { variables });
-    if (resp && typeof resp.json === "function") return await resp.json();
-    return resp;
-  }
-
-  const sessionId = `offline_${shop}`;
-  const session: any = await sessionStorage.loadSession(sessionId);
-  const token = session?.accessToken;
-  if (!token) throw new Error(`Missing offline session for ${shop}`);
-
-  const url = `https://${shop}/admin/api/${API_VERSION}/graphql.json`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Access-Token": token,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-
-  return await resp.json();
+  const client = admin ?? (await unauthenticated.admin(shop)).admin;
+  const resp = await client.graphql(query, { variables });
+  const json = resp && typeof resp.json === "function" ? await resp.json() : resp;
+  throwGraphqlErrors(json);
+  return json;
 }
 
 export async function ensureBillingRow(shop: string) {
@@ -202,9 +206,7 @@ query BillingState {
 }`;
 
   const json = await graphqlShop(shop, q, {}, admin);
-  if (json?.errors?.length) {
-    throw new Error(json.errors.map((e: any) => e.message).join(" | "));
-  }
+  throwGraphqlErrors(json);
 
   const subs = json?.data?.currentAppInstallation?.activeSubscriptions ?? [];
   const ours = pickCurrentSubscription(subs);
@@ -410,14 +412,12 @@ mutation AppSubscriptionCreate(
   };
 
   const json = await graphqlShop(shop, m, vars, admin);
-  if (json?.errors?.length) {
-    throw new Error(json.errors.map((e: any) => e.message).join(" | "));
-  }
+  throwGraphqlErrors(json);
 
   const payload = json?.data?.appSubscriptionCreate;
-  const errs = payload?.userErrors ?? [];
+  const errs = graphqlErrorMessages(payload?.userErrors);
   if (errs.length) {
-    throw new Error(errs.map((e: any) => e.message).join(" | "));
+    throw new Error(errs.join(" | "));
   }
 
   await db.shopBilling.update({
@@ -467,14 +467,12 @@ mutation CancelSub($id: ID!, $prorate: Boolean) {
 }`;
 
   const json = await graphqlShop(shop, m, { id: billing.subscriptionId, prorate: !!prorate }, admin);
-  if (json?.errors?.length) {
-    throw new Error(json.errors.map((e: any) => e.message).join(" | "));
-  }
+  throwGraphqlErrors(json);
 
   const payload = json?.data?.appSubscriptionCancel;
-  const errs = payload?.userErrors ?? [];
+  const errs = graphqlErrorMessages(payload?.userErrors);
   if (errs.length) {
-    throw new Error(errs.map((e: any) => e.message).join(" | "));
+    throw new Error(errs.join(" | "));
   }
 
   try {
@@ -510,7 +508,7 @@ export async function getAttemptAvailability(shop: string) {
 }
 
 export async function reserveAttempt(shop: string, callJobId: string) {
-  // Refresh subscription status and billing-cycle allowance using the shop's offline session.
+  // Refresh subscription status and billing-cycle allowance using Shopify's background Admin client.
   await syncBillingFromShopify({ shop });
   return db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT "shop" FROM "ShopBilling" WHERE "shop" = ${shop} FOR UPDATE`;
@@ -580,8 +578,11 @@ export async function createAttemptPurchase(args: { shop: string; admin: AdminLi
     }`, { name: `CartEcho: ${purchase.attempts} extra attempts`, price: { amount: EXTRA_ATTEMPT_PACK.priceEUR, currencyCode: BILLING_CURRENCY },
       returnUrl: returnUrl.toString(), test: args.test }, args.admin);
   const payload = json?.data?.appPurchaseOneTimeCreate;
-  const errors = [...(json?.errors ?? []), ...(payload?.userErrors ?? [])];
-  if (errors.length) throw new Error(errors.map((e: any) => e.message).join(" | "));
+  const errors = [
+    ...graphqlErrorMessages(json?.errors),
+    ...graphqlErrorMessages(payload?.userErrors),
+  ];
+  if (errors.length) throw new Error(errors.join(" | "));
   if (!payload?.appPurchaseOneTime?.id || !payload.confirmationUrl) throw new Error("Purchase confirmation unavailable");
   await db.attemptPurchase.update({ where: { id: purchase.id }, data: { shopifyPurchaseId: payload.appPurchaseOneTime.id } });
   return { confirmationUrl: payload.confirmationUrl as string };
@@ -595,7 +596,7 @@ export async function confirmAttemptPurchase(shop: string, admin: AdminLike, id:
     query VerifyAttemptPurchase($id: ID!) {
       node(id: $id) { ... on AppPurchaseOneTime { id status test price { amount currencyCode } } }
     }`, { id: purchase.shopifyPurchaseId }, admin);
-  if (json?.errors?.length) throw new Error(json.errors.map((e: any) => e.message).join(" | "));
+  throwGraphqlErrors(json);
   const remote = json?.data?.node;
   if (remote?.status !== "ACTIVE") throw new Error("Purchase has not been approved; no attempts were added");
   if (remote.id !== purchase.shopifyPurchaseId || remote.test !== purchase.test || remote.price?.currencyCode !== BILLING_CURRENCY ||
