@@ -121,7 +121,7 @@ export async function action({ request }: ActionFunctionArgs) {
       if (["ATTEMPT_LIMIT_REACHED", "ACTIVE_SUBSCRIPTION_REQUIRED", "MONTHLY_PLAN_REQUIRED"].includes(String(e?.message))) {
         await db.callJob.update({ where: { id: job.id }, data: {
           status: "QUEUED", scheduledFor: new Date(Date.now() + 15 * 60 * 1000),
-          attempts: { decrement: 1 }, outcome: "WAITING_FOR_ATTEMPTS_OR_PLAN",
+          attempts: { decrement: 1 }, outcome: String(e.message),
         } });
         continue;
       }

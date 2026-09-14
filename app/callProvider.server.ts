@@ -2242,6 +2242,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       },
 
       assistant: {
+        voicemailDetection: { provider: "vapi" },
         transcriber: {
           provider: "deepgram",
           model: "nova-3",

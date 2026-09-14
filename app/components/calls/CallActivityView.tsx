@@ -23,6 +23,8 @@ export type CallActivityRow = {
   id: string;
   checkoutId: string;
   status: string;
+  statusLabel?: string;
+  waitingReason?: string | null;
   scheduledFor: string;
   createdAt: string;
   attempts: number;
@@ -245,8 +247,8 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
                   </IndexTable.Cell>
                   <IndexTable.Cell>
                     <BlockStack gap="100">
-                      <div><Badge tone={statusTone(r.status)}>{outcomeLabel(r.status)}</Badge></div>
-                      <Text as="span" variant="bodySm" tone="subdued">{outcomeLabel(r.openaiOutcome || r.callOutcome)}</Text>
+                      <div><Badge tone={statusTone(r.status)}>{outcomeLabel(r.statusLabel || r.status)}</Badge></div>
+                      <Text as="span" variant="bodySm" tone="subdued">{r.waitingReason || outcomeLabel(r.openaiOutcome || r.callOutcome)}</Text>
                     </BlockStack>
                   </IndexTable.Cell>
                   <IndexTable.Cell>
@@ -274,7 +276,8 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
               <BlockStack gap="400">
                 <InlineStack align="space-between" blockAlign="center">
                   <Text as="h2" variant="headingMd">Customer & checkout</Text>
-                  <Badge tone={statusTone(selected.status)}>{s(selected.status).toUpperCase()}</Badge>
+                  <Badge tone={statusTone(selected.status)}>{selected.statusLabel || s(selected.status).toUpperCase()}</Badge>
+                  {selected.waitingReason ? <Text as="p">{selected.waitingReason}</Text> : null}
                 </InlineStack>
                 <BlockStack gap="050">
                   <Text as="p" variant="headingSm">{selected.customerName || "Guest customer"}</Text>

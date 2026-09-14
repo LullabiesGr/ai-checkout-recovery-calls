@@ -1,3 +1,5 @@
+import { checkoutName, unansweredCall, waitingReason } from "../lib/checkoutData.shared";
+import { getAttemptAvailability } from "../lib/billing.server";
 import { conversationText, recoveryOutcome } from "../lib/conversation.shared";
 // app/routes/app.calls.tsx
 import * as React from "react";
@@ -149,9 +151,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         recordingUrl: true,
         analysisJson: true,
         transcript: true,
+        endedReason: true,
+        outcome: true,
       },
     }),
   ]);
+
+  const allowance = await getAttemptAvailability(shop);
 
   const providerConfigured =
     Boolean(process.env.VAPI_API_KEY?.trim()) &&
@@ -166,7 +172,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     checkoutIds.length
       ? db.checkout.findMany({
           where: { shop, checkoutId: { in: checkoutIds } },
-          select: { checkoutId: true, customerName: true, phone: true, email: true, value: true, currency: true, itemsJson: true },
+          select: { checkoutId: true, customerName: true, phone: true, email: true, value: true, currency: true, itemsJson: true, raw: true },
         })
       : Promise.resolve([]),
     checkoutIds.length
@@ -210,20 +216,22 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       id: String(j.id),
       checkoutId: String(j.checkoutId),
       status: String(j.status),
+      statusLabel: j.status === "COMPLETED" && unansweredCall(j, sb) ? "No answer" : String(j.status),
+      waitingReason: j.status === "QUEUED" ? (!settings.enabled ? "Automation is paused." : !allowance.allowed ? "No attempts available — check your plan or buy extra attempts." : waitingReason(j.outcome)) : null,
       scheduledFor: new Date(j.scheduledFor).toISOString(),
       createdAt: new Date(j.createdAt).toISOString(),
       attempts: Number(j.attempts ?? 0),
       providerCallId: j.providerCallId ? String(j.providerCallId) : null,
-      callOutcome: recoveryOutcome(sb?.call_outcome, !!recoveredOrder),
+      callOutcome: unansweredCall(j, sb) ? "no_answer" : recoveryOutcome(sb?.call_outcome, !!recoveredOrder),
       aiStatus: sb?.ai_status ? String(sb.ai_status) : null,
       summary: safeStr((sb as any)?.summary_clean || (sb as any)?.summary).trim() || null,
       nextAction: safeStr((sb as any)?.next_best_action || (sb as any)?.best_next_action).trim() || null,
       followUp: safeStr((sb as any)?.follow_up_message).trim() || null,
       recordingUrl: (pickRecordingUrl(sb as any) ?? (j.recordingUrl ? String(j.recordingUrl) : null)) ?? null,
-      openaiOutcome: recoveryOutcome(openaiOutcome, !!recoveredOrder),
+      openaiOutcome: unansweredCall(j, sb) ? "no_answer" : recoveryOutcome(openaiOutcome, !!recoveredOrder),
       transcript: conversationText(j.transcript, sb, j.analysisJson),
       sentSystemPrompt,
-      customerName: checkout?.customerName ?? null,
+      customerName: checkout?.customerName || checkoutName(checkout?.raw),
       phone: checkout?.phone ?? null,
       email: checkout?.email ?? null,
       cartTotal: Number(checkout?.value ?? 0),
@@ -284,7 +292,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (!providerOk) {
         await db.callJob.update({
           where: { id: job.id },
-          data: { status: "COMPLETED", outcome: `SIMULATED_CALL_OK phone=${(job as any).phone}` },
+          data: { status: "QUEUED", attempts: { decrement: 1 }, outcome: "Missing call provider configuration" },
         });
         continue;
       }
@@ -293,6 +301,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         await createVapiCallForJob({ shop, callJobId: job.id });
         await db.callJob.update({ where: { id: job.id }, data: { status: "CALLING", outcome: "CALL_STARTED" } });
       } catch (e: any) {
+        if (["ATTEMPT_LIMIT_REACHED", "ACTIVE_SUBSCRIPTION_REQUIRED", "MONTHLY_PLAN_REQUIRED"].includes(String(e?.message))) {
+          await db.callJob.updateMany({ where: { id: job.id, shop }, data: { status: "QUEUED", attempts: { decrement: 1 }, scheduledFor: new Date(Date.now() + 15 * 60 * 1000), outcome: String(e.message) } });
+          continue;
+        }
         const maxAttempts = settings.maxAttempts ?? 2;
         const fresh = await db.callJob.findUnique({ where: { id: job.id }, select: { attempts: true } });
         const attemptsAfter = Number(fresh?.attempts ?? 0);
@@ -345,6 +357,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         data: { status: "CALLING", outcome: "CALL_STARTED" },
       });
     } catch (e: any) {
+      if (["ATTEMPT_LIMIT_REACHED", "ACTIVE_SUBSCRIPTION_REQUIRED", "MONTHLY_PLAN_REQUIRED"].includes(String(e?.message))) {
+        await db.callJob.updateMany({ where: { id: callJobId, shop }, data: { status: "QUEUED", attempts: { decrement: 1 }, scheduledFor: new Date(Date.now() + 15 * 60 * 1000), outcome: String(e.message) } });
+        return { ok: false, error: waitingReason(e.message) };
+      }
       const settings = await ensureSettings(shop);
       const maxAttempts = settings.maxAttempts ?? 2;
 

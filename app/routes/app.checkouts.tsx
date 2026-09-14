@@ -1,6 +1,7 @@
+import { checkoutName, checkoutPhone, checkoutItems, unansweredCall, waitingReason } from "../lib/checkoutData.shared";
 import { recoveryOutcome } from "../lib/conversation.shared";
 import * as React from "react";
-import { Page, Card, Text, BlockStack, InlineGrid, Button, TextField, Pagination } from "@shopify/polaris";
+import { Page, Banner, Card, Text, BlockStack, InlineGrid, Button, TextField, Pagination } from "@shopify/polaris";
 import { DetailDrawer } from "../components/DetailDrawer";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useLocation, useRouteError } from "react-router";
@@ -390,7 +391,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  await syncAbandonedCheckoutsFromShopify({ admin, shop, limit: 100 });
+  const syncResult = await syncAbandonedCheckoutsFromShopify({ admin, shop, limit: 100 });
   const settings: any = await ensureSettings(shop);
   const minOrderValue =
     typeof settings?.minOrderValue === "number"
@@ -416,6 +417,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         value: true,
         currency: true,
         itemsJson: true,
+        raw: true,
       },
     }),
     db.callJob.findMany({
@@ -432,6 +434,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         providerCallId: true,
         recordingUrl: true,
         analysisJson: true,
+        endedReason: true,
+        outcome: true,
       },
     }),
   ]);
@@ -706,8 +710,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       createdAt: new Date(c.createdAt).toISOString(),
       updatedAt: new Date(c.updatedAt).toISOString(),
       abandonedAt: c.abandonedAt ? new Date(c.abandonedAt).toISOString() : null,
-      customerName: c.customerName ?? null,
-      phone: c.phone ?? null,
+      customerName: c.customerName || checkoutName(c.raw),
+      phone: c.phone || checkoutPhone(c.raw),
       email: c.email ?? null,
       value: Number(c.value ?? 0),
       currency: String(order?.currency ?? c.currency ?? "USD"),
@@ -725,15 +729,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       eligibleAtRisk,
 
       callStatus: j ? String(j.status) : null,
-      callOutcome: recoveryOutcome(sb?.call_outcome, !!recoveredOrderId),
+      callOutcome: unansweredCall(j, sb) ? "no_answer" : recoveryOutcome(sb?.call_outcome, !!recoveredOrderId),
       aiStatus: (sb as any)?.ai_status ? String((sb as any).ai_status) : null,
       buyProbabilityPct,
       recordingUrl,
       logUrl: safeStr((sb as any)?.log_url).trim() ? String((sb as any)?.log_url) : null,
 
-      nextBestAction: safeStr((sb as any)?.next_best_action || (sb as any)?.best_next_action).trim()
+      nextBestAction: j?.status === "QUEUED" && waitingReason(j?.outcome) ? waitingReason(j?.outcome) : safeStr((sb as any)?.next_best_action || (sb as any)?.best_next_action).trim()
         ? String((sb as any)?.next_best_action || (sb as any)?.best_next_action)
-        : null,
+        : (!c.phone && !checkoutPhone(c.raw) ? "A customer phone number is required to place a call." : !settings.enabled ? "Automation is paused." : null),
       followUpMessage: safeStr((sb as any)?.follow_up_message).trim()
         ? String((sb as any)?.follow_up_message)
         : null,
@@ -766,7 +770,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     };
   });
 
-  return { shop, rows } satisfies LoaderData;
+  return { shop, rows, syncError: "error" in syncResult ? syncResult.error : null };
 };
 
 function isRecovered(r: Row) {
@@ -788,7 +792,7 @@ function isFollowUpCandidate(r: Row) {
 
 function isNoAnswerCandidate(r: Row) {
   const n = normalizeOutcome(r.callOutcome);
-  return n === "no_answer" || r.answered === false;
+  return n === "no_answer" || n === "voicemail" || r.voicemail === true || r.answered === false;
 }
 
 function isDiscountCandidate(r: Row) {
@@ -800,7 +804,7 @@ function isDiscountCandidate(r: Row) {
 }
 
 export default function Checkouts() {
-  const { rows } = useLoaderData<typeof loader>();
+  const { rows, syncError } = useLoaderData<typeof loader>();
   const location = useLocation();
 
   const requestedFilter = React.useMemo<FilterKey>(() => {
@@ -848,7 +852,7 @@ export default function Checkouts() {
 
   const counts = React.useMemo(() => {
     const c = {
-      all: baseWorkSorted.length,
+      all: rows.length,
       open: rows.filter((r) => safeStr(r.status).toUpperCase() === "OPEN" && !isRecovered(r)).length,
       abandoned: 0,
       followups: 0,
@@ -890,7 +894,7 @@ export default function Checkouts() {
         return baseWorkSorted.filter(isDiscountCandidate);
       case "all":
       default:
-        return baseWorkSorted;
+        return rows;
     }
   }, [baseWorkSorted, activeFilter, recoveredRows, rows]);
 
@@ -938,6 +942,7 @@ export default function Checkouts() {
   return (
     <>
       <Page fullWidth title="Checkouts" subtitle="Find the next recovery opportunity and follow every customer conversation.">
+        {syncError ? <Banner tone="warning">{syncError}</Banner> : null}
         <InlineGrid columns={{ xs: 1, sm: 3 }} gap="400">
           <Card><BlockStack gap="200"><Text as="h2" variant="headingSm">Recovered revenue</Text><Text as="p" variant="heading2xl">{fmtMoney(recoveredRevenue, currency)}</Text><Text as="p" tone="subdued">{recoveredCount} completed orders</Text></BlockStack></Card>
           <Card><BlockStack gap="200"><Text as="h2" variant="headingSm">Revenue to recover</Text><Text as="p" variant="heading2xl">{fmtMoney(atRiskRevenue, currency)}</Text><Text as="p" tone="subdued">{eligibleAtRiskCount} eligible checkouts</Text></BlockStack></Card>

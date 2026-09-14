@@ -1,3 +1,4 @@
+import { checkoutName, checkoutPhone, unansweredCall } from "../lib/checkoutData.shared";
 import { conversationText, recoveryOutcome } from "../lib/conversation.shared";
 import * as React from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
@@ -241,8 +242,8 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       status: recoveredOrder ? "RECOVERED" : ["RECOVERED", "CONVERTED"].includes(String(checkout.status).toUpperCase()) ? "ABANDONED" : String(checkout.status),
       updatedAt: new Date(checkout.updatedAt).toISOString(),
       abandonedAt: checkout.abandonedAt ? new Date(checkout.abandonedAt).toISOString() : null,
-      customerName: checkout.customerName ?? null,
-      phone: checkout.phone ?? null,
+      customerName: checkout.customerName || checkoutName(checkout.raw),
+      phone: checkout.phone || checkoutPhone(checkout.raw),
       email: checkout.email ?? null,
       value: Number(checkout.value ?? 0),
       currency: String(recoveredOrder?.currency ?? checkout.currency ?? "USD"),

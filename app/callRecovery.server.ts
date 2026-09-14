@@ -1,3 +1,5 @@
+import { isPrivacySuppressed } from "./lib/privacy.server";
+import { checkoutName, checkoutPhone, checkoutItems, objectData, mergeCheckoutItems } from "./lib/checkoutData.shared";
 // app/callRecovery.server.ts
 import db from "./db.server";
 
@@ -80,7 +82,7 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
 
   const query = `
     query AbandonedCheckouts($first: Int!) {
-      abandonedCheckouts(first: $first) {
+      abandonedCheckouts(first: $first, reverse: true) {
         edges {
           node {
             id
@@ -88,22 +90,27 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
             createdAt
             updatedAt
             completedAt
-            email
-            phone
             totalPriceSet {
               shopMoney { amount currencyCode }
             }
             shippingAddress {
+              phone
               firstName
               lastName
               countryCodeV2
               country
             }
             billingAddress {
+              firstName
+              lastName
+              phone
               countryCodeV2
               country
             }
             customer {
+              id
+              email
+              phone
               firstName
               lastName
               defaultAddress {
@@ -132,6 +139,10 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
   try {
     const res = await admin.graphql(query, { variables: { first: limit } });
     const json = typeof (res as any)?.json === "function" ? await (res as any).json() : res;
+    if (json?.errors?.length) {
+      console.error("[CHECKOUT_SYNC] Shopify query failed", { shop, codes: json.errors.map((e: any) => e.extensions?.code || "GRAPHQL_ERROR") });
+      return { synced: 0, error: "Shopify could not supply checkout details. Check protected customer data access and permissions." };
+    }
     const edges = json?.data?.abandonedCheckouts?.edges ?? [];
     if (!Array.isArray(edges)) return { synced: 0 };
 
@@ -139,12 +150,16 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
 
     for (const e of edges) {
       const n = e?.node;
-      const checkoutId = String(n?.id ?? "").trim();
-      if (!checkoutId) continue;
+      const remoteId = String(n?.id ?? "").trim();
+      if (!remoteId || await isPrivacySuppressed(shop, n)) continue;
+      let token: string | null = null;
+      try { token = new URL(n.abandonedCheckoutUrl).pathname.match(/\/checkouts\/(?:cn\/)?([^/]+)/)?.[1] || null; } catch {}
+      const keys = [remoteId, remoteId.split("/").pop()!, token].filter(Boolean) as string[];
+      const existing = await db.checkout.findFirst({ where: { shop, OR: [{ checkoutId: { in: keys } }, ...(token ? [{ token }] : [])] }, orderBy: { createdAt: "asc" } });
+      const checkoutId = existing?.checkoutId || token || remoteId;
 
-      const firstName = String(n?.shippingAddress?.firstName ?? n?.customer?.firstName ?? "").trim();
-      const lastName = String(n?.shippingAddress?.lastName ?? n?.customer?.lastName ?? "").trim();
-      const customerName = `${firstName} ${lastName}`.trim() || null;
+
+      const customerName = checkoutName(n);
 
       const items = (n?.lineItems?.edges ?? [])
         .map((x: any) => x?.node)
@@ -166,7 +181,7 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
       const amount = Number(n?.totalPriceSet?.shopMoney?.amount ?? 0);
       const currency = String(n?.totalPriceSet?.shopMoney?.currencyCode ?? "USD");
       const completedAt = n?.completedAt ? new Date(n.completedAt) : null;
-      const phoneStored = normalizePhoneForStorage(n?.phone);
+      const phoneStored = normalizePhoneForStorage(checkoutPhone(n));
 
       const abandonedAt = completedAt ? null : new Date(n?.updatedAt ?? n?.createdAt ?? Date.now());
 
@@ -175,27 +190,27 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
         create: {
           shop,
           checkoutId,
-          token: null,
-          email: n?.email ?? null,
-          phone: phoneStored,
+          token,
+          email: n?.customer?.email || existing?.email || undefined,
+          phone: phoneStored ?? undefined,
           value: Number.isFinite(amount) ? amount : 0,
           currency,
-          status: completedAt ? "CONVERTED" : "ABANDONED",
+          status: existing?.status === "RECOVERED" ? "RECOVERED" : completedAt ? "CONVERTED" : "ABANDONED",
           abandonedAt,
-          raw: JSON.stringify(n ?? null),
-          customerName,
-          itemsJson,
+          raw: JSON.stringify({ ...objectData(existing?.raw), ...n }),
+          customerName: customerName ?? undefined,
+          itemsJson: mergeCheckoutItems(itemsJson, existing?.itemsJson ?? null),
         },
         update: {
-          email: n?.email ?? null,
-          phone: phoneStored,
+          email: n?.customer?.email || existing?.email || undefined,
+          phone: phoneStored ?? undefined,
           value: Number.isFinite(amount) ? amount : 0,
           currency,
-          status: completedAt ? "CONVERTED" : "ABANDONED",
+          status: existing?.status === "RECOVERED" ? "RECOVERED" : completedAt ? "CONVERTED" : "ABANDONED",
           abandonedAt,
-          raw: JSON.stringify(n ?? null),
-          customerName,
-          itemsJson,
+          raw: JSON.stringify({ ...objectData(existing?.raw), ...n }),
+          customerName: customerName ?? undefined,
+          itemsJson: mergeCheckoutItems(itemsJson, existing?.itemsJson ?? null),
         },
       });
 
@@ -286,6 +301,15 @@ export async function enqueueCallJobs(params: {
   // Stale protection to avoid permanent IN_FLIGHT_EXISTS
   const CALLING_STALE_MINUTES = clamp(Number(process.env.CALLING_STALE_MINUTES ?? 30), 5, 240);
   const QUEUED_STALE_HOURS = clamp(Number(process.env.QUEUED_STALE_HOURS ?? 24), 1, 168);
+
+  const incomplete = await db.checkout.findMany({ where: { shop, status: "ABANDONED", OR: [{ phone: null }, { customerName: null }] }, take: 300 });
+  for (const row of incomplete) {
+    const phone = normalizePhoneForStorage(checkoutPhone(row.raw));
+    const name = checkoutName(row.raw);
+    if ((!row.phone && phone) || (!row.customerName && name)) await db.checkout.update({ where: { id: row.id }, data: {
+      phone: row.phone || phone || undefined, customerName: row.customerName || name || undefined,
+    } });
+  }
 
   const candidates = await db.checkout.findMany({
     where: {

@@ -1,3 +1,4 @@
+import { checkoutName, checkoutPhone, checkoutItems, mergeCheckoutItems } from "../lib/checkoutData.shared";
 import { isPrivacySuppressed } from "../lib/privacy.server";
 import dbPrivacy from "../db.server";
 import type { ActionFunctionArgs } from "react-router";
@@ -78,31 +79,6 @@ function normalizePhoneForStorage(raw: any): string | null {
   return hasPlus ? `+${digits}` : digits;
 }
 
-function buildCustomerName(c: any): string | null {
-  const ship = c?.shipping_address ?? null;
-  const cust = c?.customer ?? null;
-
-  const first = ship?.first_name ?? cust?.first_name ?? "";
-  const last = ship?.last_name ?? cust?.last_name ?? "";
-  const full = `${String(first).trim()} ${String(last).trim()}`.trim();
-  return full ? full : null;
-}
-
-function buildItemsJson(c: any): string | null {
-  const arr = c?.line_items ?? [];
-  if (!Array.isArray(arr) || arr.length === 0) return null;
-
-  const items = arr
-    .map((it: any) => ({
-      title: it?.title ?? it?.name ?? null,
-      quantity: Number(it?.quantity ?? 1),
-      variantTitle: it?.variant_title ?? null,
-    }))
-    .filter((x: any) => x.title);
-
-  return items.length ? JSON.stringify(items) : null;
-}
-
 export async function action({ request }: ActionFunctionArgs) {
   const rawText = await request.clone().text().catch(() => "");
   const rawJson = safeJsonParse(rawText);
@@ -158,17 +134,17 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const token = c?.token ? String(c.token) : null;
   const email = c?.email ? String(c.email) : null;
-  const phone = normalizePhoneForStorage(c?.phone);
+  const phone = normalizePhoneForStorage(checkoutPhone(c));
 
   const completedAt = c?.completed_at ?? c?.completedAt ?? null;
 
-  const customerName = buildCustomerName(c);
-  const itemsJson = buildItemsJson(c);
+  const customerName = checkoutName(c);
+  const itemsJson = checkoutItems(c);
   const { value: parsedValue, currency: parsedCurrency } = extractValueCurrency(c);
 
   const existing = await db.checkout.findUnique({
     where: { shop_checkoutId: { shop, checkoutId } },
-    select: { status: true, abandonedAt: true, value: true, currency: true },
+    select: { status: true, abandonedAt: true, value: true, currency: true, itemsJson: true },
   });
 
   const prevStatus = String(existing?.status ?? "");
@@ -218,15 +194,15 @@ export async function action({ request }: ActionFunctionArgs) {
         raw: JSON.stringify(root ?? null),
       },
       update: {
-        token,
-        email,
-        phone,
+        token: token ?? undefined,
+        email: email ?? undefined,
+        phone: phone ?? undefined,
         value,
         currency,
         status: nextStatus as any,
         abandonedAt: nextAbandonedAt,
-        customerName,
-        itemsJson,
+        customerName: customerName ?? undefined,
+        itemsJson: mergeCheckoutItems(itemsJson, existing?.itemsJson ?? null),
         raw: JSON.stringify(root ?? null),
       },
     });

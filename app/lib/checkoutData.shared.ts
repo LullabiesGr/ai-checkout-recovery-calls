@@ -1,0 +1,65 @@
+// Shared extraction for Shopify REST webhooks and GraphQL snapshots.
+export function objectData(value: any): any {
+  if (typeof value !== "string") return value ?? {};
+  try { return JSON.parse(value); } catch { return {}; }
+}
+const text = (value: any) => typeof value === "string" ? value.trim() : "";
+export function checkoutName(value: any): string | null {
+  const c = objectData(value);
+  for (const a of [c.shipping_address, c.shippingAddress, c.billing_address, c.billingAddress, c.customer, c.customer?.default_address, c.customer?.defaultAddress]) {
+    if (!a) continue;
+    const name = [text(a.first_name) || text(a.firstName), text(a.last_name) || text(a.lastName)].filter(Boolean).join(" ");
+    if (name) return name;
+    const full = text(a.name) || text(a.displayName);
+    if (full) return full;
+  }
+  return null;
+}
+export function checkoutPhone(value: any): string | null {
+  const c = objectData(value);
+  for (const a of [c, c.shipping_address, c.shippingAddress, c.billing_address, c.billingAddress, c.customer, c.customer?.default_address, c.customer?.defaultAddress]) {
+    const phone = text(a?.phone);
+    if (phone) return phone;
+  }
+  return null;
+}
+export function checkoutItems(value: any): string | null {
+  const c = objectData(value);
+  const lines = c.line_items ?? c.lineItems?.edges?.map((x: any) => x.node) ?? [];
+  if (!Array.isArray(lines) || !lines.length) return null;
+  return JSON.stringify(lines.map((it: any) => ({
+    id: it.id, variantId: it.variant_id ?? it.variantId, productId: it.product_id ?? it.productId,
+    title: it.title ?? it.name, quantity: Number(it.quantity ?? 1),
+    variantTitle: it.variant_title ?? it.variantTitle, sku: it.sku,
+    image: text(it.image?.url) || text(it.image?.src) || text(it.image) || text(it.image_url) || text(it.imageUrl) || text(it.variant?.image?.url) || null,
+  })).filter((it: any) => it.title));
+}
+export function unansweredCall(job: any, summary?: any): boolean {
+  const ai = objectData(job?.analysisJson)?.aiAnalysis;
+  const reason = String(job?.endedReason ?? "").toLowerCase();
+  return /voicemail|answering.machine|no.answer|customer.did.not.answer|busy/.test(reason)
+    || summary?.voicemail === true || summary?.answered === false
+    || /^(no_answer|voicemail|busy)$/.test(String(summary?.call_outcome ?? "").toLowerCase())
+    || ai?.answered === false || /voicemail|no_answer|busy/.test(String(ai?.disposition ?? "").toLowerCase());
+}
+export function waitingReason(outcome: any): string | null {
+  const value = String(outcome ?? "");
+  if (/ATTEMPT_LIMIT_REACHED|WAITING_FOR_ATTEMPTS/.test(value)) return "No attempts remaining — buy extra attempts or upgrade your plan.";
+  if (/ACTIVE_SUBSCRIPTION_REQUIRED|MONTHLY_PLAN_REQUIRED/.test(value)) return "An active monthly plan is required.";
+  if (/AUTOMATION_PAUSED/.test(value)) return "Automation is paused.";
+  if (/RETRY_SCHEDULED/.test(value)) return "Waiting for the scheduled retry.";
+  if (/configuration|Missing .*VAPI/i.test(value)) return "Call provider configuration is missing.";
+  return value || null;
+}
+
+export function mergeCheckoutItems(incoming: string | null, previous: string | null): string | undefined {
+  if (!incoming) return previous || undefined;
+  const next = objectData(incoming), old = objectData(previous);
+  if (!Array.isArray(next)) return previous || undefined;
+  return JSON.stringify(next.map((item: any) => {
+    const match = Array.isArray(old) ? old.find((v: any) =>
+      (item.id && v.id === item.id) || (item.variantId && v.variantId === item.variantId) ||
+      (item.title === v.title && item.variantTitle === v.variantTitle)) : null;
+    return { ...item, image: item.image || match?.image || match?.imageUrl || null };
+  }));
+}
