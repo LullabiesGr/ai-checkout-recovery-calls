@@ -18,7 +18,7 @@ export function checkoutName(value: any): string | null {
 export function checkoutPhone(value: any): string | null {
   const c = objectData(value);
   for (const a of [c, c.shipping_address, c.shippingAddress, c.billing_address, c.billingAddress, c.customer, c.customer?.default_address, c.customer?.defaultAddress]) {
-    const phone = text(a?.phone);
+    const phone = text(a?.phone) || text(a?.defaultPhoneNumber?.phoneNumber);
     if (phone) return phone;
   }
   return null;

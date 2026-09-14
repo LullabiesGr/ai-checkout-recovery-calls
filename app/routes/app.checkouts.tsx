@@ -687,7 +687,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const effectiveStatus = recoveredOrderId ? "RECOVERED" : ["RECOVERED", "CONVERTED"].includes(String(c.status).toUpperCase()) ? "ABANDONED" : String(c.status);
     const statusUpper = safeStr(effectiveStatus).toUpperCase();
 
-    const hasContact = !!safeStr(c.phone).trim() || !!safeStr(c.email).trim();
+    const hasContact = !!safeStr(c.phone || checkoutPhone(c.raw)).trim();
     const eligibleAtRisk =
       !recoveredOrderId &&
       statusUpper === "ABANDONED" &&
@@ -787,7 +787,7 @@ type FilterKey = "all" | "open" | "abandoned" | "followups" | "high_intent" | "n
 
 function isFollowUpCandidate(r: Row) {
   const n = normalizeOutcome(r.callOutcome);
-  return n === "needs_followup" || !!safeStr(r.nextBestAction).trim() || !!safeStr(r.followUpMessage).trim();
+  return n === "needs_followup" || (!!r.latestJobId && (!!safeStr(r.nextBestAction).trim() || !!safeStr(r.followUpMessage).trim()));
 }
 
 function isNoAnswerCandidate(r: Row) {

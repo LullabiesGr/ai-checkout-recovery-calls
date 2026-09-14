@@ -48,3 +48,16 @@ test('GraphQL access errors are reported and never treated as successful empty s
  const result=await api.syncAbandonedCheckoutsFromShopify({shop:'second.myshopify.com',admin:{graphql:async()=>({json:async()=>({errors:[{extensions:{code:'ACCESS_DENIED'}}]})})}});
  assert.equal(result.synced,0);assert.match(result.error,/permissions/);
 });
+
+test('checkout layouts resolve contact, delivery, billing and customer profile fields',()=>{
+ const cases=[
+  {payload:{phone:'+306900000000'},phone:'+306900000000'},
+  {payload:{email:'test@example.com',shipping_address:{phone:'+306900000000',first_name:'Test',last_name:'Buyer'}},phone:'+306900000000',name:'Test Buyer'},
+  {payload:{billingAddress:{phone:'+12025550123',firstName:'Digital',lastName:'Buyer'}},phone:'+12025550123',name:'Digital Buyer'},
+  {payload:{customer:{defaultPhoneNumber:{phoneNumber:'+12025550123'},firstName:'Profile'}},phone:'+12025550123',name:'Profile'},
+  {payload:{customer:{defaultAddress:{firstName:'Saved',lastName:'Buyer',phone:'+12025550123'}}},phone:'+12025550123',name:'Saved Buyer'},
+  {payload:{shippingAddress:{lastName:'Buyer',phone:'+12025550123'}},phone:'+12025550123',name:'Buyer'},
+  {payload:{email:'only@example.com'},phone:null},
+ ];
+ for(const item of cases){assert.equal(data.checkoutPhone(item.payload),item.phone);assert.equal(data.checkoutName(item.payload),item.name||null);}
+});

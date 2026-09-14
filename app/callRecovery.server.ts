@@ -109,11 +109,14 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
             }
             customer {
               id
-              email
-              phone
+              defaultEmailAddress { emailAddress }
+              defaultPhoneNumber { phoneNumber }
               firstName
               lastName
               defaultAddress {
+                firstName
+                lastName
+                phone
                 countryCodeV2
                 country
               }
@@ -191,7 +194,7 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
           shop,
           checkoutId,
           token,
-          email: n?.customer?.email || existing?.email || undefined,
+          email: n?.customer?.defaultEmailAddress?.emailAddress || n?.customer?.email || existing?.email || undefined,
           phone: phoneStored ?? undefined,
           value: Number.isFinite(amount) ? amount : 0,
           currency,
@@ -202,7 +205,7 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
           itemsJson: mergeCheckoutItems(itemsJson, existing?.itemsJson ?? null),
         },
         update: {
-          email: n?.customer?.email || existing?.email || undefined,
+          email: n?.customer?.defaultEmailAddress?.emailAddress || n?.customer?.email || existing?.email || undefined,
           phone: phoneStored ?? undefined,
           value: Number.isFinite(amount) ? amount : 0,
           currency,
@@ -219,7 +222,7 @@ export async function syncAbandonedCheckoutsFromShopify(params: {
 
     return { synced };
   } catch {
-    return { synced: 0 };
+    return { synced: 0, error: "Checkout sync could not complete. Please retry; if this persists, contact support." };
   }
 }
 
