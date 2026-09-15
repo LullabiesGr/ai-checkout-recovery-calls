@@ -1,7 +1,7 @@
 // app/routes/app.dashboard.tsx
 import * as React from "react";
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useActionData, useLoaderData, useRouteError } from "react-router";
+import { redirectDocument, useActionData, useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 
@@ -1102,6 +1102,9 @@ export async function action({ request }: ActionFunctionArgs) {
   const intent = String(fd.get("intent") ?? "");
   if (intent === "sync_now") return { ok: true, message: "Dashboard refreshed." };
   if (intent !== "create_test_call") return { ok: false, message: "Unknown action." };
+  // Previously loaded dashboard bundles only submit a phone number. Force a
+  // fresh document with the complete form instead of rejecting missing fields.
+  if (!fd.get("items")) return redirectDocument(`/app/test-call${new URL(request.url).search}`);
   const phone = String(fd.get("phone") ?? "").replace(/[\s()-]/g, "");
   if (!/^\+[1-9]\d{7,14}$/.test(phone)) return { ok: false, message: "Enter your phone number with country code, for example +306900000000." };
   let testCart: ReturnType<typeof parseTestCallInput>;

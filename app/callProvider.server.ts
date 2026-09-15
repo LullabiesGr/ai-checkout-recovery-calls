@@ -1,3 +1,4 @@
+import { callIdentity } from "./lib/callIdentity.shared";
 import { isPrivacySuppressed } from "./lib/privacy.server";
 import { reserveAttempt, releaseAttempt } from "./lib/billing.server";
 import db from "./db.server";
@@ -728,7 +729,7 @@ function fallbackShopDisplayName(shop: string) {
     .join(" ") || "the store";
 }
 
-async function getShopDisplayName(shop: string): Promise<string> {
+export async function getShopDisplayName(shop: string): Promise<string> {
   try {
     const accessToken = await getOfflineAccessToken(shop);
     const out = await shopifyGraphql(shop, accessToken, `query ShopName { shop { name } }`, {});
@@ -2160,6 +2161,9 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
         : `Start the call now in English. Say you are calling from ${shopDisplayName}, mention they almost completed checkout, and ask if they want help finishing the order. If the customer replies in another language, continue entirely in that language.`,
   });
 
+  const identity = callIdentity(shopDisplayName, speakableName);
+  messages.push({ role: "system", content: identity.instruction });
+
   const nextAnalysisJson = mergeAnalysisJson(job.analysisJson ?? null, {
     offer: {
       checkoutLink: compactRecoveryUrl,
@@ -2241,7 +2245,9 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
         name: speakableName ?? undefined,
       },
 
-      assistant: {
+      assistantOverrides: {
+        firstMessage: identity.firstMessage,
+        firstMessageMode: "assistant-speaks-first",
         voicemailDetection: { provider: "vapi" },
         transcriber: {
           provider: "deepgram",
