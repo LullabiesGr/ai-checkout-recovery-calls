@@ -15,6 +15,9 @@ import {
   Page,
   Text,
   TextField,
+  Modal,
+  Select,
+  FormLayout,
 } from "@shopify/polaris";
 
 type BadgeTone = "success" | "info" | "warning" | "critical" | "new";
@@ -189,7 +192,14 @@ function MetricCard({ metric }: { metric: DashboardViewProps["metrics"][number] 
 }
 
 export function DashboardView(props: DashboardViewProps) {
+  const [testOpen, setTestOpen] = useState(false);
   const [testPhone, setTestPhone] = useState("");
+  const [testName, setTestName] = useState("");
+  const [testEmail, setTestEmail] = useState("");
+  const [testCurrency, setTestCurrency] = useState("EUR");
+  const [testItems, setTestItems] = useState([{ title: "", quantity: "1", price: "" }]);
+  const updateItem = (index: number, field: "title" | "quantity" | "price", value: string) => setTestItems(items => items.map((item, i) => i === index ? { ...item, [field]: value } : item));
+  const testTotal = testItems.reduce((total, item) => total + (Number(item.quantity) || 0) * (Number(item.price.replace(",", ".")) || 0), 0);
   const navigation = useNavigation();
   const submitting = navigation.state !== "idle";
   const keyMetricOrder: DashboardViewProps["metrics"][number]["key"][] = [
@@ -263,6 +273,44 @@ export function DashboardView(props: DashboardViewProps) {
       primaryAction={{ content: "View checkouts", url: props.nav.checkoutsHref }}
       secondaryActions={[{ content: "Call activity", url: props.nav.callsHref }]}
     >
+      <Modal open={testOpen} onClose={() => !submitting && setTestOpen(false)} title="Simulate a checkout recovery call">
+        <Modal.Section>
+          <Form method="post">
+            <input type="hidden" name="intent" value="create_test_call" />
+            <input type="hidden" name="testCallId" value={props.testCallId} />
+            <input type="hidden" name="items" value={JSON.stringify(testItems)} />
+            <BlockStack gap="400">
+              <Text as="p">The agent uses your current automation settings and the customer and cart details below. This places a real call to your test number and uses one attempt. It does not create a Shopify order.</Text>
+              {props.actionResult ? <Banner tone={props.actionResult.ok ? "success" : "critical"}><p>{props.actionResult.message}</p></Banner> : null}
+              <FormLayout>
+                <TextField label="Customer name" name="customerName" value={testName} onChange={setTestName} autoComplete="name" requiredIndicator disabled={submitting} />
+                <TextField label="Your test phone number" type="tel" name="phone" value={testPhone} onChange={setTestPhone} autoComplete="tel" placeholder="+306900000000" helpText="Include the country code." requiredIndicator disabled={submitting} />
+                <TextField label="Email (optional)" type="email" name="email" value={testEmail} onChange={setTestEmail} autoComplete="email" disabled={submitting} />
+                <Select label="Currency" name="currency" options={["EUR", "USD", "GBP", "CAD", "AUD"]} value={testCurrency} onChange={setTestCurrency} disabled={submitting} />
+              </FormLayout>
+              <Text as="h3" variant="headingSm">Cart products</Text>
+              {testItems.map((item, index) => <Box key={index} padding="300" background="bg-surface-secondary" borderRadius="200">
+                <BlockStack gap="300">
+                  <TextField label={`Product ${index + 1}`} value={item.title} onChange={value => updateItem(index, "title", value)} autoComplete="off" disabled={submitting} />
+                  <InlineGrid columns={2} gap="300">
+                    <TextField label="Quantity" type="number" min={1} max={1000} value={item.quantity} onChange={value => updateItem(index, "quantity", value)} autoComplete="off" disabled={submitting} />
+                    <TextField label="Unit price" type="number" min={0.01} step={0.01} suffix={testCurrency} value={item.price} onChange={value => updateItem(index, "price", value)} autoComplete="off" disabled={submitting} />
+                  </InlineGrid>
+                  {testItems.length > 1 ? <Button tone="critical" variant="plain" disabled={submitting} onClick={() => setTestItems(items => items.filter((_, i) => i !== index))}>Remove product</Button> : null}
+                </BlockStack>
+              </Box>)}
+              <InlineStack align="space-between" blockAlign="center" gap="300">
+                <Button disabled={submitting || testItems.length >= 10} onClick={() => setTestItems(items => [...items, { title: "", quantity: "1", price: "" }])}>Add product</Button>
+                <Text as="p" fontWeight="semibold">Cart total: {testTotal.toFixed(2)} {testCurrency}</Text>
+              </InlineStack>
+              <InlineStack align="end" gap="200">
+                <Button disabled={submitting} onClick={() => setTestOpen(false)}>Close</Button>
+                <Button submit variant="primary" loading={submitting} disabled={submitting || !testName.trim() || !testPhone.trim()}>Start test call</Button>
+              </InlineStack>
+            </BlockStack>
+          </Form>
+        </Modal.Section>
+      </Modal>
       <BlockStack gap="400">
         {props.actionResult ? <Banner tone={props.actionResult.ok ? "success" : "critical"}><p>{props.actionResult.message}</p></Banner> : null}
         <InlineStack align="space-between" blockAlign="center" gap="300">
@@ -283,19 +331,7 @@ export function DashboardView(props: DashboardViewProps) {
               <input type="hidden" name="intent" value="sync_now" />
               <Button submit>Refresh</Button>
             </Form>
-            {props.canCreateTestCall ? (
-              <Form method="post">
-                <input type="hidden" name="intent" value="create_test_call" />
-                <input type="hidden" name="testCallId" value={props.testCallId} />
-                <BlockStack gap="200">
-                  <InlineStack gap="200" blockAlign="end">
-                    <TextField label="Test phone number" type="tel" name="phone" value={testPhone} onChange={setTestPhone} autoComplete="tel" placeholder="+306900000000" disabled={submitting} />
-                    <Button submit loading={submitting} disabled={submitting || !testPhone.trim()}>Test call</Button>
-                  </InlineStack>
-                  <Text as="p" variant="bodySm" tone="subdued">Calls your number and uses one attempt from your balance.</Text>
-                </BlockStack>
-              </Form>
-            ) : null}
+            {props.canCreateTestCall ? <Button onClick={() => setTestOpen(true)}>Test call</Button> : null}
           </InlineStack>
         </InlineStack>
 

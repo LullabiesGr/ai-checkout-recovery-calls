@@ -37,7 +37,6 @@ export type CallActivityRow = {
   recordingUrl: string | null;
   transcript: string;
   openaiOutcome: string | null;
-  sentSystemPrompt: string | null;
   customerName: string | null;
   phone: string | null;
   email: string | null;

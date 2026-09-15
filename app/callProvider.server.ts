@@ -2122,17 +2122,17 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
 
   const messages: Array<{ role: "system" | "user"; content: string }> = [{ role: "system", content: systemPrompt }];
 
-  if (factsBlock) messages.push({ role: "user", content: factsBlock });
+  if (factsBlock) messages.push({ role: "system", content: factsBlock });
 
   if (smsEnabled) {
     messages.push({
-      role: "user",
+      role: "system",
       content:
         `There is no pre-created code yet. If you decide to offer a discount, you must choose the exact percentage during the call and then use the tool to create the real Shopify code after the customer agrees.`,
     });
 
     messages.push({
-      role: "user",
+      role: "system",
       content:
         `If the customer wants the link or code by SMS, or accepts your proposed next step, call tool send_checkout_offer exactly once. ` +
         `Choose offerType as one of: link_only, discount, free_shipping. ` +
@@ -2141,7 +2141,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     });
 
     messages.push({
-      role: "user",
+      role: "system",
       content:
         `When the customer clearly accepts receiving the SMS, do not send a normal assistant message first: your next action must be the send_checkout_offer tool call. ` +
         `Vapi will speak the request-start message automatically when the real tool begins. ` +
@@ -2153,7 +2153,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
   }
 
   messages.push({
-    role: "user",
+    role: "system",
     content:
       attemptNumber >= 2
         ? "Follow-up call. Reference previous context if relevant. Keep it short and move to a concrete next step."

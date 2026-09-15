@@ -50,22 +50,7 @@ function pickOpenAIOutcome(sb: any): string | null {
   return c;
 }
 
-function pickSentSystemPrompt(sb: any): string | null {
-  const payload = sb?.payload;
-  if (!payload) return null;
 
-  const msgs =
-    payload?.message?.artifact?.messagesOpenAIFormatted ||
-    payload?.artifact?.messagesOpenAIFormatted ||
-    payload?.messagesOpenAIFormatted ||
-    null;
-
-  if (!Array.isArray(msgs)) return null;
-
-  const sys = msgs.find((m: any) => String(m?.role ?? "") === "system");
-  const content = safeStr(sys?.content ?? sys?.message ?? "").trim();
-  return content || null;
-}
 
 function parseJsonSafe(v: any): any {
   if (!v) return null;
@@ -211,7 +196,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       null;
 
     const openaiOutcome = pickOpenAIOutcome(sb as any);
-    const sentSystemPrompt = pickSentSystemPrompt(sb as any);
 
     return {
       id: String(j.id),
@@ -231,7 +215,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       recordingUrl: (pickRecordingUrl(sb as any) ?? (j.recordingUrl ? String(j.recordingUrl) : null)) ?? null,
       openaiOutcome: unansweredCall(j, sb) ? "no_answer" : recoveryOutcome(openaiOutcome, !!recoveredOrder),
       transcript: conversationText(j.transcript, sb, j.analysisJson),
-      sentSystemPrompt,
       customerName: checkout?.customerName || checkoutName(checkout?.raw),
       phone: checkout?.phone ?? null,
       email: checkout?.email ?? null,

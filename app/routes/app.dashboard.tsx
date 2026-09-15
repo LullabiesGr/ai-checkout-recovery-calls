@@ -6,6 +6,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 
 import db from "../db.server";
+import { parseTestCallInput } from "../lib/testCall.shared";
 import { randomUUID } from "node:crypto";
 import { startVapiCallForJob } from "../callProvider.server";
 import { waitingReason } from "../lib/checkoutData.shared";
@@ -1103,6 +1104,8 @@ export async function action({ request }: ActionFunctionArgs) {
   if (intent !== "create_test_call") return { ok: false, message: "Unknown action." };
   const phone = String(fd.get("phone") ?? "").replace(/[\s()-]/g, "");
   if (!/^\+[1-9]\d{7,14}$/.test(phone)) return { ok: false, message: "Enter your phone number with country code, for example +306900000000." };
+  let testCart: ReturnType<typeof parseTestCallInput>;
+  try { testCart = parseTestCallInput(fd); } catch (error) { return { ok: false, message: error instanceof Error ? error.message : "Check the test cart details." }; }
   const nonce = String(fd.get("testCallId") ?? "");
   if (!/^[0-9a-f-]{36}$/i.test(nonce)) return { ok: false, message: "Refresh the page before starting a test call." };
   const shop = session.shop;
@@ -1111,7 +1114,7 @@ export async function action({ request }: ActionFunctionArgs) {
   // A test has its own OPEN cart: automatic recovery never retries it.
   const created = await db.$transaction(async tx => {
     const checkout = await tx.checkout.upsert({ where: { shop_checkoutId: { shop, checkoutId } }, update: {}, create: {
-      shop, checkoutId, phone, customerName: "Test call", value: 0, currency: "EUR", status: "OPEN", raw: JSON.stringify({ testCall: true }),
+      shop, checkoutId, phone, ...testCart, status: "OPEN", raw: JSON.stringify({ testCall: true }),
     } });
     await tx.$queryRaw`SELECT id FROM "Checkout" WHERE id = ${checkout.id} FOR UPDATE`;
     if (await tx.callJob.findFirst({ where: { shop, id } })) return false;
