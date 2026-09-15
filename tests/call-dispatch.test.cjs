@@ -6,6 +6,7 @@ function harness(jobs,max=2,enabled=true){
  let tail=Promise.resolve();const matches=(j,w)=>Object.entries(w).every(([k,v])=>j[k]===v);
  const tx={ $queryRaw:async()=>[],checkout:{findUnique:async()=>({status:'ABANDONED',abandonedAt:new Date()})},settings:{findUnique:async()=>({maxAttempts:max,enabled})},callJob:{
  findFirst:async({where})=>jobs.find(j=>matches(j,where)),findMany:async({where})=>jobs.filter(j=>matches(j,where)),
+ create:async({data})=>{const row={...data,id:`new-${jobs.length}`,providerCallId:null};jobs.push(row);return row;},
  update:async({where,data})=>Object.assign(jobs.find(j=>matches(j,where)),data),
  updateMany:async({where,data})=>{const found=jobs.filter(j=>matches(j,where));for(const j of found){j.status=data.status;j.outcome=data.outcome;j.attempts+=data.attempts.increment;}return {count:found.length};}
  }};
@@ -26,3 +27,7 @@ test('dashboard POST starts test on explicit number and rejects replay',async()=
 test('invalid number never creates or starts a call',async()=>{const h=dashboard();assert.equal((await h.route.action({request:request('bad')})).ok,false);assert.equal(h.jobs.length,0);assert.equal(h.starts(),0);});
 test('Refresh POST works without starting a call',async()=>{const h=dashboard();assert.equal((await h.route.action({request:request('','sync_now')})).ok,true);assert.equal(h.starts(),0);});
 test('test carts are excluded from automatic abandonment',async()=>{let filter;const mod=compile('app/callRecovery.server.ts',{'./db.server':{default:{checkout:{updateMany:async({where})=>{filter=where;return {count:0}}}}},'./lib/privacy.server':{},'./lib/checkoutData.shared':{}});await mod.markAbandonedByDelay('shop',30);assert.equal(filter.checkoutId.not.startsWith,'test-');});
+
+test('manual call can exceed the limit while automation is paused',async()=>{const jobs=[job('old',3),job('next',0,'QUEUED')];assert.equal(await harness(jobs,1,false).claimManualCallJob('shop','next'),'next');assert.equal(jobs[1].attempts,1);});
+test('manual retry of a completed call gets a new billing identity',async()=>{const jobs=[{...job('old',3),providerCallId:'previous-provider'}];const h=harness(jobs,1);const id=await h.claimManualCallJob('shop','old');assert.notEqual(id,'old');assert.equal(jobs[1].status,'CALLING');assert.equal(jobs[0].providerCallId,'previous-provider');assert.equal(await h.claimManualCallJob('shop','old'),null);});
+test('manual call does not bypass shop isolation',async()=>{const jobs=[job('old',3,'COMPLETED','other')];assert.equal(await harness(jobs).claimManualCallJob('shop','old'),null);});

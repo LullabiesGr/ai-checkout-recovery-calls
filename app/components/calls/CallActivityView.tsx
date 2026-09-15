@@ -344,7 +344,7 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
                   <Form method="post">
                     <input type="hidden" name="intent" value="manual_call" />
                     <input type="hidden" name="callJobId" value={selected.id} />
-                    <Button submit variant="primary" disabled={selected.status !== "QUEUED" || !providerConfigured}>Call now</Button>
+                    <Button submit variant="primary" disabled={selected.status === "CALLING" || !providerConfigured}>Call now</Button>
                   </Form>
                 </InlineStack>
               </BlockStack>

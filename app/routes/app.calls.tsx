@@ -1,4 +1,4 @@
-import { claimCallJob } from "../lib/callDispatch.server";
+import { claimCallJob, claimManualCallJob } from "../lib/callDispatch.server";
 import { checkoutName, unansweredCall, waitingReason } from "../lib/checkoutData.shared";
 import { getAttemptAvailability } from "../lib/billing.server";
 import { conversationText, recoveryOutcome } from "../lib/conversation.shared";
@@ -325,7 +325,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (intent === "manual_call") {
-    const callJobId = String(fd.get("callJobId") ?? "").trim();
+    let callJobId = String(fd.get("callJobId") ?? "").trim();
     if (!callJobId) return redirectBack();
 
     if (!providerOk) {
@@ -336,7 +336,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return redirectBack();
     }
 
-    if (!(await claimCallJob(shop, callJobId))) return redirectBack();
+    const claimedId = await claimManualCallJob(shop, callJobId);
+    if (!claimedId) return redirectBack();
+    callJobId = claimedId;
 
     try {
       await createVapiCallForJob({ shop, callJobId });
@@ -346,32 +348,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       });
     } catch (e: any) {
       if (["ATTEMPT_LIMIT_REACHED", "ACTIVE_SUBSCRIPTION_REQUIRED", "MONTHLY_PLAN_REQUIRED"].includes(String(e?.message))) {
-        await db.callJob.updateMany({ where: { id: callJobId, shop }, data: { status: "QUEUED", attempts: { decrement: 1 }, scheduledFor: new Date(Date.now() + 15 * 60 * 1000), outcome: String(e.message) } });
+        await db.callJob.updateMany({ where: { id: callJobId, shop }, data: { status: "FAILED", attempts: { decrement: 1 }, outcome: String(e.message) } });
         return { ok: false, error: waitingReason(e.message) };
       }
-      const settings = await ensureSettings(shop);
-      const maxAttempts = settings.maxAttempts ?? 2;
-
-      const fresh = await db.callJob.findUnique({ where: { id: callJobId }, select: { attempts: true } });
-      const attemptsAfter = Number(fresh?.attempts ?? 0);
-
-      if (attemptsAfter >= maxAttempts) {
-        await db.callJob.updateMany({
-          where: { id: callJobId, shop },
-          data: { status: "FAILED", outcome: `ERROR: ${String(e?.message ?? e)}` },
-        });
-      } else {
-        const retryMinutes = settings.retryMinutes ?? 180;
-        const next = new Date(Date.now() + retryMinutes * 60 * 1000);
-        await db.callJob.updateMany({
-          where: { id: callJobId, shop },
-          data: {
-            status: "QUEUED",
-            scheduledFor: next,
-            outcome: `RETRY_SCHEDULED in ${retryMinutes}m`,
-          },
-        });
-      }
+      // One deliberate click starts one call; retries require another click.
+      await db.callJob.updateMany({ where: { id: callJobId, shop }, data: { status: "FAILED", outcome: `ERROR: ${String(e?.message ?? e)}` } });
     }
 
     return redirectBack();

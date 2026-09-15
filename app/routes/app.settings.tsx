@@ -616,8 +616,8 @@ const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTempla
                         autoComplete="off"
                       />
                       <TextField
-                        label="Max attempts per checkout"
-                        helpText="Total limit for this checkout, including retries. Reopening it does not reset the limit."
+                        label="Max automatic attempts per checkout"
+                        helpText="Automatic calls stop at this total, including previous attempts. Manual calls can exceed it. Reopening the checkout does not reset it."
                         name="maxAttempts"
                         value={maxAttempts}
                         onChange={setMaxAttempts}

@@ -1,4 +1,5 @@
 // app/components/dashboard/DashboardView.tsx
+import { useState } from "react";
 import { Form, useNavigation } from "react-router";
 import {
   Badge,
@@ -13,6 +14,7 @@ import {
   InlineStack,
   Page,
   Text,
+  TextField,
 } from "@shopify/polaris";
 
 type BadgeTone = "success" | "info" | "warning" | "critical" | "new";
@@ -187,6 +189,7 @@ function MetricCard({ metric }: { metric: DashboardViewProps["metrics"][number] 
 }
 
 export function DashboardView(props: DashboardViewProps) {
+  const [testPhone, setTestPhone] = useState("");
   const navigation = useNavigation();
   const submitting = navigation.state !== "idle";
   const keyMetricOrder: DashboardViewProps["metrics"][number]["key"][] = [
@@ -284,11 +287,13 @@ export function DashboardView(props: DashboardViewProps) {
               <Form method="post">
                 <input type="hidden" name="intent" value="create_test_call" />
                 <input type="hidden" name="testCallId" value={props.testCallId} />
-                <InlineStack gap="200" blockAlign="center">
-                  <label>Your test phone <input type="tel" name="phone" required autoComplete="tel" placeholder="+306900000000" aria-describedby="test-call-help" /></label>
-                  <Button submit loading={submitting} disabled={submitting}>Test call</Button>
-                </InlineStack>
-                <Text as="p" variant="bodySm" tone="subdued" id="test-call-help">Calls the number you enter and uses one attempt from your balance.</Text>
+                <BlockStack gap="200">
+                  <InlineStack gap="200" blockAlign="end">
+                    <TextField label="Test phone number" type="tel" name="phone" value={testPhone} onChange={setTestPhone} autoComplete="tel" placeholder="+306900000000" disabled={submitting} />
+                    <Button submit loading={submitting} disabled={submitting || !testPhone.trim()}>Test call</Button>
+                  </InlineStack>
+                  <Text as="p" variant="bodySm" tone="subdued">Calls your number and uses one attempt from your balance.</Text>
+                </BlockStack>
               </Form>
             ) : null}
           </InlineStack>
