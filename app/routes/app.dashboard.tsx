@@ -6,6 +6,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 
 import db from "../db.server";
+import { resolveTestCatalog } from "../lib/testCatalog.server";
 import { parseTestCallInput } from "../lib/testCall.shared";
 import { randomUUID } from "node:crypto";
 import { startVapiCallForJob } from "../callProvider.server";
@@ -420,8 +421,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     };
   }
 
-  const currentMetrics = await metricsForWindow(w.start, w.now);
-  const prevMetrics = w.prevStart && w.prevEnd ? await metricsForWindow(w.prevStart, w.prevEnd) : null;
+  const [currentMetrics, prevMetrics] = await Promise.all([
+    metricsForWindow(w.start, w.now),
+    w.prevStart && w.prevEnd ? metricsForWindow(w.prevStart, w.prevEnd) : Promise.resolve(null),
+  ]);
 
   function supabaseRangeParams(start: Date | null) {
     const p = new URLSearchParams();
@@ -442,7 +445,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return { vapiNeedsFollow, callJobNeedsFollow };
   }
 
-  const followNow = await followupCounts(w.start);
+  const followNowPromise = followupCounts(w.start);
 
   async function discountCount(start: Date | null) {
     const p = supabaseRangeParams(start);
@@ -450,7 +453,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return supabaseCount(p);
   }
 
-  const discountNow = await discountCount(w.start);
+  const [followNow, discountNow] = await Promise.all([followNowPromise, discountCount(w.start)]);
 
   const vapiSelect = [
     "received_at",
@@ -491,20 +494,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   vapiRecentParams.set("order", "received_at.desc");
   vapiRecentParams.set("limit", "60");
 
-  const vapiRecent = await supabaseFetchRows(vapiRecentParams);
+  const vapiRecentPromise = supabaseFetchRows(vapiRecentParams);
 
   const blockersWindowStart = new Date(w.now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-  const totalCalls7d = await supabaseCount(
+  const [vapiRecent, totalCalls7d, noAnswer7d, voicemail7d, needsFollow7d, notInterested7d] = await Promise.all([
+    vapiRecentPromise,
+    supabaseCount(
     (() => {
       const p = new URLSearchParams();
       p.set("shop", `eq.${shop}`);
       p.set("received_at", `gte.${blockersWindowStart.toISOString()}`);
       return p;
     })(),
-  );
-
-  const noAnswer7d = await supabaseCount(
+  ),
+    supabaseCount(
     (() => {
       const p = new URLSearchParams();
       p.set("shop", `eq.${shop}`);
@@ -512,9 +516,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       p.set("or", "(answered.eq.false,call_outcome.eq.no_answer)");
       return p;
     })(),
-  );
-
-  const voicemail7d = await supabaseCount(
+  ),
+    supabaseCount(
     (() => {
       const p = new URLSearchParams();
       p.set("shop", `eq.${shop}`);
@@ -522,9 +525,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       p.set("voicemail", "eq.true");
       return p;
     })(),
-  );
-
-  const needsFollow7d = await supabaseCount(
+  ),
+    supabaseCount(
     (() => {
       const p = new URLSearchParams();
       p.set("shop", `eq.${shop}`);
@@ -532,9 +534,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       p.set("call_outcome", "eq.needs_followup");
       return p;
     })(),
-  );
-
-  const notInterested7d = await supabaseCount(
+  ),
+    supabaseCount(
     (() => {
       const p = new URLSearchParams();
       p.set("shop", `eq.${shop}`);
@@ -542,7 +543,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       p.set("disposition", "eq.not_interested");
       return p;
     })(),
-  );
+  )
+  ]);
 
   const verifiedRecoveredCheckoutIds = new Set(
     recentCheckouts.filter(isVerifiedRecoveredCheckoutRow).map((c) => String(c.checkoutId)),
@@ -1097,7 +1099,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export async function action({ request }: ActionFunctionArgs) {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const fd = await request.formData();
   const intent = String(fd.get("intent") ?? "");
   if (intent === "sync_now") return { ok: true, message: "Dashboard refreshed." };
@@ -1108,7 +1110,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const phone = String(fd.get("phone") ?? "").replace(/[\s()-]/g, "");
   if (!/^\+[1-9]\d{7,14}$/.test(phone)) return { ok: false, message: "Enter your phone number with country code, for example +306900000000." };
   let testCart: ReturnType<typeof parseTestCallInput>;
-  try { testCart = parseTestCallInput(fd); } catch (error) { return { ok: false, message: error instanceof Error ? error.message : "Check the test cart details." }; }
+  try { testCart = fd.get("catalog") === "true" ? await resolveTestCatalog(admin, fd) : parseTestCallInput(fd); } catch (error) { return { ok: false, message: error instanceof Error ? error.message : "Check the test cart details." }; }
   const nonce = String(fd.get("testCallId") ?? "");
   if (!/^[0-9a-f-]{36}$/i.test(nonce)) return { ok: false, message: "Refresh the page before starting a test call." };
   const shop = session.shop;

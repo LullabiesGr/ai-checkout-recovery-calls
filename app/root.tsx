@@ -1,6 +1,7 @@
 import * as React from "react";
 import type { LinksFunction, LoaderFunctionArgs } from "react-router";
 import {
+  Link,
   Links,
   Meta,
   Outlet,
@@ -87,6 +88,11 @@ function RouteProgressBar({ active }: { active: boolean }) {
   );
 }
 
+function PolarisRouterLink({ url, external, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { url: string; external?: boolean }) {
+  if (external || /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(url)) return <a {...props} href={url} target={props.target || (external ? "_blank" : undefined)} rel={props.rel || (external ? "noopener noreferrer" : undefined)}>{children}</a>;
+  return <Link {...props} to={url}>{children}</Link>;
+}
+
 export default function Root() {
   const { shopifyApiKey, supabaseUrl, supabaseAnonKey } = useLoaderData<typeof loader>();
   const navigate = useNavigate();
@@ -166,7 +172,7 @@ export default function Root() {
         <BootLoader hidden={bootHidden} note={bootNote} />
         <RouteProgressBar active={routeBusy} />
 
-        <PolarisAppProvider i18n={enTranslations as any}>
+        <PolarisAppProvider i18n={enTranslations as any} linkComponent={PolarisRouterLink}>
           <Outlet />
         </PolarisAppProvider>
 
