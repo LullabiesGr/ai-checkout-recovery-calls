@@ -1,7 +1,8 @@
 // app/components/dashboard/DashboardView.tsx
-import { Form } from "react-router";
+import { Form, useNavigation } from "react-router";
 import {
   Badge,
+  Banner,
   BlockStack,
   Box,
   Button,
@@ -17,6 +18,8 @@ import {
 type BadgeTone = "success" | "info" | "warning" | "critical" | "new";
 
 export type DashboardViewProps = {
+  testCallId?: string;
+  actionResult?: { ok: boolean; message: string };
   shopLabel?: string;
 
   nav: {
@@ -184,6 +187,8 @@ function MetricCard({ metric }: { metric: DashboardViewProps["metrics"][number] 
 }
 
 export function DashboardView(props: DashboardViewProps) {
+  const navigation = useNavigation();
+  const submitting = navigation.state !== "idle";
   const keyMetricOrder: DashboardViewProps["metrics"][number]["key"][] = [
     "recovered_revenue",
     "at_risk_eligible_revenue",
@@ -256,6 +261,7 @@ export function DashboardView(props: DashboardViewProps) {
       secondaryActions={[{ content: "Call activity", url: props.nav.callsHref }]}
     >
       <BlockStack gap="400">
+        {props.actionResult ? <Banner tone={props.actionResult.ok ? "success" : "critical"}><p>{props.actionResult.message}</p></Banner> : null}
         <InlineStack align="space-between" blockAlign="center" gap="300">
           <ButtonGroup variant="segmented">
             <Button url={props.range.links.all} pressed={props.range.key === "all"}>
@@ -277,7 +283,12 @@ export function DashboardView(props: DashboardViewProps) {
             {props.canCreateTestCall ? (
               <Form method="post">
                 <input type="hidden" name="intent" value="create_test_call" />
-                <Button submit>Test call</Button>
+                <input type="hidden" name="testCallId" value={props.testCallId} />
+                <InlineStack gap="200" blockAlign="center">
+                  <label>Your test phone <input type="tel" name="phone" required autoComplete="tel" placeholder="+306900000000" aria-describedby="test-call-help" /></label>
+                  <Button submit loading={submitting} disabled={submitting}>Test call</Button>
+                </InlineStack>
+                <Text as="p" variant="bodySm" tone="subdued" id="test-call-help">Calls the number you enter and uses one attempt from your balance.</Text>
               </Form>
             ) : null}
           </InlineStack>

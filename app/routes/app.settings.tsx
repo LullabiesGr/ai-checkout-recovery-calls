@@ -399,7 +399,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const enabled = String(fd.get("enabled") ?? "") === "on";
   const delayMinutes = toInt(fd.get("delayMinutes"), Number(base.delayMinutes ?? 30));
-  const maxAttempts = toInt(fd.get("maxAttempts"), Number(base.maxAttempts ?? 2));
+  const maxAttempts = clamp(toInt(fd.get("maxAttempts"), Number(base.maxAttempts ?? 2)), 1, 10);
   const retryMinutes = toInt(fd.get("retryMinutes"), Number(base.retryMinutes ?? 180));
   const minOrderValue = toFloat(fd.get("minOrderValue"), Number(base.minOrderValue ?? 0));
   const currency = pickCurrency(fd.get("currency") ?? base.currency ?? "USD");
@@ -616,7 +616,8 @@ const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTempla
                         autoComplete="off"
                       />
                       <TextField
-                        label="Max attempts"
+                        label="Max attempts per checkout"
+                        helpText="Total limit for this checkout, including retries. Reopening it does not reset the limit."
                         name="maxAttempts"
                         value={maxAttempts}
                         onChange={setMaxAttempts}

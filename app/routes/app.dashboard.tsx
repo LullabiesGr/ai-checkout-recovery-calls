@@ -1,11 +1,14 @@
 // app/routes/app.dashboard.tsx
 import * as React from "react";
-import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData, useRouteError } from "react-router";
+import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { useActionData, useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 
 import db from "../db.server";
+import { randomUUID } from "node:crypto";
+import { startVapiCallForJob } from "../callProvider.server";
+import { waitingReason } from "../lib/checkoutData.shared";
 import { ensureSettings } from "../callRecovery.server";
 import { DashboardView, type DashboardViewProps } from "../components/dashboard/DashboardView";
 
@@ -1086,14 +1089,52 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       rows: settingsRows,
     },
     canCreateTestCall: true,
+    testCallId: randomUUID(),
   };
 
   return { view };
 };
 
+export async function action({ request }: ActionFunctionArgs) {
+  const { session } = await authenticate.admin(request);
+  const fd = await request.formData();
+  const intent = String(fd.get("intent") ?? "");
+  if (intent === "sync_now") return { ok: true, message: "Dashboard refreshed." };
+  if (intent !== "create_test_call") return { ok: false, message: "Unknown action." };
+  const phone = String(fd.get("phone") ?? "").replace(/[\s()-]/g, "");
+  if (!/^\+[1-9]\d{7,14}$/.test(phone)) return { ok: false, message: "Enter your phone number with country code, for example +306900000000." };
+  const nonce = String(fd.get("testCallId") ?? "");
+  if (!/^[0-9a-f-]{36}$/i.test(nonce)) return { ok: false, message: "Refresh the page before starting a test call." };
+  const shop = session.shop;
+  const checkoutId = `test-${nonce}`;
+  const id = `${shop}:${checkoutId}`;
+  // A test has its own OPEN cart: automatic recovery never retries it.
+  const created = await db.$transaction(async tx => {
+    const checkout = await tx.checkout.upsert({ where: { shop_checkoutId: { shop, checkoutId } }, update: {}, create: {
+      shop, checkoutId, phone, customerName: "Test call", value: 0, currency: "EUR", status: "OPEN", raw: JSON.stringify({ testCall: true }),
+    } });
+    await tx.$queryRaw`SELECT id FROM "Checkout" WHERE id = ${checkout.id} FOR UPDATE`;
+    if (await tx.callJob.findFirst({ where: { shop, id } })) return false;
+    await tx.callJob.create({ data: { id, shop, checkoutId, phone, status: "CALLING", scheduledFor: new Date(), attempts: 1 } });
+    return true;
+  });
+  if (!created) return { ok: false, message: "This test call has already been submitted. Refresh to start another." };
+  try {
+    await startVapiCallForJob({ shop, callJobId: id });
+    return { ok: true, message: "Test call started. View its status in Call activity." };
+  } catch (error: unknown) {
+    const code = error instanceof Error ? error.message : "";
+    await db.callJob.updateMany({ where: { shop, id, status: "CALLING" }, data: { status: "FAILED", outcome: "TEST_CALL_FAILED" } });
+    const message = ["ATTEMPT_LIMIT_REACHED", "ACTIVE_SUBSCRIPTION_REQUIRED", "MONTHLY_PLAN_REQUIRED"].includes(code)
+      ? (waitingReason(code) || "No attempts available. Check Billing.") : "Test call could not start. Check the call provider configuration and Call activity.";
+    return { ok: false, message };
+  }
+}
+
 export default function DashboardRoute() {
   const data = useLoaderData<typeof loader>();
-  return <DashboardView {...data.view} />;
+  const result = useActionData<typeof action>();
+  return <DashboardView {...data.view} actionResult={result} />;
 }
 
 export function ErrorBoundary() {

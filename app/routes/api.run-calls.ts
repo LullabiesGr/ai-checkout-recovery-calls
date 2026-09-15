@@ -1,3 +1,4 @@
+import { claimCallJob } from "../lib/callDispatch.server";
 // app/routes/api.run-calls.ts
 import type { ActionFunctionArgs } from "react-router";
 import db from "../db.server";
@@ -61,17 +62,7 @@ export async function action({ request }: ActionFunctionArgs) {
   let failed = 0;
   let canceled = 0;
   for (const job of jobs) {
-    // Lock exactly once and increment attempts exactly once here.
-    const locked = await db.callJob.updateMany({
-      where: { id: job.id, status: "QUEUED" },
-      data: {
-        status: "CALLING",
-        attempts: { increment: 1 },
-        outcome: null,
-      },
-    });
-
-    if (locked.count === 0) continue;
+    if (!(await claimCallJob(job.shop, job.id))) continue;
     processed += 1;
 
     // Guard: if checkout is no longer ABANDONED, do not call.

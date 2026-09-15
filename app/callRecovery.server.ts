@@ -257,6 +257,7 @@ export async function markAbandonedByDelay(shop: string, delayMinutes: number) {
     where: {
       shop,
       status: "OPEN",
+      checkoutId: { not: { startsWith: "test-" } },
       updatedAt: { lte: cutoff },
       abandonedAt: null,
     },
@@ -271,7 +272,7 @@ export async function markAbandonedByDelay(shop: string, delayMinutes: number) {
  * ENQUEUE
  *
  * Notes:
- * - maxAttempts is enforced per current abandonment cycle.
+ * - maxAttempts is enforced across the entire checkout history.
  * - Abandonment cycle is driven by Checkout.abandonedAt (set by markAbandonedByDelay).
  * - When a checkout becomes active again, webhook should set status=OPEN + abandonedAt=null to start a new cycle.
  */
@@ -318,6 +319,7 @@ export async function enqueueCallJobs(params: {
     where: {
       shop,
       status: "ABANDONED",
+      checkoutId: { not: { startsWith: "test-" } },
       phone: { not: null },
       value: { gte: minValue },
       abandonedAt: { not: null },
@@ -346,6 +348,7 @@ export async function enqueueCallJobs(params: {
       updatedAt: true,
       scheduledFor: true,
       providerCallId: true,
+      attempts: true,
     },
     orderBy: { createdAt: "desc" },
     take: 5000,
@@ -360,6 +363,7 @@ export async function enqueueCallJobs(params: {
       updatedAt: Date;
       scheduledFor: Date | null;
       providerCallId: string | null;
+      attempts: number;
     }>
   >();
 
@@ -367,6 +371,7 @@ export async function enqueueCallJobs(params: {
     const arr = jobsByCheckout.get(j.checkoutId) ?? [];
     arr.push({
       id: String(j.id),
+      attempts: Math.max(Number(j.attempts ?? 0), j.providerCallId ? 1 : 0),
       status: String(j.status),
       createdAt: new Date(j.createdAt),
       updatedAt: new Date((j as any).updatedAt ?? j.createdAt),
@@ -400,7 +405,7 @@ export async function enqueueCallJobs(params: {
     }
 
     const allJobs = jobsByCheckout.get(c.checkoutId) ?? [];
-    const cycleJobs = allJobs.filter((j) => new Date(j.createdAt).getTime() >= cycleStart.getTime());
+    const cycleJobs = allJobs; // Reopening a cart must not reset its attempt limit.
 
     // Auto-expire stale CALLING/QUEUED so they don't block forever.
     for (const j of cycleJobs) {
@@ -449,12 +454,12 @@ export async function enqueueCallJobs(params: {
       continue;
     }
 
-    const cycleAttempts = cycleJobs.length;
+    const cycleAttempts = cycleJobs.reduce((total, job) => total + job.attempts, 0);
     if (cycleAttempts >= maxA) {
       console.log("[ENQUEUE] skip", {
         shop,
         checkoutId: c.checkoutId,
-        reason: "MAX_ATTEMPTS_REACHED_FOR_CURRENT_CYCLE",
+        reason: "MAX_ATTEMPTS_REACHED",
         cycleAttempts,
         maxA,
         cycleStart: cycleStart.toISOString(),
@@ -499,6 +504,7 @@ export async function enqueueCallJobs(params: {
       const arr = jobsByCheckout.get(c.checkoutId) ?? [];
       arr.unshift({
         id: created.id,
+        attempts: 0,
         status: "QUEUED",
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -511,6 +517,7 @@ export async function enqueueCallJobs(params: {
 
       console.log("[ENQUEUE] created", {
         id: created.id,
+        attempts: 0,
         shop,
         checkoutId: c.checkoutId,
         scheduledFor: scheduledFor.toISOString(),

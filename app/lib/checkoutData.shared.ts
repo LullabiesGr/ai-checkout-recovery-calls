@@ -100,6 +100,7 @@ export function unansweredCall(job: any, summary?: any): boolean {
 }
 export function waitingReason(outcome: any): string | null {
   const value = String(outcome ?? "");
+  if (/MAX_ATTEMPTS_REACHED/.test(value)) return "Maximum call attempts reached for this checkout.";
   if (/ATTEMPT_LIMIT_REACHED|WAITING_FOR_ATTEMPTS/.test(value)) return "No attempts remaining — buy extra attempts or upgrade your plan.";
   if (/ACTIVE_SUBSCRIPTION_REQUIRED|MONTHLY_PLAN_REQUIRED/.test(value)) return "An active monthly plan is required.";
   if (/AUTOMATION_PAUSED/.test(value)) return "Automation is paused.";

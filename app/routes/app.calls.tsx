@@ -1,3 +1,4 @@
+import { claimCallJob } from "../lib/callDispatch.server";
 import { checkoutName, unansweredCall, waitingReason } from "../lib/checkoutData.shared";
 import { getAttemptAvailability } from "../lib/billing.server";
 import { conversationText, recoveryOutcome } from "../lib/conversation.shared";
@@ -278,16 +279,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
 
     for (const job of jobs) {
-      const locked = await db.callJob.updateMany({
-        where: { id: job.id, shop, status: "QUEUED" },
-        data: {
-          status: "CALLING",
-          attempts: { increment: 1 },
-          provider: providerOk ? "vapi" : "sim",
-          outcome: null,
-        },
-      });
-      if (locked.count === 0) continue;
+      if (!(await claimCallJob(shop, job.id))) continue;
 
       if (!providerOk) {
         await db.callJob.update({
@@ -344,11 +336,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return redirectBack();
     }
 
-    const locked = await db.callJob.updateMany({
-      where: { id: callJobId, shop, status: "QUEUED" },
-      data: { status: "CALLING", attempts: { increment: 1 }, provider: "vapi", outcome: null },
-    });
-    if (locked.count === 0) return redirectBack();
+    if (!(await claimCallJob(shop, callJobId))) return redirectBack();
 
     try {
       await createVapiCallForJob({ shop, callJobId });
