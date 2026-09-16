@@ -1,4 +1,5 @@
 import { callIdentity } from "./lib/callIdentity.shared";
+import { resolveCallLanguage, callLanguageConfig } from "./lib/callLanguage.shared";
 import { isPrivacySuppressed } from "./lib/privacy.server";
 import { reserveAttempt, releaseAttempt } from "./lib/billing.server";
 import db from "./db.server";
@@ -1255,7 +1256,7 @@ SMS / OFFER TOOL (tool use):
 - Tool name: send_checkout_offer.
 - Call it exactly ONCE only after the customer accepts receiving the link/code by SMS.
 - The moment the customer clearly accepts the SMS, your NEXT action MUST be the send_checkout_offer tool call. Do not send a normal assistant message first.
-- Vapi will automatically speak the request-start message when the real tool call begins. Never imitate that message yourself.
+- Wait for the real tool result before confirming that the SMS was sent.
 - Never output stage directions such as [Sending...], never pretend a tool ran, and never claim an SMS was sent without a tool result.
 - Treat the tool result JSON as ground truth.
 - Say the SMS was sent ONLY when the tool result contains sms_sent=true.
@@ -1274,10 +1275,9 @@ You are the AI phone agent for ${shopName}. Your job: recover an abandoned check
 ${attemptN > 1 ? `This is a follow-up attempt (#${attemptN}).` : "This is the first attempt."}
 
 Hard rules:
-- Default to English. If the customer clearly speaks another language, immediately continue in that same language. Stay in the customer's current language unless they switch languages again. Do not ask which language they prefer.
-- Match the customer's language for every spoken response, including greetings, offer explanations, SMS confirmations, and closing remarks.
+- Use the language specified by CALL LANGUAGE for every spoken response. Do not automatically switch languages.
 - When identifying who you are calling from, use the store name exactly: ${shopName}. Never say "merchant", "merchant store", "merchant's store", or "your merchant's AI phone agent" to the customer.
-- A natural introduction is: "Hi, I'm calling from ${shopName}." Adapt that sentence to the customer's language when they speak another language.
+- Introduce yourself as calling from ${shopName}, in the specified call language.
 - Confirm identity and ask if it's a good time.
 - Keep it short. Target a maximum call length of ~${playbook.maxCallSeconds} seconds.
 - Do not be pushy. If not interested, end politely.
@@ -2021,6 +2021,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
   }
 
   const settings = await db.settings.findUnique({ where: { shop: params.shop } });
+  const selectedLanguage = resolveCallLanguage((settings as any)?.callLanguage, checkout.raw, customerNumber);
   const extras = await readSettingsExtras(params.shop);
   const billingPlan = await getShopPlan(params.shop);
   const smsFeatureAllowedByPlan = hasSmsFeature(billingPlan);
@@ -2145,7 +2146,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       role: "system",
       content:
         `When the customer clearly accepts receiving the SMS, do not send a normal assistant message first: your next action must be the send_checkout_offer tool call. ` +
-        `Vapi will speak the request-start message automatically when the real tool begins. ` +
+        `Wait for the real tool result before speaking a confirmation in the selected call language. ` +
         `Afterward, treat the returned JSON as ground truth: say the text was sent only if sms_sent=true. ` +
         `If sms_sent=false, say it could not be sent; if a real code/code_speakable is returned, you may give only that exact code. ` +
         `Never invent a code, never output fake stage directions, and never claim a tool ran when no tool result exists. ` +
@@ -2158,13 +2159,16 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
     content:
       attemptNumber >= 2
         ? "Follow-up call. Reference previous context if relevant. Keep it short and move to a concrete next step."
-        : `Start the call now in English. Say you are calling from ${shopDisplayName}, mention they almost completed checkout, and ask if they want help finishing the order. If the customer replies in another language, continue entirely in that language.`,
+        : `Start the call in the specified CALL LANGUAGE. Say you are calling from ${shopDisplayName}, mention they almost completed checkout, and ask if they want help finishing the order.`,
   });
 
   const identity = callIdentity(shopDisplayName, speakableName);
   messages.push({ role: "system", content: identity.instruction });
+  const languageConfig = callLanguageConfig(selectedLanguage.code, shopDisplayName);
+  messages.push({ role: "system", content: languageConfig.instruction });
 
   const nextAnalysisJson = mergeAnalysisJson(job.analysisJson ?? null, {
+    call_language: selectedLanguage,
     offer: {
       checkoutLink: compactRecoveryUrl,
       discountLink: compactRecoveryUrl,
@@ -2246,14 +2250,10 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       },
 
       assistantOverrides: {
-        firstMessage: identity.firstMessage,
+        firstMessage: languageConfig.firstMessage,
         firstMessageMode: "assistant-speaks-first",
         voicemailDetection: { provider: "vapi" },
-        transcriber: {
-          provider: "deepgram",
-          model: "nova-3",
-          language: "multi",
-        },
+        transcriber: languageConfig.transcriber,
         model: {
           provider: "openai",
           model: "gpt-4o-mini",
@@ -2265,13 +2265,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
                   {
                     type: "function",
                     async: false,
-                    messages: [
-                      {
-                        type: "request-start",
-                        content: "I'll send that by text right now.",
-                        blocking: false,
-                      },
-                    ],
+                    messages: [],
                     function: {
                       name: "send_checkout_offer",
                       description:

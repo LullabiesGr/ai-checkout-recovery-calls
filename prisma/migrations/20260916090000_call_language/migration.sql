@@ -1,0 +1,1 @@
+ALTER TABLE "Settings" ADD COLUMN IF NOT EXISTS "callLanguage" TEXT NOT NULL DEFAULT 'auto';
