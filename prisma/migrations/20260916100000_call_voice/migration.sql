@@ -1,0 +1,1 @@
+ALTER TABLE "Settings" ADD COLUMN IF NOT EXISTS "callVoice" TEXT NOT NULL DEFAULT 'default';

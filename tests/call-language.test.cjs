@@ -59,6 +59,7 @@ test('settings persist authenticated-shop language and reject unsupported submis
     '../shopify.server':{authenticate:{admin:async()=>({session:{shop:'test.myshopify.com'}})}},
     '../db.server':{default:db}, '../callRecovery.server':{ensureSettings:async()=>({callLanguage:'auto'})},
     '../lib/planFeatures.server':{getShopPlan:async()=> 'STARTER'}, '../lib/callLanguage.shared':lang,
+    '../lib/callVoice.shared':compile('app/lib/callVoice.shared.ts'), '../components/CallVoicePicker':{},
   });
   const request=value=>({url:'https://example.com/app/settings',formData:async()=>new Map([['callLanguage',value]])});
   await route.action({request:request('el')});

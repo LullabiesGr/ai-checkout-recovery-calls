@@ -7,6 +7,8 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { ensureSettings } from "../callRecovery.server";
 import { CALL_LANGUAGE_OPTIONS, validCallLanguageSetting } from "../lib/callLanguage.shared";
+import { validCallVoice } from "../lib/callVoice.shared";
+import { CallVoicePicker } from "../components/CallVoicePicker";
 import { getShopPlan, hasSmsFeature } from "../lib/planFeatures.server";
 
 import {
@@ -64,6 +66,7 @@ type LoaderData = {
   settings: {
     enabled: boolean;
     callLanguage: string;
+    callVoice: string;
     delayMinutes: number;
     maxAttempts: number;
     retryMinutes: number;
@@ -340,6 +343,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const settings: LoaderData["settings"] = {
     enabled: Boolean(base.enabled),
     callLanguage: validCallLanguageSetting(b.callLanguage) ? b.callLanguage : "auto",
+    callVoice: b.callVoice ?? "default",
     delayMinutes: Number(base.delayMinutes ?? 30),
     maxAttempts: Number(base.maxAttempts ?? 2),
     retryMinutes: Number(base.retryMinutes ?? 180),
@@ -399,6 +403,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const extras = await readSettingsExtras(shop);
 
   const fd = await request.formData();
+  const callVoice = String(fd.get("callVoice") ?? b.callVoice ?? "default");
+  if (!validCallVoice(callVoice)) {
+    return Response.json({ ok: false, error: "Select an available agent voice." }, { status: 400 });
+  }
   const callLanguage = String(fd.get("callLanguage") ?? b.callLanguage ?? "auto");
   if (!validCallLanguageSetting(callLanguage)) {
     return Response.json({ ok: false, error: "Select a supported call language." }, { status: 400 });
@@ -461,6 +469,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     data: {
       enabled,
       callLanguage,
+      callVoice,
       delayMinutes,
       maxAttempts,
       retryMinutes,
@@ -519,6 +528,7 @@ export default function Settings() {
   const [goal, setGoal] = React.useState<Goal>(settings.goal);
   const [tone, setTone] = React.useState<Tone>(settings.tone);
   const [callLanguage, setCallLanguage] = React.useState(settings.callLanguage);
+  const [callVoice, setCallVoice] = React.useState(settings.callVoice);
   const [maxCallSeconds, setMaxCallSeconds] = React.useState(String(settings.maxCallSeconds));
   const [maxFollowupQuestions, setMaxFollowupQuestions] = React.useState(String(settings.maxFollowupQuestions));
 
@@ -688,6 +698,7 @@ const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTempla
                       onChange={setCallLanguage}
                       helpText="Automatic uses the customer's Shopify language when available, then shipping/billing country, then phone country. Unknown or multilingual countries fall back to English. A fixed language overrides detection for automatic, manual and test calls. The language stays fixed during each call. Country does not guarantee a customer's preferred language."
                     />
+                    <CallVoicePicker value={callVoice} onChange={setCallVoice} />
                     <FormLayout.Group>
                       <Select
                         label="Goal"

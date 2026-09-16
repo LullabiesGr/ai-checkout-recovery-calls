@@ -1,5 +1,6 @@
 import { callIdentity } from "./lib/callIdentity.shared";
 import { resolveCallLanguage, callLanguageConfig } from "./lib/callLanguage.shared";
+import { callVoiceOverrides } from "./lib/callVoice.shared";
 import { isPrivacySuppressed } from "./lib/privacy.server";
 import { reserveAttempt, releaseAttempt } from "./lib/billing.server";
 import db from "./db.server";
@@ -2022,6 +2023,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
 
   const settings = await db.settings.findUnique({ where: { shop: params.shop } });
   const selectedLanguage = resolveCallLanguage((settings as any)?.callLanguage, checkout.raw, customerNumber);
+  const voiceOverrides = callVoiceOverrides((settings as any)?.callVoice, selectedLanguage.code);
   const extras = await readSettingsExtras(params.shop);
   const billingPlan = await getShopPlan(params.shop);
   const smsFeatureAllowedByPlan = hasSmsFeature(billingPlan);
@@ -2169,6 +2171,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
 
   const nextAnalysisJson = mergeAnalysisJson(job.analysisJson ?? null, {
     call_language: selectedLanguage,
+    call_voice: voiceOverrides.voice ?? { source: "vapi_assistant_default" },
     offer: {
       checkoutLink: compactRecoveryUrl,
       discountLink: compactRecoveryUrl,
@@ -2250,6 +2253,7 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
       },
 
       assistantOverrides: {
+        ...voiceOverrides,
         firstMessage: languageConfig.firstMessage,
         firstMessageMode: "assistant-speaks-first",
         voicemailDetection: { provider: "vapi" },
