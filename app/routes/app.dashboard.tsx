@@ -10,8 +10,10 @@ import { resolveTestCatalog } from "../lib/testCatalog.server";
 import { parseTestCallInput } from "../lib/testCall.shared";
 import { randomUUID } from "node:crypto";
 import { startVapiCallForJob } from "../callProvider.server";
-import { waitingReason } from "../lib/checkoutData.shared";
+import { shopifyOrderLabel, waitingReason } from "../lib/checkoutData.shared";
 import { ensureSettings } from "../callRecovery.server";
+import { getAttemptAvailability } from "../lib/billing.server";
+import { PLANS } from "../lib/billingPlans.shared";
 import { DashboardView, type DashboardViewProps } from "../components/dashboard/DashboardView";
 
 type RangeKey = "all" | "7d" | "24h";
@@ -277,6 +279,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const minOrderValue = Number(settings?.minOrderValue ?? 0);
   const currency = String(settings?.currency ?? "USD").toUpperCase();
+  const attemptAvailability = await getAttemptAvailability(shop);
 
   const checkoutWhereForLists =
     w.start != null
@@ -672,6 +675,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     },
   ];
 
+  const recoveredOrderIds = recentCheckouts
+    .map((c) => String(c.recoveredOrderId ?? "").trim())
+    .filter(Boolean);
+  const recoveredOrders = recoveredOrderIds.length
+    ? await db.order.findMany({
+        where: { shop, orderId: { in: recoveredOrderIds } },
+        select: { orderId: true, raw: true },
+      })
+    : [];
+  const recoveredOrderNumbers = new Map(
+    recoveredOrders.map((order) => [order.orderId, shopifyOrderLabel(order.raw, order.orderId)]),
+  );
+
   const recoveredForList = recentCheckouts
     .filter(isVerifiedRecoveredCheckoutRow)
     .slice()
@@ -692,7 +708,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         customerName: String(c.customerName ?? ""),
         amountText: fmtMoney(Math.max(0, amt), String(c.currency ?? currency)),
         whenText: minutesAgo(whenIso),
-        recoveredOrderId: c.recoveredOrderId ? String(c.recoveredOrderId) : "—",
+        recoveredOrderId: c.recoveredOrderId
+          ? recoveredOrderNumbers.get(String(c.recoveredOrderId)) || shopifyOrderLabel(null, c.recoveredOrderId)
+          : "—",
         href: appendParam(`/app/checkouts${baseSearch}`, "checkoutId", String(c.checkoutId)),
       };
     });
@@ -1073,6 +1091,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     nav: {
       checkoutsHref: `/app/checkouts${baseSearch}`,
       callsHref: `/app/calls${baseSearch}`,
+    },
+    attempts: {
+      plan: attemptAvailability.plan,
+      planLabel: PLANS[attemptAvailability.plan]?.title || attemptAvailability.plan,
+      included: attemptAvailability.included,
+      remainingIncluded: attemptAvailability.remainingIncluded,
+      extra: attemptAvailability.extraAttempts,
+      remainingTotal: attemptAvailability.remainingIncluded + attemptAvailability.extraAttempts,
+      isFree: attemptAvailability.plan === "FREE",
+      billingHref: `/app/billing${baseSearch}`,
     },
     range: { key: range, label: rangeLabel, links: rangeLinks },
     hero,

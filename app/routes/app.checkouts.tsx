@@ -1,4 +1,4 @@
-import { checkoutName, checkoutPhone, checkoutItems, unansweredCall, waitingReason } from "../lib/checkoutData.shared";
+import { checkoutName, checkoutPhone, checkoutItems, shopifyOrderLabel, unansweredCall, waitingReason } from "../lib/checkoutData.shared";
 import { recoveryOutcome } from "../lib/conversation.shared";
 import * as React from "react";
 import { Page, Banner, Card, Text, BlockStack, InlineGrid, Button, TextField, Pagination } from "@shopify/polaris";
@@ -9,6 +9,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { ensureSettings, syncAbandonedCheckoutsFromShopify } from "../callRecovery.server";
+import { getAttemptAvailability } from "../lib/billing.server";
 
 import {
   buildCartPreview,
@@ -188,6 +189,9 @@ type CartItemLite = {
   thumbnail?: string | null;
   src?: string | null;
   url?: string | null;
+  featuredImage?: { url?: string | null } | null;
+  product?: { featuredImage?: { url?: string | null } | null; featured_image?: { url?: string | null } | null; featuredMedia?: { preview?: { image?: { url?: string | null } | null } | null } | null } | null;
+  variant?: { image?: { url?: string | null } | null; product?: { featuredMedia?: { preview?: { image?: { url?: string | null } | null } | null } | null } | null } | null;
   variantTitle?: string | null;
   sku?: string | null;
 };
@@ -211,6 +215,7 @@ type Row = {
 
   recoveredAt: string | null;
   recoveredOrderId: string | null;
+  recoveredOrderNumber: string | null;
   recoveredAmount: number | null;
   recoveredFinancial: string | null;
 
@@ -281,7 +286,7 @@ function parseCheckoutOffer(v: any) {
 }
 
 function pickThumbFromItem(it: CartItemLite): string {
-  const candidates = [it.imageUrl, it.image, it.thumbnail, it.src, it.url]
+  const candidates = [it.imageUrl, it.image, it.thumbnail, it.src, it.url, it.featuredImage?.url, it.variant?.image?.url, it.product?.featuredMedia?.preview?.image?.url, it.variant?.product?.featuredMedia?.preview?.image?.url, it.product?.featuredImage?.url, it.product?.featured_image?.url]
     .map((x) => safeStr(x).trim())
     .filter(Boolean);
   return candidates[0] || "";
@@ -345,6 +350,7 @@ function clip(text: string) {
 type RecoveredOrderLite = {
   matchKey: string;
   orderId: string;
+  orderNumber: string;
   total: number | null;
   currency: string | null;
   financial: string | null;
@@ -360,6 +366,7 @@ function buildRecoveredOrderMap(
     currency: string | null;
     financial: string | null;
     createdAt: Date;
+    raw: string | null;
   }>
 ) {
   const map = new Map<string, RecoveredOrderLite>();
@@ -375,6 +382,7 @@ function buildRecoveredOrderMap(
         map.set(k, {
           matchKey: k,
           orderId: String(o.orderId),
+          orderNumber: shopifyOrderLabel(o.raw, o.orderId),
           total: o.total == null ? null : Number(o.total),
           currency: o.currency ?? null,
           financial: o.financial ?? null,
@@ -393,6 +401,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const syncResult = await syncAbandonedCheckoutsFromShopify({ admin, shop, limit: 100 });
   const settings: any = await ensureSettings(shop);
+  const attemptAvailability = await getAttemptAvailability(shop);
   const minOrderValue =
     typeof settings?.minOrderValue === "number"
       ? settings.minOrderValue
@@ -462,6 +471,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             currency: true,
             financial: true,
             createdAt: true,
+            raw: true,
           },
         })
       : [];
@@ -680,6 +690,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     const recoveredAtIso = order ? new Date(order.createdAt).toISOString() : null;
     const recoveredOrderId = order?.orderId ?? null;
+    const recoveredOrderNumber = order?.orderNumber ?? null;
     const recoveredAmount =
       order?.total == null ? null : Number.isFinite(Number(order.total)) ? Number(order.total) : null;
     const recoveredFinancial = order?.financial ?? null;
@@ -723,6 +734,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
       recoveredAt: recoveredAtIso,
       recoveredOrderId,
+      recoveredOrderNumber,
       recoveredAmount,
       recoveredFinancial,
 
@@ -735,7 +747,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       recordingUrl,
       logUrl: safeStr((sb as any)?.log_url).trim() ? String((sb as any)?.log_url) : null,
 
-      nextBestAction: j?.status === "QUEUED" && waitingReason(j?.outcome) ? waitingReason(j?.outcome) : safeStr((sb as any)?.next_best_action || (sb as any)?.best_next_action).trim()
+      nextBestAction: !recoveredOrderId && eligibleAtRisk && !attemptAvailability.allowed
+        ? "No attempts remaining — this checkout was not called. Upgrade your plan or buy extra attempts."
+        : j?.status === "QUEUED" && waitingReason(j?.outcome) ? waitingReason(j?.outcome) : safeStr((sb as any)?.next_best_action || (sb as any)?.best_next_action).trim()
         ? String((sb as any)?.next_best_action || (sb as any)?.best_next_action)
         : (!c.phone && !checkoutPhone(c.raw) ? "A customer phone number is required to place a call." : !settings.enabled ? "Automation is paused." : null),
       followUpMessage: safeStr((sb as any)?.follow_up_message).trim()
@@ -770,7 +784,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     };
   });
 
-  return { shop, rows, syncError: "error" in syncResult ? syncResult.error : null };
+  return { shop, rows, attemptAvailability, syncError: "error" in syncResult ? syncResult.error : null };
 };
 
 function isRecovered(r: Row) {
@@ -804,7 +818,7 @@ function isDiscountCandidate(r: Row) {
 }
 
 export default function Checkouts() {
-  const { rows, syncError } = useLoaderData<typeof loader>();
+  const { rows, attemptAvailability, syncError } = useLoaderData<typeof loader>();
   const location = useLocation();
 
   const requestedFilter = React.useMemo<FilterKey>(() => {
@@ -902,7 +916,7 @@ export default function Checkouts() {
   const [query, setQuery] = React.useState("");
   const [page, setPage] = React.useState(0);
   const searchedRows = React.useMemo(() => filteredWorkRows.slice().sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.checkoutId.localeCompare(a.checkoutId)).filter((r) =>
-    [r.customerName, r.checkoutId, r.cartPreview].some((v) => safeStr(v).toLowerCase().includes(query.trim().toLowerCase()))
+    [r.customerName, r.checkoutId, r.recoveredOrderNumber, r.cartPreview].some((v) => safeStr(v).toLowerCase().includes(query.trim().toLowerCase()))
   ), [filteredWorkRows, query]);
   React.useEffect(() => setPage(0), [query, activeFilter]);
   const currentPage = Math.min(page, Math.max(0, Math.ceil(searchedRows.length / 30) - 1));
@@ -943,6 +957,7 @@ export default function Checkouts() {
     <>
       <Page fullWidth title="Checkouts" subtitle="Find the next recovery opportunity and follow every customer conversation.">
         {syncError ? <Banner tone="warning">{syncError}</Banner> : null}
+        {!attemptAvailability.allowed ? <Banner tone="warning" title="Calls are waiting for available attempts" action={{ content: "View plans", url: withSearch("/app/billing") }}><p>No calls can start until attempts are available. Upgrade your plan or add extra attempts from Billing.</p></Banner> : null}
         <InlineGrid columns={{ xs: 1, sm: 3 }} gap="400">
           <Card><BlockStack gap="200"><Text as="h2" variant="headingSm">Recovered revenue</Text><Text as="p" variant="heading2xl">{fmtMoney(recoveredRevenue, currency)}</Text><Text as="p" tone="subdued">{recoveredCount} completed orders</Text></BlockStack></Card>
           <Card><BlockStack gap="200"><Text as="h2" variant="headingSm">Revenue to recover</Text><Text as="p" variant="heading2xl">{fmtMoney(atRiskRevenue, currency)}</Text><Text as="p" tone="subdued">{eligibleAtRiskCount} eligible checkouts</Text></BlockStack></Card>
@@ -1024,6 +1039,7 @@ export default function Checkouts() {
                                   <s-stack direction="inline" gap="tight" style={{ alignItems: "center", flexWrap: "wrap" }}>
                                     <Button variant="plain" onClick={() => setSelectedId(id)}>{customer === "—" ? "Guest customer" : customer}</Button>
                                     <s-text tone="subdued" variant="bodySm">Checkout …{id.slice(-10)}</s-text>
+                                    {r.recoveredOrderNumber ? <s-badge tone="success">{`ORDER ${r.recoveredOrderNumber}`}</s-badge> : null}
                                     {r.eligibleAtRisk ? <s-badge tone="warning">AT-RISK</s-badge> : null}
                                   </s-stack>
 
@@ -1065,7 +1081,7 @@ export default function Checkouts() {
                                     style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
                                     title={nextStep}
                                   >
-                                    {nextStep}
+                                    {nextStep.startsWith("No attempts remaining") ? "⚠ " : ""}{nextStep}
                                   </s-text>
 
                                   <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
@@ -1094,7 +1110,7 @@ export default function Checkouts() {
                       <s-stack gap="tight">
                         <s-text variant="headingMd">Details</s-text>
                         <s-text tone="subdued" variant="bodySm">
-                          {selected ? `Checkout #${selected.checkoutId}` : "Select a checkout"}
+                          {selected ? selected.recoveredOrderNumber ? `Recovered order ${selected.recoveredOrderNumber} · Checkout ${selected.checkoutId}` : `Checkout #${selected.checkoutId}` : "Select a checkout"}
                         </s-text>
                       </s-stack>
                       {loadingDetails ? <s-spinner size="small" /> : null}
@@ -1155,7 +1171,7 @@ export default function Checkouts() {
                             <s-badge tone="neutral">VOICEMAIL —</s-badge>
                           )}
 
-                          {selected.recoveredOrderId ? <s-badge tone="success">{`ORDER ${selected.recoveredOrderId}`}</s-badge> : null}
+                          {selected.recoveredOrderNumber ? <s-badge tone="success">{`ORDER ${selected.recoveredOrderNumber}`}</s-badge> : null}
                         </s-stack>
 
                         <s-box padding="base" border="base" borderRadius="base" background="subdued">
@@ -1214,7 +1230,7 @@ export default function Checkouts() {
                                 <s-badge tone="success">RECOVERED ORDER</s-badge>
                                 {selected.recoveredFinancial ? <s-badge tone="neutral">{safeStr(selected.recoveredFinancial).toUpperCase()}</s-badge> : null}
                               </s-stack>
-                              <s-text fontWeight="semibold">{`Order ${selected.recoveredOrderId}`}</s-text>
+                              <s-text fontWeight="semibold">{`Order ${selected.recoveredOrderNumber || selected.recoveredOrderId}`}</s-text>
                               <s-text>{fmtMoney(Number(selected.recoveredAmount ?? 0), selected.currency)}</s-text>
                             </s-stack>
                           </s-box>

@@ -87,8 +87,19 @@ export function checkoutItems(value: any): string | null {
     id: it.id, variantId: it.variant_id ?? it.variantId, productId: it.product_id ?? it.productId,
     title: it.title ?? it.name, quantity: Number(it.quantity ?? 1),
     variantTitle: it.variant_title ?? it.variantTitle, sku: it.sku,
-    image: text(it.image?.url) || text(it.image?.src) || text(it.image) || text(it.image_url) || text(it.imageUrl) || text(it.variant?.image?.url) || null,
+    image: text(it.image?.url) || text(it.image?.src) || text(it.image) || text(it.image_url) || text(it.imageUrl) || text(it.variant?.image?.url) || text(it.product?.featuredMedia?.preview?.image?.url) || text(it.variant?.product?.featuredMedia?.preview?.image?.url) || text(it.product?.featured_image?.url) || text(it.product?.featuredImage?.url) || null,
   })).filter((it: any) => it.title));
+}
+
+export function shopifyOrderLabel(raw: any, fallback: any): string {
+  const order = objectData(raw);
+  const name = text(order?.name);
+  if (name) return name.startsWith("#") ? name : `#${name}`;
+  const number = text(order?.order_number) || text(order?.orderNumber);
+  if (number) return number.startsWith("#") ? number : `#${number}`;
+  const id = text(fallback);
+  const compact = id.split("/").filter(Boolean).pop() || id;
+  return compact ? `#${compact}` : "—";
 }
 export function unansweredCall(job: any, summary?: any): boolean {
   const ai = objectData(job?.analysisJson)?.aiAnalysis;

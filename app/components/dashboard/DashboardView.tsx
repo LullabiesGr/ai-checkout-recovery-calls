@@ -27,6 +27,17 @@ export type DashboardViewProps = {
     callsHref: string;
   };
 
+  attempts: {
+    plan: string;
+    planLabel: string;
+    included: number;
+    remainingIncluded: number;
+    extra: number;
+    remainingTotal: number;
+    isFree: boolean;
+    billingHref: string;
+  };
+
   range: {
     key: "all" | "7d" | "24h";
     label: string;
@@ -261,6 +272,26 @@ export function DashboardView(props: DashboardViewProps) {
 
       <BlockStack gap="400">
         {props.actionResult ? <Banner tone={props.actionResult.ok ? "success" : "critical"}><p>{props.actionResult.message}</p></Banner> : null}
+        <Card>
+          <InlineStack align="space-between" blockAlign="center" gap="400" wrap>
+            <InlineStack blockAlign="center" gap="300" wrap={false}>
+              <Box background={props.attempts.remainingTotal > 0 ? "bg-fill-info-secondary" : "bg-fill-critical-secondary"} borderRadius="full" padding="300">
+                <svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M5 4h4l2 5-2.4 1.5a13 13 0 0 0 5 5L15 13l5 2v4c0 1.1-.9 2-2 2C9.7 20.4 3.6 14.3 3 6c0-1.1.9-2 2-2Z" /></svg>
+              </Box>
+              <BlockStack gap="050">
+                <Text as="h2" variant="headingSm">{props.attempts.remainingTotal} call attempts available</Text>
+                <Text as="p" variant="bodySm" tone="subdued">
+                  {props.attempts.planLabel} plan · {props.attempts.remainingIncluded} included{props.attempts.extra > 0 ? ` + ${props.attempts.extra} extra` : ""}
+                </Text>
+                {props.attempts.remainingTotal === 0 ? <Text as="p" variant="bodySm" tone="critical">Automatic recovery calls are waiting until attempts are added.</Text> : null}
+                {props.attempts.isFree ? <Text as="p" variant="bodySm">Upgrade for more calls each month and keep recovering abandoned carts.</Text> : null}
+              </BlockStack>
+            </InlineStack>
+            <Button url={props.attempts.billingHref} variant={props.attempts.isFree || props.attempts.remainingTotal === 0 ? "primary" : "secondary"}>
+              {props.attempts.isFree ? "Upgrade plan" : props.attempts.remainingTotal === 0 ? "Add attempts" : "Manage plan"}
+            </Button>
+          </InlineStack>
+        </Card>
         <InlineStack align="space-between" blockAlign="center" gap="300">
           <ButtonGroup variant="segmented">
             <Button url={props.range.links.all} pressed={props.range.key === "all"}>
