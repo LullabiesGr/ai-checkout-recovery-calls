@@ -275,7 +275,7 @@ export function DashboardView(props: DashboardViewProps) {
         <Card>
           <InlineStack align="space-between" blockAlign="center" gap="400" wrap>
             <InlineStack blockAlign="center" gap="300" wrap={false}>
-              <Box background={props.attempts.remainingTotal > 0 ? "bg-fill-info-secondary" : "bg-fill-critical-secondary"} borderRadius="full" padding="300">
+              <Box background="bg-surface-secondary" borderRadius="full" padding="300">
                 <svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M5 4h4l2 5-2.4 1.5a13 13 0 0 0 5 5L15 13l5 2v4c0 1.1-.9 2-2 2C9.7 20.4 3.6 14.3 3 6c0-1.1.9-2 2-2Z" /></svg>
               </Box>
               <BlockStack gap="050">
