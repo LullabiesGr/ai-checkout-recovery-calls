@@ -122,7 +122,7 @@ test('failed SMS refunds its attempt and can be retried idempotently', async () 
   const f=fixture({includedSecondsUsed:29});
   const args={shop:f.row.shop,checkoutId:'cart',customerKey:'customer-hash',source:'AUTOMATIC',idempotencyKey:'sms-retry'};
   const first=await f.api.reserveSmsAttempt(args);
-  await f.api.releaseSmsAttempt({shop:f.row.shop,deliveryId:first.delivery.id,error:'Brevo rejected'});
+  await f.api.releaseSmsAttempt({shop:f.row.shop,deliveryId:first.delivery.id,error:'Apifon rejected'});
   assert.equal(f.row.includedSecondsUsed,29);
   const retry=await f.api.reserveSmsAttempt(args);
   assert.equal(retry.delivery.id,first.delivery.id);

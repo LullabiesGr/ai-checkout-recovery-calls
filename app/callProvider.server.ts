@@ -14,6 +14,14 @@ import db from "./db.server";
 import { createHash, randomBytes } from "node:crypto";
 import { sessionStorage } from "./shopify.server";
 import { getShopPlan, hasSmsFeature } from "./lib/planFeatures.server";
+import {
+  configuredApifonSender,
+  DEFAULT_SMS_SENDER,
+  hasApifonSmsCredentials,
+  normalizeApifonRecipient,
+  normalizeApifonSender,
+  sendApifonSms,
+} from "./lib/apifonSms.server";
 
 function requiredEnv(name: string) {
   const v = process.env[name];
@@ -38,8 +46,8 @@ type ExtrasRow = {
   max_call_seconds: number | null;
   max_followup_questions: number | null;
 
-  // per-shop Brevo sender
-  brevoSmsSender: string | null;
+  // Per-shop SMS sender used by Apifon.
+  smsSender: string | null;
 
   discount_enabled: boolean | null;
   max_discount_percent: number | null;
@@ -114,7 +122,7 @@ async function readSettingsExtras(shop: string): Promise<ExtrasRow | null> {
     vapi_assistant_id: pick(row.vapi_assistant_id, row.vapiAssistantId) ?? null,
     vapi_phone_number_id: pick(row.vapi_phone_number_id, row.vapiPhoneNumberId) ?? null,
 
-    brevoSmsSender: pick(row.brevoSmsSender, row.brevo_sms_sender) ?? null,
+    smsSender: pick(row.smsSender, row.sms_sender) ?? null,
   };
 }
 
@@ -1349,47 +1357,15 @@ Offer context (use these exact fields):
 }
 
 /* =========================
-   Brevo Transactional SMS
+   Apifon Transactional SMS
    ========================= */
-function pickBrevoApiKey() {
-  return String(process.env.BREVO_API_KEY ?? process.env.BREVO_SMS_API_KEY ?? "").trim();
-}
-
-function normalizeBrevoRecipient(e164: string) {
-  return String(e164 ?? "").trim().replace(/[^\d+]/g, "").replace(/^\+/, "");
-}
-
-function normalizeBrevoSender(sender: string) {
-  const raw = String(sender ?? "").trim();
-  if (!raw) return "";
-
-  const noSpace = raw.replace(/\s+/g, "");
-  if (/^\+?\d+$/.test(noSpace)) {
-    const digits = noSpace.replace(/^\+/, "").replace(/[^\d]/g, "");
-    return digits.slice(0, 15);
-  }
-
-  const alpha = noSpace.replace(/[^A-Za-z0-9]/g, "");
-  return alpha.slice(0, 11);
-}
-
-const DEFAULT_BREVO_SENDER = "CartEcho";
-
-function resolveBrevoSender(extras: ExtrasRow | null) {
-  const fromDb = String(extras?.brevoSmsSender ?? "").trim();
-  const fromEnv = String(
-    process.env.BREVO_SMS_SENDER ??
-      process.env.BREVO_SENDER ??
-      process.env.VAPI_SMS_SENDER ??
-      process.env.VAPI_SMS_FROM_NUMBER ??
-      ""
-  ).trim();
-
-  return normalizeBrevoSender(fromDb || fromEnv) || DEFAULT_BREVO_SENDER;
+function resolveSmsSender(extras: ExtrasRow | null) {
+  const fromDb = String(extras?.smsSender ?? "").trim();
+  return normalizeApifonSender(fromDb) || configuredApifonSender();
 }
 
 function smsCustomerKey(shop: string, phone: string) {
-  const normalized = normalizeBrevoRecipient(phone);
+  const normalized = normalizeApifonRecipient(phone);
   if (!normalized) throw new Error("Invalid recipient phone");
   return createHash("sha256").update(`${shop}:${normalized}`).digest("hex");
 }
@@ -1409,12 +1385,6 @@ function phoneFromCheckoutRaw(value: unknown) {
   return candidates.map((candidate) => String(candidate ?? "").trim()).find(Boolean) || null;
 }
 
-function normalizeBrevoType(t: any) {
-  const v = String(t ?? "").trim().toLowerCase();
-  if (v === "marketing") return "marketing";
-  return "transactional";
-}
-
 const GSM7_EXTENDED_ASCII = new Set(["^", "{", "}", "\\", "[", "]", "~", "|"]);
 
 function smsSingleSegmentInfo(body: string) {
@@ -1426,71 +1396,6 @@ function smsSingleSegmentInfo(body: string) {
     units += GSM7_EXTENDED_ASCII.has(ch) ? 2 : 1;
   }
   return { encoding: "gsm7" as const, units, limit: 160 };
-}
-
-async function brevoSendSms(params: {
-  toE164: string;
-  body: string;
-  sender: string;
-  type?: string | null;
-  tag?: string | null;
-  organisationPrefix?: string | null;
-  unicodeEnabled?: boolean;
-}) {
-  const apiKey = pickBrevoApiKey();
-  if (!apiKey) throw new Error("Missing env: BREVO_API_KEY");
-
-  const requestedSender = normalizeBrevoSender(params.sender) || DEFAULT_BREVO_SENDER;
-
-  const recipient = normalizeBrevoRecipient(params.toE164);
-  if (!recipient) throw new Error("Invalid recipient phone");
-  const body = String(params.body ?? "").trim();
-
-  const tag = String(params.tag ?? process.env.BREVO_SMS_TAG ?? "").trim();
-  const organisationPrefix = String(params.organisationPrefix ?? process.env.BREVO_SMS_ORGANISATION_PREFIX ?? "").trim();
-  const unicodeEnabled =
-    typeof params.unicodeEnabled === "boolean"
-      ? params.unicodeEnabled
-      : String(process.env.BREVO_SMS_UNICODE ?? "").trim().toLowerCase() === "true";
-
-  const sendWithSender = async (sender: string) => {
-    const payload: Record<string, any> = {
-      sender,
-      recipient,
-      content: body,
-      type: normalizeBrevoType(params.type ?? process.env.BREVO_SMS_TYPE),
-    };
-    if (/[^\x00-\x7F]/.test(body) || unicodeEnabled) payload.unicodeEnabled = true;
-    if (tag) payload.tag = tag;
-    if (organisationPrefix) payload.organisationPrefix = organisationPrefix;
-
-    const res = await fetch("https://api.brevo.com/v3/transactionalSMS/send", {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        "content-type": "application/json",
-        "api-key": apiKey,
-      },
-      body: JSON.stringify(payload),
-    });
-    const text = await res.text();
-    let json: any = null;
-    try { json = text ? JSON.parse(text) : null; } catch { json = null; }
-    if (!res.ok) {
-      const error: any = new Error(`Brevo SMS failed HTTP ${res.status}: ${text.slice(0, 900)}`);
-      error.status = res.status;
-      throw error;
-    }
-    return { ...(json && typeof json === "object" ? json : {}), sender };
-  };
-
-  try {
-    return await sendWithSender(requestedSender);
-  } catch (error: any) {
-    const rejectedByBrevo = Number(error?.status) >= 400 && Number(error?.status) < 500;
-    if (requestedSender === DEFAULT_BREVO_SENDER || !rejectedByBrevo) throw error;
-    return sendWithSender(DEFAULT_BREVO_SENDER);
-  }
 }
 
 async function sendMeteredCheckoutSms(args: {
@@ -1513,22 +1418,20 @@ async function sendMeteredCheckoutSms(args: {
   if (reservation.alreadySent) {
     return {
       messageId: reservation.delivery.messageId,
-      sender: reservation.delivery.sender || DEFAULT_BREVO_SENDER,
+      sender: reservation.delivery.sender || DEFAULT_SMS_SENDER,
       alreadySent: true,
     };
   }
 
   try {
-    const result = await brevoSendSms({
+    const result = await sendApifonSms({
       toE164: args.to,
-      body: args.body,
+      content: args.body,
       sender: args.sender,
-      type: process.env.BREVO_SMS_TYPE ?? "transactional",
-      tag: process.env.BREVO_SMS_TAG ?? "checkout-recovery",
-      organisationPrefix: process.env.BREVO_SMS_ORGANISATION_PREFIX ?? null,
+      referenceId: `${args.source.toLowerCase()}:${args.shop}:${args.checkoutId}`,
     });
     const messageId = String(result?.messageId ?? "").trim() || null;
-    const sender = String(result?.sender ?? DEFAULT_BREVO_SENDER);
+    const sender = String(result?.sender ?? DEFAULT_SMS_SENDER);
     await completeSmsAttempt({ deliveryId: reservation.delivery.id, messageId, sender });
     return { messageId, sender, alreadySent: false };
   } catch (error: any) {
@@ -1779,10 +1682,9 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
       const to = String(job.phone ?? "").trim();
       if (!to || !to.startsWith("+")) throw new Error("Missing/invalid E.164 recipient on CallJob.");
 
-      const brevoKey = pickBrevoApiKey();
-      const smsSender = resolveBrevoSender(extras);
-      const hasSmsTransport = Boolean(brevoKey && smsSender);
-      if (!hasSmsTransport) throw new Error("SMS transport is not configured (Brevo).");
+      const smsSender = resolveSmsSender(extras);
+      const hasSmsTransport = Boolean(hasApifonSmsCredentials() && smsSender);
+      if (!hasSmsTransport) throw new Error("SMS transport is not configured (Apifon).");
 
       let finalType: "link_only" | "discount" | "free_shipping" = "link_only";
       let finalDiscountPercent: number | null = null;
@@ -2140,9 +2042,8 @@ export async function startVapiCallForJob(params: { shop: string; callJobId: str
   const recoveryUrl = extractRecoveryUrlFromCheckoutRaw(checkout.raw);
   const compactRecoveryUrl = recoveryUrl ? compactCheckoutUrl(recoveryUrl) : null;
 
-  const brevoKey = pickBrevoApiKey();
-  const smsSender = resolveBrevoSender(extras);
-  const hasSmsTransport = Boolean(brevoKey && smsSender);
+  const smsSender = resolveSmsSender(extras);
+  const hasSmsTransport = Boolean(hasApifonSmsCredentials() && smsSender);
 
   const smsEnabled =
     smsFeatureAllowedByPlan &&
@@ -2454,8 +2355,8 @@ export async function ensureCheckoutSmsForCallJob(params: { shop: string; callJo
   if (!to || !to.startsWith("+")) return { sent: false, reason: "missing_phone" };
 
   const extras = await readSettingsExtras(params.shop);
-  const sender = resolveBrevoSender(extras);
-  if (!pickBrevoApiKey() || !sender) return { sent: false, reason: "sms_transport_missing" };
+  const sender = resolveSmsSender(extras);
+  if (!hasApifonSmsCredentials() || !sender) return { sent: false, reason: "sms_transport_missing" };
 
   const compactLink = compactCheckoutUrl(recoveryUrl);
   const offerCode = String(currentOffer?.offerCode ?? "").trim() || null;
@@ -2568,8 +2469,8 @@ export async function sendManualCheckoutSms(args: {
   }
 
   const extras = await readSettingsExtras(args.shop);
-  if (!pickBrevoApiKey()) throw new Error("SMS_TRANSPORT_MISSING");
-  const sender = resolveBrevoSender(extras);
+  if (!hasApifonSmsCredentials()) throw new Error("SMS_TRANSPORT_MISSING");
+  const sender = resolveSmsSender(extras);
   const compactLink = compactCheckoutUrl(recoveryUrl);
   const offerCode = String(currentOffer?.offerCode ?? "").trim() || null;
   const discountLink = String(currentOffer?.discountLink ?? "").trim() ||

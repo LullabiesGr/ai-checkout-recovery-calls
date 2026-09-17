@@ -127,6 +127,16 @@ When you're ready to set up your app in production, you can follow [our deployme
 
 When you reach the step for [setting up environment variables](https://shopify.dev/docs/apps/deployment/web#set-env-vars), you also need to set the variable `NODE_ENV=production`.
 
+### Apifon SMS
+
+CartEcho sends manual and automatic checkout SMS through Apifon. Configure this Render environment variable:
+
+```text
+APIFON_API_KEY=YOUR_APIFON_TOKEN:YOUR_APIFON_SECRET
+```
+
+The Apifon token must have access to the SMS Gateway route. `APIFON_SMS_SENDER` is optional and defaults to `CartEcho`; a merchant-specific sender configured in the app takes precedence. The app also supports `APIFON_API_TOKEN` and `APIFON_API_SECRET` as separate variables, or a temporary OAuth token in `APIFON_BEARER_TOKEN`.
+
 ## Gotchas / Troubleshooting
 
 ### Database tables don't exist

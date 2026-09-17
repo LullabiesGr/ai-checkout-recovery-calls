@@ -124,7 +124,7 @@ model Settings {
   sms_template_offer    String?
   sms_template_no_offer String?
 
-  brevoSmsSender String? @db.VarChar(32)
+  smsSender String? @db.VarChar(32)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

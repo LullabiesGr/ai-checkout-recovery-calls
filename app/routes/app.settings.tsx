@@ -55,7 +55,7 @@ type ExtrasRow = {
   sms_template_offer: string | null;
   sms_template_no_offer: string | null;
 
-  brevoSmsSender: string | null;
+  smsSender: string | null;
 };
 
 type LoaderData = {
@@ -97,7 +97,7 @@ type LoaderData = {
     smsTemplateOffer: string;
     smsTemplateNoOffer: string;
 
-    brevoSmsSender: string;
+    smsSender: string;
   };
 };
 
@@ -160,11 +160,11 @@ function pickPromptMode(v: any): PromptMode {
 }
 
 /**
- * normalize per-shop Brevo sender input
- * - numeric: keep digits only, max 15
+ * Normalize the per-shop Apifon sender input.
+ * - numeric: keep digits only, max 16
  * - alphanumeric: keep A-Z0-9 only, max 11
  */
-function normalizeBrevoSenderInput(v: any): string | null {
+function normalizeSmsSenderInput(v: any): string | null {
   const raw = String(v ?? "").trim();
   if (!raw) return null;
 
@@ -172,7 +172,7 @@ function normalizeBrevoSenderInput(v: any): string | null {
   if (!noSpace) return null;
 
   if (/^\+?\d+$/.test(noSpace)) {
-    const digits = noSpace.replace(/^\+/, "").slice(0, 15);
+    const digits = noSpace.replace(/^\+/, "").slice(0, 16);
     return digits ? digits : null;
   }
 
@@ -215,7 +215,7 @@ async function readSettingsExtras(shop: string): Promise<ExtrasRow | null> {
         followup_sms_enabled,
         sms_template_offer,
         sms_template_no_offer,
-        "brevoSmsSender"
+        "smsSender"
       from public."Settings"
       where shop = ${shop}
       limit 1
@@ -245,7 +245,7 @@ async function readSettingsExtras(shop: string): Promise<ExtrasRow | null> {
     `;
     const r = rows?.[0] ?? null;
     if (!r) return null;
-    return { ...r, brevoSmsSender: null } as ExtrasRow;
+    return { ...r, smsSender: null } as ExtrasRow;
   }
 }
 
@@ -271,7 +271,7 @@ async function writeSettingsExtras(
     smsTemplateOffer: string | null;
     smsTemplateNoOffer: string | null;
 
-    brevoSmsSender: string | null;
+    smsSender: string | null;
   }
 ) {
   try {
@@ -293,7 +293,7 @@ async function writeSettingsExtras(
         followup_sms_enabled = ${data.followupSmsEnabled},
         sms_template_offer = ${data.smsTemplateOffer},
         sms_template_no_offer = ${data.smsTemplateNoOffer},
-        "brevoSmsSender" = ${data.brevoSmsSender}
+        "smsSender" = ${data.smsSender}
       where shop = ${shop}
     `;
   } catch {
@@ -381,7 +381,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       ? String(extras?.sms_template_no_offer)
       : defaultNoOfferTemplate,
 
-    brevoSmsSender: String(extras?.brevoSmsSender ?? "").trim(),
+    smsSender: String(extras?.smsSender ?? "").trim(),
   };
 
   return {
@@ -460,9 +460,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const smsTemplateOffer = smsTemplateOfferRaw ? Array.from(smsTemplateOfferRaw).slice(0, 100).join("") : null;
   const smsTemplateNoOffer = smsTemplateNoOfferRaw ? Array.from(smsTemplateNoOfferRaw).slice(0, 100).join("") : null;
 
-  const brevoSmsSender = normalizeBrevoSenderInput(fd.get("brevoSmsSender"));
+  const smsSender = normalizeSmsSenderInput(fd.get("smsSender"));
 
-  const finalBrevoSmsSender = brevoSmsSender;
+  const finalSmsSender = smsSender;
   const finalSmsTemplateOffer = smsTemplateOffer;
   const finalSmsTemplateNoOffer = smsTemplateNoOffer;
 
@@ -502,7 +502,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     followupSmsEnabled,
     smsTemplateOffer: finalSmsTemplateOffer,
     smsTemplateNoOffer: finalSmsTemplateNoOffer,
-    brevoSmsSender: finalBrevoSmsSender,
+    smsSender: finalSmsSender,
   });
 
   return new Response(null, {
@@ -553,7 +553,7 @@ export default function Settings() {
   const [smsTemplateOffer, setSmsTemplateOffer] = React.useState(settings.smsTemplateOffer ?? "");
   const [smsTemplateNoOffer, setSmsTemplateNoOffer] = React.useState(settings.smsTemplateNoOffer ?? "");
 
-  const [brevoSmsSender, setBrevoSmsSender] = React.useState(settings.brevoSmsSender ?? "");
+  const [smsSender, setSmsSender] = React.useState(settings.smsSender ?? "");
 
   const isSaving = fetcher.state === "submitting" || fetcher.state === "loading";
 
@@ -850,17 +850,17 @@ const clampSmsTemplate = (value: string) => Array.from(value).slice(0, smsTempla
                   <FormLayout>
                     <TextField
                       label="Sender"
-                      name="brevoSmsSender"
-                      value={brevoSmsSender}
-                      onChange={setBrevoSmsSender}
+                      name="smsSender"
+                      value={smsSender}
+                      onChange={setSmsSender}
                       autoComplete="off"
-                      helpText="Alphanumeric up to 11 chars (A-Z,0-9) or numeric up to 15 digits. Spaces/symbols are removed."
+                      helpText="Apifon Sender ID: alphanumeric up to 11 chars (A-Z, 0-9) or numeric up to 16 digits. Spaces and symbols are removed."
                       disabled={false}
                     />
                   </FormLayout>
 
                   <Text as="p" variant="bodySm" tone="subdued">
-                    If empty, the sender will be named as "Aterwin".
+                    If empty or invalid, the sender will be "CartEcho".
                   </Text>
                 </BlockStack>
               </Card>

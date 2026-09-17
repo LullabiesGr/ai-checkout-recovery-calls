@@ -180,7 +180,7 @@ function manualSmsError(error: unknown) {
   if (code.includes("ATTEMPT_LIMIT_REACHED")) return "No attempts are available. Add attempts before sending another SMS.";
   if (code.includes("MISSING_PHONE")) return "This customer has no phone number.";
   if (code.includes("MISSING_RECOVERY_URL")) return "This checkout has no recovery link.";
-  if (code.includes("SMS_TRANSPORT_MISSING")) return "Brevo SMS is not configured.";
+  if (code.includes("SMS_TRANSPORT_MISSING")) return "Apifon SMS is not configured.";
   if (code.includes("SMS_SEND_IN_PROGRESS")) return "An SMS is already being sent. Wait a moment before retrying.";
   return "The SMS could not be sent. No attempt was charged.";
 }
