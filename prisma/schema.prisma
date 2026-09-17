@@ -212,6 +212,27 @@ model CallCharge {
   @@index([shop, createdAt])
 }
 
+model SmsDelivery {
+  id               String   @id @default(cuid())
+  shop             String
+  checkoutId       String
+  customerKey      String
+  source           String
+  status           String   @default("RESERVED")
+  idempotencyKey   String   @unique
+  attemptSource    String
+  attemptPeriodEnd DateTime?
+  messageId        String?
+  sender           String?
+  error            String?
+  sentAt           DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([shop, customerKey, status])
+  @@index([shop, checkoutId, createdAt])
+}
+
 enum PromptMode {
   append
   replace

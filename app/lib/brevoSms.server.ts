@@ -20,8 +20,7 @@ function pickSender() {
         ""
     ).trim();
 
-  if (!s) throw new Error("Missing env: BREVO_SMS_SENDER (or VAPI_SMS_SENDER/VAPI_SMS_FROM_NUMBER fallback)");
-  return normalizeSender(s);
+  return normalizeSender(s) || "CartEcho";
 }
 
 function normalizeRecipient(e164: string) {
@@ -86,30 +85,34 @@ export async function sendBrevoTransactionalSms(args: {
       : String(process.env.BREVO_SMS_UNICODE ?? "").trim().toLowerCase() === "true";
   if (unicodeEnabled) payload.unicodeEnabled = true;
 
-  const r = await fetch("https://api.brevo.com/v3/transactionalSMS/send", {
-    method: "POST",
-    headers: {
-      accept: "application/json",
-      "content-type": "application/json",
-      "api-key": apiKey,
-    },
-    body: JSON.stringify(payload),
-  });
+  const send = async (sender: string) => {
+    const r = await fetch("https://api.brevo.com/v3/transactionalSMS/send", {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        "api-key": apiKey,
+      },
+      body: JSON.stringify({ ...payload, sender }),
+    });
+    const text = await r.text();
+    let data: any = null;
+    try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+    if (!r.ok) {
+      const error: any = new Error(`Brevo SMS failed HTTP ${r.status}: ${text.slice(0, 900)}`);
+      error.status = r.status;
+      throw error;
+    }
+    return { messageId: String(data?.messageId ?? "").trim(), raw: data, sender };
+  };
 
-  const text = await r.text();
-  let data: any = null;
   try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = null;
+    return await send(sender);
+  } catch (error: any) {
+    const rejected = Number(error?.status) >= 400 && Number(error?.status) < 500;
+    if (sender === "CartEcho" || !rejected) throw error;
+    return send("CartEcho");
   }
-
-  if (!r.ok) {
-    throw new Error(`Brevo SMS failed HTTP ${r.status}: ${text.slice(0, 900)}`);
-  }
-
-  const messageId = String(data?.messageId ?? "").trim();
-  return { messageId, raw: data };
 }
 
 export async function sendDiscountSms(args: { to: string; code: string; checkoutUrl: string }) {

@@ -1,8 +1,8 @@
 import { checkoutName, checkoutPhone, unansweredCall } from "../lib/checkoutData.shared";
 import { conversationText, recoveryOutcome } from "../lib/conversation.shared";
 import * as React from "react";
-import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData, useRouteError } from "react-router";
+import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { useFetcher, useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -15,8 +15,11 @@ import {
   type SupabaseCallSummary,
 } from "../lib/callInsights.shared";
 import { fetchSupabaseSummaries } from "../lib/callInsights.server";
+import { getAttemptAvailability } from "../lib/billing.server";
+import { getCheckoutSmsAvailability, sendManualCheckoutSms } from "../callProvider.server";
 import {
   Badge,
+  Banner,
   BlockStack,
   Box,
   Button,
@@ -72,6 +75,13 @@ type LoaderData = {
   offer: OfferInfo;
   sb: SupabaseCallSummary | null;
   recordingUrl: string | null;
+  sms: {
+    limit: number;
+    used: number;
+    available: number;
+    hasPhone: boolean;
+    hasAttempt: boolean;
+  };
 };
 
 type CartItem = {
@@ -164,6 +174,40 @@ function outcomeTone(value: unknown) {
   return "info" as const;
 }
 
+function manualSmsError(error: unknown) {
+  const code = safeStr(error).trim();
+  if (code.includes("SMS_CUSTOMER_LIMIT_REACHED")) return "The 2 SMS limit for this customer has been reached.";
+  if (code.includes("ATTEMPT_LIMIT_REACHED")) return "No attempts are available. Add attempts before sending another SMS.";
+  if (code.includes("MISSING_PHONE")) return "This customer has no phone number.";
+  if (code.includes("MISSING_RECOVERY_URL")) return "This checkout has no recovery link.";
+  if (code.includes("SMS_TRANSPORT_MISSING")) return "Brevo SMS is not configured.";
+  if (code.includes("SMS_SEND_IN_PROGRESS")) return "An SMS is already being sent. Wait a moment before retrying.";
+  return "The SMS could not be sent. No attempt was charged.";
+}
+
+export const action = async ({ request, params }: ActionFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
+  const checkoutId = String(params.checkoutId ?? "").trim();
+  const form = await request.formData();
+  if (String(form.get("intent") ?? "") !== "send_sms") {
+    return Response.json({ success: false, error: "Unsupported action." }, { status: 400 });
+  }
+
+  try {
+    const result = await sendManualCheckoutSms({
+      shop: session.shop,
+      checkoutId,
+      requestId: String(form.get("requestId") ?? ""),
+    });
+    return Response.json({ success: true, ...result });
+  } catch (error: any) {
+    return Response.json(
+      { success: false, error: manualSmsError(error?.message ?? error) },
+      { status: 400 },
+    );
+  }
+};
+
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
@@ -231,6 +275,10 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     null;
 
   const recordingUrl = (pickRecordingUrl(sb) ?? (j?.recordingUrl ? String(j.recordingUrl) : null)) ?? null;
+  const [smsAllowance, attemptAvailability] = await Promise.all([
+    getCheckoutSmsAvailability({ shop, checkoutId }),
+    getAttemptAvailability(shop),
+  ]);
 
   return {
     shop,
@@ -277,6 +325,10 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     })(),
     sb,
     recordingUrl,
+    sms: {
+      ...smsAllowance,
+      hasAttempt: attemptAvailability.allowed,
+    },
   } satisfies LoaderData;
 };
 
@@ -285,6 +337,18 @@ export default function CheckoutDetail() {
   const sb: any = data.sb as any;
   const items = React.useMemo(() => cartItems(data.checkout.itemsJson), [data.checkout.itemsJson]);
   const [copied, setCopied] = React.useState<string | null>(null);
+  const smsFetcher = useFetcher<any>();
+  const smsAvailable = smsFetcher.data?.success
+    ? Number(smsFetcher.data.available)
+    : data.sms.available;
+  const smsSending = smsFetcher.state !== "idle";
+
+  const sendSms = React.useCallback(() => {
+    const requestId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    void smsFetcher.submit({ intent: "send_sms", requestId }, { method: "post" });
+  }, [smsFetcher]);
 
   const copy = React.useCallback((label: string, value: string | null) => {
     const v = safeStr(value).trim();
@@ -340,6 +404,29 @@ export default function CheckoutDetail() {
                 <details><summary>View conversation</summary><pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit" }}>{data.transcript || "The written conversation is not available yet."}</pre></details>
               </InlineStack>
               <CallRecordingPlayer callJobId={data.latestJob?.id} recordingUrl={data.recordingUrl} />
+              <Divider />
+              <BlockStack gap="200">
+                <InlineStack align="space-between" blockAlign="center" gap="200">
+                  <BlockStack gap="050">
+                    <Text as="h3" variant="headingSm">Manual SMS</Text>
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      Uses the matching SMS template from Settings. Each SMS uses 1 attempt.
+                    </Text>
+                  </BlockStack>
+                  <Badge tone={smsAvailable > 0 ? "info" : "critical"}>{`${smsAvailable}/2 available`}</Badge>
+                </InlineStack>
+                {smsFetcher.data?.success ? <Banner tone="success">SMS sent successfully.</Banner> : null}
+                {smsFetcher.data && !smsFetcher.data.success ? <Banner tone="critical">{smsFetcher.data.error}</Banner> : null}
+                {!data.sms.hasAttempt ? <Banner tone="warning">No attempts are currently available.</Banner> : null}
+                <Button
+                  variant="primary"
+                  loading={smsSending}
+                  disabled={!data.sms.hasPhone || smsAvailable <= 0 || !data.sms.hasAttempt || smsSending}
+                  onClick={sendSms}
+                >
+                  {`Send SMS · ${smsAvailable}/2 available`}
+                </Button>
+              </BlockStack>
             </BlockStack>
           </Card>
 

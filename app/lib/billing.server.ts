@@ -534,6 +534,127 @@ export async function reserveAttempt(shop: string, callJobId: string) {
   });
 }
 
+export const SMS_PER_CUSTOMER_LIMIT = 2;
+
+export async function getSmsCustomerAllowance(shop: string, customerKey: string) {
+  const used = await db.smsDelivery.count({
+    where: { shop, customerKey, status: { in: ["RESERVED", "SENT"] } },
+  });
+  return {
+    limit: SMS_PER_CUSTOMER_LIMIT,
+    used,
+    available: Math.max(0, SMS_PER_CUSTOMER_LIMIT - used),
+  };
+}
+
+export async function reserveSmsAttempt(args: {
+  shop: string;
+  checkoutId: string;
+  customerKey: string;
+  source: "MANUAL" | "AUTOMATIC";
+  idempotencyKey: string;
+}) {
+  await syncBillingFromShopify({ shop: args.shop });
+
+  return db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "shop" FROM "ShopBilling" WHERE "shop" = ${args.shop} FOR UPDATE`;
+
+    const existing = await tx.smsDelivery.findUnique({ where: { idempotencyKey: args.idempotencyKey } });
+    if (existing?.shop !== undefined && existing.shop !== args.shop) throw new Error("INVALID_SMS_REQUEST");
+    if (existing?.status === "SENT") {
+      return { delivery: existing, alreadySent: true };
+    }
+    if (existing?.status === "RESERVED") throw new Error("SMS_SEND_IN_PROGRESS");
+
+    const customerSmsCount = await tx.smsDelivery.count({
+      where: {
+        shop: args.shop,
+        customerKey: args.customerKey,
+        status: { in: ["RESERVED", "SENT"] },
+      },
+    });
+    if (customerSmsCount >= SMS_PER_CUSTOMER_LIMIT) throw new Error("SMS_CUSTOMER_LIMIT_REACHED");
+
+    const row = await tx.shopBilling.findUniqueOrThrow({ where: { shop: args.shop } });
+    const key = isPlanKey(row.plan) ? row.plan : "FREE";
+    if (key === "PAYG") throw new Error("MONTHLY_PLAN_REQUIRED");
+    if (key !== "FREE" && (row.status !== "ACTIVE" || !row.currentPeriodEnd || row.currentPeriodEnd <= new Date())) {
+      throw new Error("ACTIVE_SUBSCRIPTION_REQUIRED");
+    }
+
+    const used = key === "FREE" ? row.freeSecondsUsed : row.includedSecondsUsed;
+    const included = used < PLANS[key].includedAttempts;
+    if (!included && row.extraAttempts <= 0) throw new Error("ATTEMPT_LIMIT_REACHED");
+    const attemptSource = included ? (key === "FREE" ? "FREE" : "INCLUDED") : "EXTRA";
+
+    await tx.shopBilling.update({
+      where: { shop: args.shop },
+      data:
+        attemptSource === "FREE"
+          ? { freeSecondsUsed: { increment: 1 } }
+          : attemptSource === "INCLUDED"
+            ? { includedSecondsUsed: { increment: 1 } }
+            : { extraAttempts: { decrement: 1 } },
+    });
+
+    const data = {
+      shop: args.shop,
+      checkoutId: args.checkoutId,
+      customerKey: args.customerKey,
+      source: args.source,
+      status: "RESERVED",
+      attemptSource,
+      attemptPeriodEnd: row.currentPeriodEnd,
+      messageId: null,
+      sender: null,
+      error: null,
+      sentAt: null,
+    };
+    const delivery = existing
+      ? await tx.smsDelivery.update({ where: { id: existing.id }, data })
+      : await tx.smsDelivery.create({ data: { ...data, idempotencyKey: args.idempotencyKey } });
+
+    return { delivery, alreadySent: false };
+  });
+}
+
+export async function completeSmsAttempt(args: { deliveryId: string; messageId?: string | null; sender: string }) {
+  return db.smsDelivery.updateMany({
+    where: { id: args.deliveryId, status: "RESERVED" },
+    data: {
+      status: "SENT",
+      messageId: args.messageId ?? null,
+      sender: args.sender,
+      error: null,
+      sentAt: new Date(),
+    },
+  });
+}
+
+export async function releaseSmsAttempt(args: { shop: string; deliveryId: string; error: string }) {
+  await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "shop" FROM "ShopBilling" WHERE "shop" = ${args.shop} FOR UPDATE`;
+    const delivery = await tx.smsDelivery.findFirst({
+      where: { id: args.deliveryId, shop: args.shop, status: "RESERVED" },
+    });
+    if (!delivery) return;
+
+    const row = await tx.shopBilling.findUniqueOrThrow({ where: { shop: args.shop } });
+    const sameCycle = row.currentPeriodEnd?.getTime() === delivery.attemptPeriodEnd?.getTime();
+    if (delivery.attemptSource === "EXTRA") {
+      await tx.shopBilling.update({ where: { shop: args.shop }, data: { extraAttempts: { increment: 1 } } });
+    } else if (sameCycle) {
+      const field = delivery.attemptSource === "FREE" ? "freeSecondsUsed" : "includedSecondsUsed";
+      await tx.shopBilling.update({ where: { shop: args.shop }, data: { [field]: { decrement: 1 } } });
+    }
+
+    await tx.smsDelivery.update({
+      where: { id: delivery.id },
+      data: { status: "FAILED", error: args.error.slice(0, 1000) },
+    });
+  });
+}
+
 // Only a definitive provider rejection releases a reservation. Ambiguous network errors retain it.
 export async function releaseAttempt(shop: string, callJobId: string) {
   await db.$transaction(async (tx) => {

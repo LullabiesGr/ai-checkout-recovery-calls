@@ -142,6 +142,7 @@ export async function processPrivacyRequest(id: string) {
     const smsMessageIds=data.calls.map(c=>parseObject(parseObject(c.analysisJson).offer).smsMessageSid).filter(Boolean).map(String);
     const processorReview = callIds.length>0 || smsMessageIds.length>0 || Boolean(process.env.SUPABASE_URL);
     await db.$transaction(async tx=>{
+      await tx.smsDelivery.deleteMany({where:{shop,...(!all?{checkoutId:{in:data.checkouts.map(c=>c.checkoutId)}}:{})}});
       await tx.callCharge.deleteMany({where:{shop,...(!all?{callJobId:{in:data.calls.map(c=>c.id)}}:{})}});
       await tx.callJob.deleteMany({where:{shop,...(!all?{id:{in:data.calls.map(c=>c.id)}}:{})}});
       await tx.checkout.deleteMany({where:{shop,...(!all?{id:{in:data.checkouts.map(c=>c.id)}}:{})}});

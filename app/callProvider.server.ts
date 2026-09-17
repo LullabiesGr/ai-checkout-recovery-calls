@@ -2,9 +2,16 @@ import { callIdentity } from "./lib/callIdentity.shared";
 import { resolveCallLanguage, callLanguageConfig } from "./lib/callLanguage.shared";
 import { callVoiceOverrides } from "./lib/callVoice.shared";
 import { isPrivacySuppressed } from "./lib/privacy.server";
-import { reserveAttempt, releaseAttempt } from "./lib/billing.server";
+import {
+  completeSmsAttempt,
+  getSmsCustomerAllowance,
+  releaseSmsAttempt,
+  reserveAttempt,
+  reserveSmsAttempt,
+  releaseAttempt,
+} from "./lib/billing.server";
 import db from "./db.server";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { sessionStorage } from "./shopify.server";
 import { getShopPlan, hasSmsFeature } from "./lib/planFeatures.server";
 
@@ -1366,6 +1373,8 @@ function normalizeBrevoSender(sender: string) {
   return alpha.slice(0, 11);
 }
 
+const DEFAULT_BREVO_SENDER = "CartEcho";
+
 function resolveBrevoSender(extras: ExtrasRow | null) {
   const fromDb = String(extras?.brevoSmsSender ?? "").trim();
   const fromEnv = String(
@@ -1376,8 +1385,28 @@ function resolveBrevoSender(extras: ExtrasRow | null) {
       ""
   ).trim();
 
-  const picked = fromDb || fromEnv;
-  return normalizeBrevoSender(picked);
+  return normalizeBrevoSender(fromDb || fromEnv) || DEFAULT_BREVO_SENDER;
+}
+
+function smsCustomerKey(shop: string, phone: string) {
+  const normalized = normalizeBrevoRecipient(phone);
+  if (!normalized) throw new Error("Invalid recipient phone");
+  return createHash("sha256").update(`${shop}:${normalized}`).digest("hex");
+}
+
+function phoneFromCheckoutRaw(value: unknown) {
+  const raw = typeof value === "string" ? safeJsonParse(value) : value as any;
+  const candidates = [
+    raw?.phone,
+    raw?.shipping_address?.phone,
+    raw?.shippingAddress?.phone,
+    raw?.billing_address?.phone,
+    raw?.billingAddress?.phone,
+    raw?.customer?.phone,
+    raw?.customer?.default_address?.phone,
+    raw?.customer?.defaultAddress?.phone,
+  ];
+  return candidates.map((candidate) => String(candidate ?? "").trim()).find(Boolean) || null;
 }
 
 function normalizeBrevoType(t: any) {
@@ -1411,56 +1440,102 @@ async function brevoSendSms(params: {
   const apiKey = pickBrevoApiKey();
   if (!apiKey) throw new Error("Missing env: BREVO_API_KEY");
 
-  const sender = normalizeBrevoSender(params.sender);
-  if (!sender) throw new Error("Missing Brevo sender (set Settings.brevoSmsSender or BREVO_SMS_SENDER).");
+  const requestedSender = normalizeBrevoSender(params.sender) || DEFAULT_BREVO_SENDER;
 
   const recipient = normalizeBrevoRecipient(params.toE164);
   if (!recipient) throw new Error("Invalid recipient phone");
-const body = String(params.body ?? "").trim();
-
-const payload: Record<string, any> = {
-  sender,
-  recipient,
-  content: body,
-  type: normalizeBrevoType(params.type ?? process.env.BREVO_SMS_TYPE),
-};
-if (/[^\x00-\x7F]/.test(body)) payload.unicodeEnabled = true;
+  const body = String(params.body ?? "").trim();
 
   const tag = String(params.tag ?? process.env.BREVO_SMS_TAG ?? "").trim();
-  if (tag) payload.tag = tag;
-
   const organisationPrefix = String(params.organisationPrefix ?? process.env.BREVO_SMS_ORGANISATION_PREFIX ?? "").trim();
-  if (organisationPrefix) payload.organisationPrefix = organisationPrefix;
-
   const unicodeEnabled =
     typeof params.unicodeEnabled === "boolean"
       ? params.unicodeEnabled
       : String(process.env.BREVO_SMS_UNICODE ?? "").trim().toLowerCase() === "true";
-  if (unicodeEnabled) payload.unicodeEnabled = true;
 
-  const res = await fetch("https://api.brevo.com/v3/transactionalSMS/send", {
-    method: "POST",
-    headers: {
-      accept: "application/json",
-      "content-type": "application/json",
-      "api-key": apiKey,
-    },
-    body: JSON.stringify(payload),
-  });
+  const sendWithSender = async (sender: string) => {
+    const payload: Record<string, any> = {
+      sender,
+      recipient,
+      content: body,
+      type: normalizeBrevoType(params.type ?? process.env.BREVO_SMS_TYPE),
+    };
+    if (/[^\x00-\x7F]/.test(body) || unicodeEnabled) payload.unicodeEnabled = true;
+    if (tag) payload.tag = tag;
+    if (organisationPrefix) payload.organisationPrefix = organisationPrefix;
 
-  const text = await res.text();
-  let json: any = null;
+    const res = await fetch("https://api.brevo.com/v3/transactionalSMS/send", {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        "api-key": apiKey,
+      },
+      body: JSON.stringify(payload),
+    });
+    const text = await res.text();
+    let json: any = null;
+    try { json = text ? JSON.parse(text) : null; } catch { json = null; }
+    if (!res.ok) {
+      const error: any = new Error(`Brevo SMS failed HTTP ${res.status}: ${text.slice(0, 900)}`);
+      error.status = res.status;
+      throw error;
+    }
+    return { ...(json && typeof json === "object" ? json : {}), sender };
+  };
+
   try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    json = null;
+    return await sendWithSender(requestedSender);
+  } catch (error: any) {
+    const rejectedByBrevo = Number(error?.status) >= 400 && Number(error?.status) < 500;
+    if (requestedSender === DEFAULT_BREVO_SENDER || !rejectedByBrevo) throw error;
+    return sendWithSender(DEFAULT_BREVO_SENDER);
+  }
+}
+
+async function sendMeteredCheckoutSms(args: {
+  shop: string;
+  checkoutId: string;
+  to: string;
+  body: string;
+  sender: string;
+  source: "MANUAL" | "AUTOMATIC";
+  idempotencyKey: string;
+}) {
+  const customerKey = smsCustomerKey(args.shop, args.to);
+  const reservation = await reserveSmsAttempt({
+    shop: args.shop,
+    checkoutId: args.checkoutId,
+    customerKey,
+    source: args.source,
+    idempotencyKey: args.idempotencyKey,
+  });
+  if (reservation.alreadySent) {
+    return {
+      messageId: reservation.delivery.messageId,
+      sender: reservation.delivery.sender || DEFAULT_BREVO_SENDER,
+      alreadySent: true,
+    };
   }
 
-  if (!res.ok) {
-    throw new Error(`Brevo SMS failed HTTP ${res.status}: ${text.slice(0, 900)}`);
+  try {
+    const result = await brevoSendSms({
+      toE164: args.to,
+      body: args.body,
+      sender: args.sender,
+      type: process.env.BREVO_SMS_TYPE ?? "transactional",
+      tag: process.env.BREVO_SMS_TAG ?? "checkout-recovery",
+      organisationPrefix: process.env.BREVO_SMS_ORGANISATION_PREFIX ?? null,
+    });
+    const messageId = String(result?.messageId ?? "").trim() || null;
+    const sender = String(result?.sender ?? DEFAULT_BREVO_SENDER);
+    await completeSmsAttempt({ deliveryId: reservation.delivery.id, messageId, sender });
+    return { messageId, sender, alreadySent: false };
+  } catch (error: any) {
+    const message = String(error?.message ?? error ?? "SMS send failed");
+    await releaseSmsAttempt({ shop: args.shop, deliveryId: reservation.delivery.id, error: message });
+    throw error;
   }
-
-  return json;
 }
 
 /* =========================
@@ -1852,13 +1927,14 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
 
       let br: any = null;
       try {
-        br = await brevoSendSms({
-          toE164: to,
+        br = await sendMeteredCheckoutSms({
+          shop,
+          checkoutId: String(checkout.checkoutId),
+          to,
           body: smsText,
           sender: smsSender,
-          type: process.env.BREVO_SMS_TYPE ?? "transactional",
-          tag: process.env.BREVO_SMS_TAG ?? "checkout-recovery",
-          organisationPrefix: process.env.BREVO_SMS_ORGANISATION_PREFIX ?? null,
+          source: "AUTOMATIC",
+          idempotencyKey: `sms-tool:${shop}:${callJobId}:${tc.id}`,
         });
       } catch (smsErr: any) {
         const smsError = String(smsErr?.message ?? smsErr ?? "SMS send failed");
@@ -1890,7 +1966,7 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
                 offerCreateError,
                 generatedAt: new Date().toISOString(),
                 smsEnabled: true,
-                smsFrom: smsSender || null,
+                smsFrom: String(br?.sender ?? smsSender) || null,
                 smsText,
                 smsSentAt: null,
                 smsMessageSid: null,
@@ -1939,7 +2015,7 @@ export async function handleVapiToolsWebhook(request: Request): Promise<Response
               offerCreateError,
               generatedAt: new Date().toISOString(),
               smsEnabled: true,
-              smsFrom: smsSender || null,
+              smsFrom: String(br?.sender ?? smsSender) || null,
               smsText,
               smsSentAt: new Date().toISOString(),
               smsMessageSid: messageId,
@@ -2405,13 +2481,14 @@ export async function ensureCheckoutSmsForCallJob(params: { shop: string; callJo
   });
 
   try {
-    const br = await brevoSendSms({
-      toE164: to,
+    const br = await sendMeteredCheckoutSms({
+      shop: params.shop,
+      checkoutId: String(checkout.checkoutId),
+      to,
       body: smsText,
       sender,
-      type: process.env.BREVO_SMS_TYPE ?? "transactional",
-      tag: process.env.BREVO_SMS_TAG ?? "checkout-recovery",
-      organisationPrefix: process.env.BREVO_SMS_ORGANISATION_PREFIX ?? null,
+      source: "AUTOMATIC",
+      idempotencyKey: `sms-after-call:${params.shop}:${job.id}`,
     });
     const messageId = String(br?.messageId ?? "").trim() || null;
     const sentAt = new Date().toISOString();
@@ -2425,7 +2502,7 @@ export async function ensureCheckoutSmsForCallJob(params: { shop: string; callJo
             discountLink,
             offerCode,
             smsEnabled: true,
-            smsFrom: sender,
+            smsFrom: String(br?.sender ?? sender),
             smsText,
             smsSentAt: sentAt,
             smsMessageSid: messageId,
@@ -2447,4 +2524,82 @@ export async function ensureCheckoutSmsForCallJob(params: { shop: string; callJo
     });
     return { sent: false, reason: "sms_send_failed", error: smsError };
   }
+}
+
+export async function getCheckoutSmsAvailability(args: { shop: string; checkoutId: string }) {
+  const checkout = await db.checkout.findFirst({
+    where: { shop: args.shop, checkoutId: args.checkoutId },
+    select: { phone: true, raw: true },
+  });
+  const phone = String(checkout?.phone ?? phoneFromCheckoutRaw(checkout?.raw) ?? "").trim();
+  if (!checkout || !phone) return { limit: 2, used: 0, available: 0, hasPhone: false };
+  const allowance = await getSmsCustomerAllowance(args.shop, smsCustomerKey(args.shop, phone));
+  return { ...allowance, hasPhone: true };
+}
+
+export async function sendManualCheckoutSms(args: {
+  shop: string;
+  checkoutId: string;
+  requestId: string;
+}) {
+  if (!/^[A-Za-z0-9-]{8,100}$/.test(args.requestId)) throw new Error("INVALID_SMS_REQUEST");
+
+  const checkout = await db.checkout.findFirst({ where: { shop: args.shop, checkoutId: args.checkoutId } });
+  if (!checkout) throw new Error("CHECKOUT_NOT_FOUND");
+
+  const phone = String(checkout.phone ?? phoneFromCheckoutRaw(checkout.raw) ?? "").trim();
+  if (!phone) throw new Error("MISSING_PHONE");
+  const recoveryUrl = extractRecoveryUrlFromCheckoutRaw(checkout.raw);
+  if (!recoveryUrl) throw new Error("MISSING_RECOVERY_URL");
+
+  const jobs = await db.callJob.findMany({
+    where: { shop: args.shop, checkoutId: args.checkoutId },
+    orderBy: { createdAt: "desc" },
+    take: 50,
+    select: { analysisJson: true },
+  });
+  let currentOffer: any = {};
+  for (const job of jobs) {
+    const parsed = readAnalysisJsonObject(job.analysisJson ?? null)?.offer;
+    if (parsed && typeof parsed === "object" && (parsed.offerCode || parsed.discountLink)) {
+      currentOffer = parsed;
+      break;
+    }
+  }
+
+  const extras = await readSettingsExtras(args.shop);
+  if (!pickBrevoApiKey()) throw new Error("SMS_TRANSPORT_MISSING");
+  const sender = resolveBrevoSender(extras);
+  const compactLink = compactCheckoutUrl(recoveryUrl);
+  const offerCode = String(currentOffer?.offerCode ?? "").trim() || null;
+  const discountLink = String(currentOffer?.discountLink ?? "").trim() ||
+    (offerCode ? checkoutUrlWithOfferCode(compactLink, offerCode) : compactLink);
+  const smsText = buildSmsText({
+    templateOffer: extras?.sms_template_offer ?? null,
+    templateNoOffer: extras?.sms_template_no_offer ?? null,
+    vars: {
+      shop: args.shop,
+      shop_name: args.shop.replace(/\.myshopify\.com$/i, ""),
+      customer_name: String(checkout.customerName ?? "Customer").trim() || "Customer",
+      checkout_id: String(checkout.checkoutId),
+      checkout_link: compactLink,
+      discount_link: discountLink,
+      offer_code: offerCode ?? "",
+      percent: currentOffer?.discountPercent == null ? "" : String(currentOffer.discountPercent),
+      validity_hours: String(currentOffer?.couponValidityHours ?? extras?.coupon_validity_hours ?? 24),
+    },
+    hasOffer: Boolean(offerCode),
+  });
+
+  const sent = await sendMeteredCheckoutSms({
+    shop: args.shop,
+    checkoutId: args.checkoutId,
+    to: phone,
+    body: smsText,
+    sender,
+    source: "MANUAL",
+    idempotencyKey: `sms-manual:${args.shop}:${args.requestId}`,
+  });
+  const allowance = await getSmsCustomerAllowance(args.shop, smsCustomerKey(args.shop, phone));
+  return { ...sent, ...allowance };
 }

@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs } from "react-router";
-import { sendDiscountSms } from "../lib/brevoSms.server";
 import { assertSmsFeature } from "../lib/planFeatures.server";
+import { sendManualCheckoutSms } from "../callProvider.server";
 
 function requiredEnv(name: string) {
   const v = process.env[name];
@@ -31,26 +31,21 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   const shop = String(body.shop ?? "").trim();
-  const to = String(body.to ?? "").trim();
-  const code = String(body.code ?? "").trim();
-  const checkoutUrl = String(body.checkoutUrl ?? "").trim();
+  const checkoutId = String(body.checkoutId ?? "").trim();
+  const requestId = String(body.requestId ?? request.headers.get("x-idempotency-key") ?? "").trim();
 
-  if (!shop || !to || !checkoutUrl) {
+  if (!shop || !checkoutId || !requestId) {
     return json({ success: false, error: "missing_required_fields" }, 400);
   }
 
   try {
     const { plan } = await assertSmsFeature(shop);
 
-    const { messageId } = await sendDiscountSms({
-      to,
-      code,
-      checkoutUrl,
-    });
+    const sent = await sendManualCheckoutSms({ shop, checkoutId, requestId });
 
     return json({
       success: true,
-      messageId,
+      ...sent,
       plan,
     });
   } catch (e: any) {

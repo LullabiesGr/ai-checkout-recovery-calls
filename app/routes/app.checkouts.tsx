@@ -462,8 +462,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const minOrderValue =
     typeof settings?.minOrderValue === "number"
       ? settings.minOrderValue
-      : typeof settings?.min_order_value === "number"
-        ? settings.min_order_value
+      : typeof (settings as any)?.min_order_value === "number"
+        ? (settings as any).min_order_value
         : 0;
 
   const checkoutIds = Array.from(new Set(checkouts.map((c) => safeStr(c.checkoutId).trim()).filter(Boolean)));
