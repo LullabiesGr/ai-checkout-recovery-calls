@@ -2,9 +2,10 @@ import { checkoutName, checkoutPhone, checkoutItems, mergeCheckoutItems } from "
 import { isPrivacySuppressed } from "../lib/privacy.server";
 import dbPrivacy from "../db.server";
 import type { ActionFunctionArgs } from "react-router";
-import { authenticate } from "../shopify.server";
+import { authenticate, unauthenticated } from "../shopify.server";
 import db from "../db.server";
 import { ensureSettings } from "../callRecovery.server";
+import { enrichCheckoutPresentation } from "../lib/checkoutEnrichment.server";
 
 function safeJsonParse(s: string) {
   try {
@@ -201,6 +202,17 @@ export async function action({ request }: ActionFunctionArgs) {
         raw: JSON.stringify(root ?? null),
       },
     });
+
+    try {
+      const { admin } = await unauthenticated.admin(shop);
+      await enrichCheckoutPresentation({
+        admin,
+        shop,
+        checkouts: [{ checkoutId, token, customerName, itemsJson, raw: JSON.stringify(root ?? null) }],
+      });
+    } catch (error: any) {
+      console.warn("[CHECKOUTS_CREATE] presentation enrichment deferred", { shop, checkoutId, error: String(error?.message ?? error) });
+    }
 
     console.log("[CHECKOUTS_CREATE] upsert OK", { shop, checkoutId });
   } catch (e: any) {

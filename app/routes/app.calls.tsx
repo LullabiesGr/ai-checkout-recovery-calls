@@ -1,6 +1,7 @@
 import { claimCallJob, claimManualCallJob } from "../lib/callDispatch.server";
 import { checkoutName, unansweredCall, waitingReason } from "../lib/checkoutData.shared";
 import { getAttemptAvailability } from "../lib/billing.server";
+import { checkoutNeedsPresentationEnrichment, enrichCheckoutPresentation } from "../lib/checkoutEnrichment.server";
 import { conversationText, recoveryOutcome } from "../lib/conversation.shared";
 // app/routes/app.calls.tsx
 import * as React from "react";
@@ -104,7 +105,7 @@ type LoaderData = {
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
 
   const settings = await ensureSettings(shop);
@@ -160,6 +161,22 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         })
       : Promise.resolve([]),
   ]);
+
+  const incompletePresentation = checkoutRows.filter(checkoutNeedsPresentationEnrichment).slice(0, 50);
+  if (incompletePresentation.length) {
+    try {
+      const enriched = await enrichCheckoutPresentation({ admin, shop, checkouts: incompletePresentation });
+      for (const checkout of checkoutRows) {
+        const resolved = enriched.get(checkout.checkoutId);
+        if (resolved) {
+          checkout.customerName = resolved.customerName;
+          checkout.itemsJson = resolved.itemsJson;
+        }
+      }
+    } catch (error: any) {
+      console.warn("[CALLS] presentation enrichment failed", { shop, error: String(error?.message ?? error) });
+    }
+  }
 
   const checkoutMap = new Map(checkoutRows.map((c: any) => [String(c.checkoutId), c]));
   const orderMap = new Map<string, any>();

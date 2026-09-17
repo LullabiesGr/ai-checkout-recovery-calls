@@ -11,6 +11,7 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { ensureSettings } from "../callRecovery.server";
 import { getAttemptAvailability } from "../lib/billing.server";
+import { checkoutNeedsPresentationEnrichment, enrichCheckoutPresentation } from "../lib/checkoutEnrichment.server";
 
 import {
   buildCartPreview,
@@ -397,7 +398,7 @@ function buildRecoveredOrderMap(
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
 
   const [settings, attemptAvailability, checkouts, jobs] = await Promise.all([
@@ -441,6 +442,22 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       },
     }),
   ]);
+
+  const incompletePresentation = checkouts.filter(checkoutNeedsPresentationEnrichment).slice(0, 50);
+  if (incompletePresentation.length) {
+    try {
+      const enriched = await enrichCheckoutPresentation({ admin, shop, checkouts: incompletePresentation });
+      for (const checkout of checkouts) {
+        const resolved = enriched.get(checkout.checkoutId);
+        if (resolved) {
+          checkout.customerName = resolved.customerName;
+          checkout.itemsJson = resolved.itemsJson;
+        }
+      }
+    } catch (error: any) {
+      console.warn("[CHECKOUTS] presentation enrichment failed", { shop, error: String(error?.message ?? error) });
+    }
+  }
   const minOrderValue =
     typeof settings?.minOrderValue === "number"
       ? settings.minOrderValue
