@@ -199,10 +199,16 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       checkoutId,
       requestId: String(form.get("requestId") ?? ""),
     });
-    return Response.json({ success: true, ...result });
+    const attemptAvailability = await getAttemptAvailability(session.shop);
+    return Response.json({
+      success: true,
+      checkoutId,
+      ...result,
+      hasAttempt: attemptAvailability.allowed,
+    });
   } catch (error: any) {
     return Response.json(
-      { success: false, error: manualSmsError(error?.message ?? error) },
+      { success: false, checkoutId, error: manualSmsError(error?.message ?? error) },
       { status: 400 },
     );
   }
@@ -341,6 +347,9 @@ export default function CheckoutDetail() {
   const smsAvailable = smsFetcher.data?.success
     ? Number(smsFetcher.data.available)
     : data.sms.available;
+  const smsHasAttempt = smsFetcher.data?.success
+    ? Boolean(smsFetcher.data.hasAttempt)
+    : data.sms.hasAttempt;
   const smsSending = smsFetcher.state !== "idle";
 
   const sendSms = React.useCallback(() => {
@@ -417,11 +426,11 @@ export default function CheckoutDetail() {
                 </InlineStack>
                 {smsFetcher.data?.success ? <Banner tone="success">SMS sent successfully.</Banner> : null}
                 {smsFetcher.data && !smsFetcher.data.success ? <Banner tone="critical">{smsFetcher.data.error}</Banner> : null}
-                {!data.sms.hasAttempt ? <Banner tone="warning">No attempts are currently available.</Banner> : null}
+                {!smsHasAttempt ? <Banner tone="warning">No attempts are currently available.</Banner> : null}
                 <Button
                   variant="primary"
                   loading={smsSending}
-                  disabled={!data.sms.hasPhone || smsAvailable <= 0 || !data.sms.hasAttempt || smsSending}
+                  disabled={!data.sms.hasPhone || smsAvailable <= 0 || !smsHasAttempt || smsSending}
                   onClick={sendSms}
                 >
                   {`Send SMS · ${smsAvailable}/2 available`}
