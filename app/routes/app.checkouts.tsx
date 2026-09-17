@@ -960,6 +960,30 @@ export default function Checkouts() {
   const sb = details?.sb ?? null;
   const loadingDetails = !!selected && !details && detailsFetcher.state !== "idle";
 
+  const smsFetcher = useFetcher<any>();
+  const smsResult = smsFetcher.data?.checkoutId === selected?.checkoutId ? smsFetcher.data : null;
+  const smsAvailable = smsResult?.success
+    ? Number(smsResult.available)
+    : Number(details?.sms?.available ?? 0);
+  const smsHasAttempt = smsResult?.success
+    ? Boolean(smsResult.hasAttempt)
+    : Boolean(details?.sms?.hasAttempt);
+  const smsSending = smsFetcher.state !== "idle";
+
+  const sendManualSms = React.useCallback(() => {
+    if (!selected?.checkoutId || smsSending) return;
+    const requestId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    void smsFetcher.submit(
+      { intent: "send_sms", requestId },
+      {
+        method: "post",
+        action: withSearch(`/app/checkouts/${encodeURIComponent(selected.checkoutId)}`),
+      },
+    );
+  }, [selected?.checkoutId, smsFetcher, smsSending]);
+
   const itemsForDetails = React.useMemo(() => {
     const itemsJson = details?.checkout?.itemsJson ?? selected?.itemsJson ?? null;
     return toItemsArray(itemsJson);
@@ -1246,6 +1270,34 @@ export default function Checkouts() {
                             </s-stack>
                           </s-box>
                         ) : null}
+
+                        <s-box border="base" borderRadius="base" padding="base">
+                          <s-stack gap="base">
+                            <s-stack direction="inline" align="space-between" gap="base" style={{ alignItems: "center", flexWrap: "wrap" }}>
+                              <s-stack gap="tight">
+                                <s-text variant="headingSm">Manual SMS</s-text>
+                                <s-text tone="subdued" variant="bodySm">
+                                  Uses the SMS template from Settings. Each SMS uses 1 attempt.
+                                </s-text>
+                              </s-stack>
+                              <s-badge tone={smsAvailable > 0 ? "info" : "critical"}>{`${smsAvailable}/2 available`}</s-badge>
+                            </s-stack>
+
+                            {smsResult?.success ? <Banner tone="success">SMS sent successfully.</Banner> : null}
+                            {smsResult && !smsResult.success ? <Banner tone="critical">{smsResult.error}</Banner> : null}
+                            {details?.sms && !details.sms.hasPhone ? <Banner tone="warning">This customer has no phone number.</Banner> : null}
+                            {details?.sms?.hasPhone && !smsHasAttempt ? <Banner tone="warning">No attempts are currently available.</Banner> : null}
+
+                            <Button
+                              variant="primary"
+                              loading={smsSending}
+                              disabled={!details?.sms?.hasPhone || smsAvailable <= 0 || !smsHasAttempt || smsSending}
+                              onClick={sendManualSms}
+                            >
+                              {`Send SMS · ${smsAvailable}/2 available`}
+                            </Button>
+                          </s-stack>
+                        </s-box>
 
                         {selected.recoveredOrderId ? (
                           <s-box border="base" borderRadius="base" padding="base" style={{ background: "rgba(0,128,96,0.08)" }}>
