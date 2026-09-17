@@ -215,7 +215,7 @@ async function readSettingsExtras(shop: string): Promise<ExtrasRow | null> {
         followup_sms_enabled,
         sms_template_offer,
         sms_template_no_offer,
-        "smsSender"
+        "brevoSmsSender" as "smsSender"
       from public."Settings"
       where shop = ${shop}
       limit 1
@@ -293,7 +293,7 @@ async function writeSettingsExtras(
         followup_sms_enabled = ${data.followupSmsEnabled},
         sms_template_offer = ${data.smsTemplateOffer},
         sms_template_no_offer = ${data.smsTemplateNoOffer},
-        "smsSender" = ${data.smsSender}
+        "brevoSmsSender" = ${data.smsSender}
       where shop = ${shop}
     `;
   } catch {
