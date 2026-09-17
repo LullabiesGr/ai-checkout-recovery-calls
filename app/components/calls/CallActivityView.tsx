@@ -1,5 +1,6 @@
 import * as React from "react";
 import { DetailDrawer } from "../DetailDrawer";
+import { CallRecordingPlayer } from "../CallRecordingPlayer";
 import { Form, useRevalidator, useSearchParams } from "react-router";
 import {
   Badge,
@@ -337,6 +338,8 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
                   <Text as="h3" variant="headingSm">Next step</Text>
                   <Text as="p" tone={selected.nextAction ? undefined : "subdued"}>{selected.nextAction || "No follow-up required right now."}</Text>
                 </BlockStack>
+
+                <CallRecordingPlayer recordingUrl={selected.recordingUrl} />
 
                 <InlineStack gap="200">
                   <details><summary>View conversation</summary><pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit", lineHeight: 1.6 }}>{selected.transcript || "The written conversation is not available yet."}</pre></details>

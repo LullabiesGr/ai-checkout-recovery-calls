@@ -3,6 +3,7 @@ import { recoveryOutcome } from "../lib/conversation.shared";
 import * as React from "react";
 import { Page, Banner, Card, Text, BlockStack, InlineGrid, Button, TextField, Pagination } from "@shopify/polaris";
 import { DetailDrawer } from "../components/DetailDrawer";
+import { CallRecordingPlayer } from "../components/CallRecordingPlayer";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useLocation, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -1243,6 +1244,8 @@ export default function Checkouts() {
                         <s-stack direction="inline" gap="tight" style={{ flexWrap: "wrap" }}>
                           <Button onClick={() => setModalKind("transcript")}>View conversation</Button>
                         </s-stack>
+
+                        <CallRecordingPlayer recordingUrl={details?.recordingUrl ?? selected.recordingUrl} />
 
                         <s-box border="base" borderRadius="base" padding="base" style={{ background: "rgba(0,91,211,0.06)" }}>
                           <s-stack gap="tight">
