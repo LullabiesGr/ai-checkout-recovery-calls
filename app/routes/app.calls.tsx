@@ -107,11 +107,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
+  const settings = await ensureSettings(shop);
+  const allowance = await getAttemptAvailability(shop);
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-  const [settings, allowance, queued, calling, completed7d, jobs] = await Promise.all([
-    ensureSettings(shop),
-    getAttemptAvailability(shop),
+  const [queued, calling, completed7d, jobs] = await Promise.all([
     db.callJob.count({ where: { shop, status: "QUEUED" } }),
     db.callJob.count({ where: { shop, status: "CALLING" } }),
     db.callJob.count({ where: { shop, status: "COMPLETED", createdAt: { gte: since } } }),
