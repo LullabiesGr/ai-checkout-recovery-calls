@@ -46,6 +46,14 @@ function providerHarness(selectedByShop) {
     './db.server':{default:db}, 'node:crypto':require('node:crypto'),
     './shopify.server':{sessionStorage:{findSessionsByShop:async()=>[]}},
     './lib/planFeatures.server':{getShopPlan:async()=>'STARTER',hasSmsFeature:()=>true},
+    './lib/apifonSms.server':{
+      configuredApifonSender:()=> 'CartEcho',
+      DEFAULT_SMS_SENDER:'CartEcho',
+      hasApifonSmsCredentials:()=>true,
+      normalizeApifonRecipient:value=>String(value??'').replace(/[^\d+]/g,'').replace(/^\+/,''),
+      normalizeApifonSender:value=>String(value??'').trim()||'CartEcho',
+      sendApifonSms:async()=>({messageId:'mock-sms',sender:'CartEcho'}),
+    },
   },{
     process:{env:{VAPI_API_KEY:'test-only-key',VAPI_SERVER_URL:'https://example.com/webhooks/vapi',VAPI_ASSISTANT_ID:'assistant',VAPI_PHONE_NUMBER_ID:'phone'}},
     fetch:async(url,options)=>{assert.equal(url,'https://api.vapi.ai/call/phone');requests.push({url,options,body:JSON.parse(options.body)});return {ok:true,json:async()=>({id:'mock-call'})};},
