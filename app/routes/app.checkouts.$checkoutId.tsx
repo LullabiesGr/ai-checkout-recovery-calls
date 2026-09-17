@@ -6,7 +6,6 @@ import { useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import { syncAbandonedCheckoutsFromShopify } from "../callRecovery.server";
 import {
   formatWhen,
   pickLatestJobByCheckout,
@@ -165,12 +164,10 @@ function outcomeTone(value: unknown) {
 }
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
   const shop = session.shop;
   const checkoutId = String(params.checkoutId ?? "").trim();
   if (!checkoutId) throw new Response("Missing checkoutId", { status: 400 });
-
-  await syncAbandonedCheckoutsFromShopify({ admin, shop, limit: 100 });
 
   const [checkout, jobs, recoveredOrder] = await Promise.all([
     db.checkout.findFirst({

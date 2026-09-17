@@ -327,12 +327,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  const billingPlan = await getShopPlan(shop);
   const smsFeatureAllowed = true;
 
-  const base = await ensureSettings(shop);
+  const [billingPlan, base, extras] = await Promise.all([
+    getShopPlan(shop),
+    ensureSettings(shop),
+    readSettingsExtras(shop),
+  ]);
   const b: any = base as any;
-  const extras = await readSettingsExtras(shop);
 
   const url = new URL(request.url);
   const saved = url.searchParams.get("saved") === "1";

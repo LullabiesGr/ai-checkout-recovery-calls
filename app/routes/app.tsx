@@ -1,5 +1,5 @@
 import * as React from "react";
-import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
+import type { HeadersFunction, LoaderFunctionArgs, ShouldRevalidateFunctionArgs } from "react-router";
 import { Outlet, useLoaderData, useLocation, useNavigate, useNavigation, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
@@ -45,6 +45,17 @@ export async function loader({ request }: LoaderFunctionArgs) {
     shop,
     showAdminInbox: shop === PLATFORM_ADMIN_SHOP,
   };
+}
+
+export function shouldRevalidate({
+  currentUrl,
+  nextUrl,
+  formMethod,
+  defaultShouldRevalidate,
+}: ShouldRevalidateFunctionArgs) {
+  if (formMethod && formMethod !== "GET") return defaultShouldRevalidate;
+  if (currentUrl.pathname.startsWith("/app") && nextUrl.pathname.startsWith("/app")) return false;
+  return defaultShouldRevalidate;
 }
 
 export default function App() {

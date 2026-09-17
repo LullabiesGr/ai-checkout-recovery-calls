@@ -110,14 +110,20 @@ export async function fetchSupabaseSummaries(opts: {
   async function doFetch(p: URLSearchParams) {
     if (!url || !key) return [];
     const endpoint = `${url}/rest/v1/vapi_call_summaries?${p.toString()}`;
-    const r = await fetch(endpoint, {
-      method: "GET",
-      headers: {
-        apikey: key,
-        authorization: `Bearer ${key}`,
-        "content-type": "application/json",
-      },
-    });
+    let r: Response;
+    try {
+      r = await fetch(endpoint, {
+        method: "GET",
+        signal: AbortSignal.timeout(900),
+        headers: {
+          apikey: key,
+          authorization: `Bearer ${key}`,
+          "content-type": "application/json",
+        },
+      });
+    } catch {
+      return [];
+    }
 
     if (!r.ok) {
       const body = await r.text().catch(() => "");

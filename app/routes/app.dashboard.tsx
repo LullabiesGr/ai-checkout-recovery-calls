@@ -169,47 +169,28 @@ function supabaseEnv() {
   return { url, key };
 }
 
-async function supabaseCount(params: URLSearchParams): Promise<number> {
-  const env = supabaseEnv();
-  if (!env) return 0;
-
-  params.set("select", "call_id");
-  params.set("limit", "1");
-
-  const endpoint = `${env.url}/rest/v1/vapi_call_summaries?${params.toString()}`;
-  const r = await fetch(endpoint, {
-    method: "GET",
-    headers: {
-      apikey: env.key,
-      authorization: `Bearer ${env.key}`,
-      prefer: "count=exact",
-      "content-type": "application/json",
-    },
-  });
-
-  const cr = r.headers.get("content-range") || "";
-  const m = cr.match(/\/(\d+)\s*$/);
-  if (m?.[1]) return Number(m[1]) || 0;
-  return 0;
-}
-
 async function supabaseFetchRows(params: URLSearchParams): Promise<VapiRow[]> {
   const env = supabaseEnv();
   if (!env) return [];
 
   const endpoint = `${env.url}/rest/v1/vapi_call_summaries?${params.toString()}`;
-  const r = await fetch(endpoint, {
-    method: "GET",
-    headers: {
-      apikey: env.key,
-      authorization: `Bearer ${env.key}`,
-      "content-type": "application/json",
-    },
-  });
+  try {
+    const r = await fetch(endpoint, {
+      method: "GET",
+      signal: AbortSignal.timeout(900),
+      headers: {
+        apikey: env.key,
+        authorization: `Bearer ${env.key}`,
+        "content-type": "application/json",
+      },
+    });
 
-  if (!r.ok) return [];
-  const data = (await r.json()) as VapiRow[];
-  return Array.isArray(data) ? data : [];
+    if (!r.ok) return [];
+    const data = (await r.json()) as VapiRow[];
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
 }
 
 function modeText(values: Array<string | null | undefined>) {
@@ -235,8 +216,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  await ensureSettings(shop);
-
   const fullSearch = safeSearch(request.url);
   const sp = new URLSearchParams(fullSearch.startsWith("?") ? fullSearch.slice(1) : fullSearch);
 
@@ -245,41 +224,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const w = windowFromRange(range);
 
   const baseSearch = stripParam(fullSearch, "range");
-
-  const settings = await db.settings.findFirst({
-    where: { shop },
-    select: {
-      enabled: true,
-      delayMinutes: true,
-      maxAttempts: true,
-      retryMinutes: true,
-      minOrderValue: true,
-      currency: true,
-      callWindowStart: true,
-      callWindowEnd: true,
-      tone: true,
-      goal: true,
-      max_call_seconds: true,
-      max_followup_questions: true,
-      discount_enabled: true,
-      max_discount_percent: true,
-      offer_rule: true,
-      min_cart_value_for_discount: true,
-      coupon_prefix: true,
-      coupon_validity_hours: true,
-      free_shipping_enabled: true,
-      followup_email_enabled: true,
-      followup_sms_enabled: true,
-      vapiAssistantId: true,
-      vapiPhoneNumberId: true,
-      userPrompt: true,
-      merchantPrompt: true,
-    },
-  });
-
-  const minOrderValue = Number(settings?.minOrderValue ?? 0);
-  const currency = String(settings?.currency ?? "USD").toUpperCase();
-  const attemptAvailability = await getAttemptAvailability(shop);
 
   const checkoutWhereForLists =
     w.start != null
@@ -297,7 +241,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         }
       : { shop };
 
-  const [recentCheckouts, recentCallJobs] = await Promise.all([
+  const [settings, attemptAvailability, recentCheckouts, recentCallJobs] = await Promise.all([
+    ensureSettings(shop),
+    getAttemptAvailability(shop),
     db.checkout.findMany({
       where: checkoutWhereForLists as any,
       orderBy: [{ createdAt: "desc" }],
@@ -356,25 +302,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
   ]);
 
+  const minOrderValue = Number(settings?.minOrderValue ?? 0);
+  const currency = String(settings?.currency ?? "USD").toUpperCase();
+
   async function metricsForWindow(start: Date | null, end: Date) {
     const recoveredWhereBase: any = {
       shop,
       OR: [{ recoveredOrderId: { not: null } }, { recoveredAmount: { gt: 0 } }],
     };
     if (start) recoveredWhereBase.AND = [checkoutTimeFilter(start, end)];
-
-    const recoveredCount = await db.checkout.count({ where: recoveredWhereBase });
-
-    const recoveredAmountPos = await db.checkout.aggregate({
-      where: {
-        ...recoveredWhereBase,
-        recoveredAmount: { gt: 0 },
-      },
-      _sum: { recoveredAmount: true },
-    });
-
-    // VERIFIED revenue only (conservative): do not fallback to cart value.
-    const recoveredRevenue = Number(recoveredAmountPos._sum.recoveredAmount ?? 0);
 
     const abandonedEligibleWhere: any = {
       shop,
@@ -383,13 +319,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       OR: [{ phone: { not: null } }, { email: { not: null } }],
     };
     if (start) abandonedEligibleWhere.AND = [checkoutTimeFilter(start, end)];
-
-    const abandonedEligibleCount = await db.checkout.count({ where: abandonedEligibleWhere });
-    const abandonedEligibleSum = await db.checkout.aggregate({
-      where: abandonedEligibleWhere,
-      _sum: { value: true },
-    });
-    const atRiskEligibleRevenue = Number(abandonedEligibleSum._sum.value ?? 0);
 
     const callCompletedWhere: any = { shop, status: "COMPLETED" };
     const callQueuedWhere: any = { shop, status: "QUEUED" };
@@ -402,12 +331,31 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       callFailedWhere.updatedAt = { gte: start, lt: end };
     }
 
-    const [callsCompleted, callsQueued, callsCalling, callsFailed] = await Promise.all([
+    const [
+      recoveredCount,
+      recoveredAmountPos,
+      abandonedEligibleCount,
+      abandonedEligibleSum,
+      callsCompleted,
+      callsQueued,
+      callsCalling,
+      callsFailed,
+    ] = await Promise.all([
+      db.checkout.count({ where: recoveredWhereBase }),
+      db.checkout.aggregate({
+        where: { ...recoveredWhereBase, recoveredAmount: { gt: 0 } },
+        _sum: { recoveredAmount: true },
+      }),
+      db.checkout.count({ where: abandonedEligibleWhere }),
+      db.checkout.aggregate({ where: abandonedEligibleWhere, _sum: { value: true } }),
       db.callJob.count({ where: callCompletedWhere }),
       db.callJob.count({ where: callQueuedWhere }),
       db.callJob.count({ where: callCallingWhere }),
       db.callJob.count({ where: callFailedWhere }),
     ]);
+
+    const recoveredRevenue = Number(recoveredAmountPos._sum.recoveredAmount ?? 0);
+    const atRiskEligibleRevenue = Number(abandonedEligibleSum._sum.value ?? 0);
 
     const winRate = pct(recoveredCount, recoveredCount + abandonedEligibleCount);
 
@@ -428,35 +376,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     metricsForWindow(w.start, w.now),
     w.prevStart && w.prevEnd ? metricsForWindow(w.prevStart, w.prevEnd) : Promise.resolve(null),
   ]);
-
-  function supabaseRangeParams(start: Date | null) {
-    const p = new URLSearchParams();
-    p.set("shop", `eq.${shop}`);
-    if (start) p.set("received_at", `gte.${start.toISOString()}`);
-    return p;
-  }
-
-  async function followupCounts(start: Date | null) {
-    const p = supabaseRangeParams(start);
-    p.set("call_outcome", "eq.needs_followup");
-    const vapiNeedsFollow = await supabaseCount(p);
-
-    const cjWhere: any = { shop, outcome: "NEEDS_FOLLOWUP" };
-    if (start) cjWhere.updatedAt = { gte: start, lt: w.now };
-    const callJobNeedsFollow = await db.callJob.count({ where: cjWhere });
-
-    return { vapiNeedsFollow, callJobNeedsFollow };
-  }
-
-  const followNowPromise = followupCounts(w.start);
-
-  async function discountCount(start: Date | null) {
-    const p = supabaseRangeParams(start);
-    p.set("or", "(discount_suggest.eq.true,discount_percent.gt.0)");
-    return supabaseCount(p);
-  }
-
-  const [followNow, discountNow] = await Promise.all([followNowPromise, discountCount(w.start)]);
 
   const vapiSelect = [
     "received_at",
@@ -495,59 +414,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   vapiRecentParams.set("shop", `eq.${shop}`);
   if (w.start) vapiRecentParams.set("received_at", `gte.${w.start.toISOString()}`);
   vapiRecentParams.set("order", "received_at.desc");
-  vapiRecentParams.set("limit", "60");
-
-  const vapiRecentPromise = supabaseFetchRows(vapiRecentParams);
+  vapiRecentParams.set("limit", "100");
 
   const blockersWindowStart = new Date(w.now.getTime() - 7 * 24 * 60 * 60 * 1000);
-
-  const [vapiRecent, totalCalls7d, noAnswer7d, voicemail7d, needsFollow7d, notInterested7d] = await Promise.all([
-    vapiRecentPromise,
-    supabaseCount(
-    (() => {
-      const p = new URLSearchParams();
-      p.set("shop", `eq.${shop}`);
-      p.set("received_at", `gte.${blockersWindowStart.toISOString()}`);
-      return p;
-    })(),
-  ),
-    supabaseCount(
-    (() => {
-      const p = new URLSearchParams();
-      p.set("shop", `eq.${shop}`);
-      p.set("received_at", `gte.${blockersWindowStart.toISOString()}`);
-      p.set("or", "(answered.eq.false,call_outcome.eq.no_answer)");
-      return p;
-    })(),
-  ),
-    supabaseCount(
-    (() => {
-      const p = new URLSearchParams();
-      p.set("shop", `eq.${shop}`);
-      p.set("received_at", `gte.${blockersWindowStart.toISOString()}`);
-      p.set("voicemail", "eq.true");
-      return p;
-    })(),
-  ),
-    supabaseCount(
-    (() => {
-      const p = new URLSearchParams();
-      p.set("shop", `eq.${shop}`);
-      p.set("received_at", `gte.${blockersWindowStart.toISOString()}`);
-      p.set("call_outcome", "eq.needs_followup");
-      return p;
-    })(),
-  ),
-    supabaseCount(
-    (() => {
-      const p = new URLSearchParams();
-      p.set("shop", `eq.${shop}`);
-      p.set("received_at", `gte.${blockersWindowStart.toISOString()}`);
-      p.set("disposition", "eq.not_interested");
-      return p;
-    })(),
-  )
-  ]);
+  const vapiRecent = await supabaseFetchRows(vapiRecentParams);
 
   const verifiedRecoveredCheckoutIds = new Set(
     recentCheckouts.filter(isVerifiedRecoveredCheckoutRow).map((c) => String(c.checkoutId)),
@@ -574,6 +444,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const ended = String(r.ended_reason ?? "").trim();
     return outcome === "not_recovered" || disp === "not_interested" || Boolean(ended);
   });
+
+  const vapiRecent7d = vapiRecent.filter((r) => {
+    const receivedAt = Date.parse(String(r.received_at ?? ""));
+    return Number.isFinite(receivedAt) && receivedAt >= blockersWindowStart.getTime();
+  });
+  const totalCalls7d = vapiRecent7d.length;
+  const noAnswer7d = vapiRecent7d.filter(
+    (r) => r.answered === false || normLower(r.call_outcome) === "no_answer",
+  ).length;
+  const voicemail7d = vapiRecent7d.filter((r) => r.voicemail === true).length;
+  const needsFollow7d = vapiRecent7d.filter((r) => normLower(r.call_outcome) === "needs_followup").length;
+  const notInterested7d = vapiRecent7d.filter((r) => normLower(r.disposition) === "not_interested").length;
 
   const followupsHeadlineDedup = (() => {
     const ids = new Set<string>();
@@ -623,7 +505,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       key: "followups",
       label: "Send follow-ups",
       count: followupsHeadlineDedup,
-      rawCountText: `vapi ${followNow.vapiNeedsFollow} + jobs ${followNow.callJobNeedsFollow}`,
+      rawCountText: "unique checkouts",
       nextBestAction: modeText(vapiNeedsFollowRows.map((x) => x.next_best_action)),
       href: appendParam(`/app/checkouts${baseSearch}`, "tab", "followups"),
       tone: followupsHeadlineDedup > 0 ? "warning" : "new",
@@ -641,7 +523,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       key: "discounts",
       label: "Handle discount requests",
       count: discountDedup,
-      rawCountText: `vapi ${discountNow}`,
+      rawCountText: "unique checkouts",
       nextBestAction: modeText(vapiDiscountRows.map((x) => x.next_best_action)) || "Review discount rationale and reply with an offer.",
       href: appendParam(`/app/checkouts${baseSearch}`, "tab", "discounts"),
       tone: discountDedup > 0 ? "warning" : "new",

@@ -8,7 +8,7 @@ import { useFetcher, useLoaderData, useLocation, useRouteError } from "react-rou
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import { ensureSettings, syncAbandonedCheckoutsFromShopify } from "../callRecovery.server";
+import { ensureSettings } from "../callRecovery.server";
 import { getAttemptAvailability } from "../lib/billing.server";
 
 import {
@@ -396,24 +396,16 @@ function buildRecoveredOrderMap(
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  const syncResult = await syncAbandonedCheckoutsFromShopify({ admin, shop, limit: 100 });
-  const settings: any = await ensureSettings(shop);
-  const attemptAvailability = await getAttemptAvailability(shop);
-  const minOrderValue =
-    typeof settings?.minOrderValue === "number"
-      ? settings.minOrderValue
-      : typeof settings?.min_order_value === "number"
-        ? settings.min_order_value
-        : 0;
-
-  const [checkouts, jobs] = await Promise.all([
+  const [settings, attemptAvailability, checkouts, jobs] = await Promise.all([
+    ensureSettings(shop),
+    getAttemptAvailability(shop),
     db.checkout.findMany({
       where: { shop },
       orderBy: { createdAt: "desc" },
-      take: 300,
+      take: 200,
       select: {
         checkoutId: true,
         status: true,
@@ -432,7 +424,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     db.callJob.findMany({
       where: { shop },
       orderBy: { createdAt: "desc" },
-      take: 800,
+      take: 400,
       select: {
         id: true,
         checkoutId: true,
@@ -448,6 +440,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       },
     }),
   ]);
+  const minOrderValue =
+    typeof settings?.minOrderValue === "number"
+      ? settings.minOrderValue
+      : typeof settings?.min_order_value === "number"
+        ? settings.min_order_value
+        : 0;
 
   const checkoutIds = Array.from(new Set(checkouts.map((c) => safeStr(c.checkoutId).trim()).filter(Boolean)));
 
@@ -593,6 +591,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       const endpoint = `${url}/rest/v1/vapi_call_summaries?${p.toString()}`;
       const r = await fetch(endpoint, {
         method: "GET",
+        signal: AbortSignal.timeout(900),
         headers: {
           apikey: key,
           authorization: `Bearer ${key}`,
@@ -656,12 +655,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return out;
   }
 
-  const sbMap = await fetchSupabaseSummariesLite({
-    shop,
-    callIds: Array.from(new Set(callIds)),
-    callJobIds: Array.from(new Set(jobIds)),
-    checkoutIds: Array.from(new Set(checkoutIds)),
-  });
+  let sbMap = new Map<string, SupabaseCallSummary>();
+  try {
+    sbMap = await fetchSupabaseSummariesLite({
+      shop,
+      callIds: Array.from(new Set(callIds)),
+      callJobIds: Array.from(new Set(jobIds)),
+      checkoutIds: Array.from(new Set(checkoutIds)),
+    });
+  } catch {
+    // Insights are optional for the initial page render.
+  }
 
   const rows: Row[] = checkouts.map((c) => {
     const checkoutId = String(c.checkoutId);
@@ -784,7 +788,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     };
   });
 
-  return { shop, rows, attemptAvailability, syncError: "error" in syncResult ? syncResult.error : null };
+  return { shop, rows, attemptAvailability, syncError: null };
 };
 
 function isRecovered(r: Row) {

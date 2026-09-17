@@ -9,11 +9,7 @@ import { useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import {
-  ensureSettings,
-  markAbandonedByDelay,
-  syncAbandonedCheckoutsFromShopify,
-} from "../callRecovery.server";
+import { ensureSettings } from "../callRecovery.server";
 import { createVapiCallForJob } from "../callProvider.server";
 import { CallActivityView, type CallActivityRow } from "../components/calls/CallActivityView";
 
@@ -108,17 +104,14 @@ type LoaderData = {
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
   const shop = session.shop;
-
-  const settings = await ensureSettings(shop);
-
-  await syncAbandonedCheckoutsFromShopify({ admin, shop, limit: 50 });
-  await markAbandonedByDelay(shop, settings.delayMinutes);
 
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-  const [queued, calling, completed7d, jobs] = await Promise.all([
+  const [settings, allowance, queued, calling, completed7d, jobs] = await Promise.all([
+    ensureSettings(shop),
+    getAttemptAvailability(shop),
     db.callJob.count({ where: { shop, status: "QUEUED" } }),
     db.callJob.count({ where: { shop, status: "CALLING" } }),
     db.callJob.count({ where: { shop, status: "COMPLETED", createdAt: { gte: since } } }),
@@ -142,8 +135,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       },
     }),
   ]);
-
-  const allowance = await getAttemptAvailability(shop);
 
   const providerConfigured =
     Boolean(process.env.VAPI_API_KEY?.trim()) &&
