@@ -1,30 +1,21 @@
-import { createHmac } from "node:crypto";
-
-const APIFON_SMS_PATH = "/services/api/v1/sms/send";
-const APIFON_SMS_URL = `https://ars.apifon.com${APIFON_SMS_PATH}`;
+const APIFON_TOKEN_URL = "https://ids.apifon.com/oauth2/token";
+const APIFON_SMS_URL = "https://ars.apifon.com/services/api/v1/sms/send";
 
 export const DEFAULT_SMS_SENDER = "CartEcho";
 
 type ApifonCredentials =
-  | { kind: "hmac"; token: string; secret: string }
+  | { kind: "oauth"; clientId: string; clientSecret: string }
   | { kind: "bearer"; token: string };
 
 function readCredentials(): ApifonCredentials | null {
-  const token = String(process.env.APIFON_API_TOKEN ?? "").trim();
-  const secret = String(process.env.APIFON_API_SECRET ?? "").trim();
-  if (token && secret) return { kind: "hmac", token, secret };
+  // Apifon labels OAuth client credentials as "API Token / Client ID" and "API Key".
+  const clientId = String(process.env.APIFON_CLIENT_ID ?? process.env.APIFON_API_TOKEN ?? "").trim();
+  const clientSecret = String(
+    process.env.APIFON_CLIENT_SECRET ?? process.env.APIFON_API_KEY ?? process.env.APIFON_API_SECRET ?? "",
+  ).trim();
+  if (clientId && clientSecret) return { kind: "oauth", clientId, clientSecret };
 
-  const combined = String(process.env.APIFON_API_KEY ?? "").trim();
-  const separator = combined.indexOf(":");
-  if (separator > 0 && separator < combined.length - 1) {
-    return {
-      kind: "hmac",
-      token: combined.slice(0, separator).trim(),
-      secret: combined.slice(separator + 1).trim(),
-    };
-  }
-
-  const bearer = String(process.env.APIFON_BEARER_TOKEN ?? combined).trim();
+  const bearer = String(process.env.APIFON_BEARER_TOKEN ?? "").trim();
   return bearer ? { kind: "bearer", token: bearer } : null;
 }
 
@@ -52,18 +43,37 @@ export function configuredApifonSender() {
   return normalizeApifonSender(value) || DEFAULT_SMS_SENDER;
 }
 
-function authorizationHeaders(credentials: ApifonCredentials, body: string): Record<string, string> {
+async function getAccessToken(credentials: ApifonCredentials) {
   if (credentials.kind === "bearer") {
-    return { Authorization: `Bearer ${credentials.token}` };
+    return credentials.token;
   }
 
-  const requestDate = new Date().toUTCString();
-  const stringToSign = `POST\n${APIFON_SMS_PATH}\n${body}\n${requestDate}`;
-  const signature = createHmac("sha256", credentials.secret).update(stringToSign).digest("base64");
-  return {
-    Authorization: `ApifonWS ${credentials.token}:${signature}`,
-    "X-ApifonWS-Date": requestDate,
-  };
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: credentials.clientId,
+    client_secret: credentials.clientSecret,
+    scope: String(process.env.APIFON_SCOPE ?? "smsGateway").trim() || "smsGateway",
+  });
+  const response = await fetch(String(process.env.APIFON_TOKEN_URL ?? APIFON_TOKEN_URL).trim(), {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body,
+  });
+  const responseText = await response.text();
+  let data: any = null;
+  try { data = responseText ? JSON.parse(responseText) : null; } catch { data = null; }
+
+  const accessToken = String(data?.access_token ?? "").trim();
+  if (!response.ok || !accessToken) {
+    const reason = String(data?.error_description ?? data?.error ?? responseText).trim();
+    const error: any = new Error(`Apifon authentication failed HTTP ${response.status}: ${reason.slice(0, 900)}`);
+    error.status = response.status;
+    throw error;
+  }
+  return accessToken;
 }
 
 function isUnicode(value: string) {
@@ -78,7 +88,8 @@ export async function sendApifonSms(args: {
   callbackUrl?: string | null;
 }) {
   const credentials = readCredentials();
-  if (!credentials) throw new Error("Missing env: APIFON_API_KEY");
+  if (!credentials) throw new Error("Missing env: APIFON_API_TOKEN and APIFON_API_KEY");
+  const accessToken = await getAccessToken(credentials);
 
   const recipient = normalizeApifonRecipient(args.toE164);
   if (!recipient || recipient.length < 7 || recipient.length > 15) {
@@ -110,7 +121,7 @@ export async function sendApifonSms(args: {
       headers: {
         accept: "application/json",
         "content-type": "application/json; charset=utf-8",
-        ...authorizationHeaders(credentials, body),
+        Authorization: `Bearer ${accessToken}`,
       },
       body,
     });
