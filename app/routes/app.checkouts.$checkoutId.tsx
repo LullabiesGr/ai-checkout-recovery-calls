@@ -339,7 +339,7 @@ export default function CheckoutDetail() {
                 {data.checkout.recoveryUrl ? <Button url={data.checkout.recoveryUrl} external>Open checkout</Button> : null}
                 <details><summary>View conversation</summary><pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit" }}>{data.transcript || "The written conversation is not available yet."}</pre></details>
               </InlineStack>
-              <CallRecordingPlayer recordingUrl={data.recordingUrl} />
+              <CallRecordingPlayer callJobId={data.latestJob?.id} recordingUrl={data.recordingUrl} />
             </BlockStack>
           </Card>
 

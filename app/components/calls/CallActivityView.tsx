@@ -339,7 +339,7 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
                   <Text as="p" tone={selected.nextAction ? undefined : "subdued"}>{selected.nextAction || "No follow-up required right now."}</Text>
                 </BlockStack>
 
-                <CallRecordingPlayer recordingUrl={selected.recordingUrl} />
+                <CallRecordingPlayer callJobId={selected.id} recordingUrl={selected.recordingUrl} />
 
                 <InlineStack gap="200">
                   <details><summary>View conversation</summary><pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit", lineHeight: 1.6 }}>{selected.transcript || "The written conversation is not available yet."}</pre></details>

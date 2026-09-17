@@ -224,6 +224,7 @@ type Row = {
   eligibleAtRisk: boolean;
 
   callStatus: string | null;
+  callJobId: string | null;
   callOutcome: string | null;
   aiStatus: string | null;
   buyProbabilityPct: number | null;
@@ -763,6 +764,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       eligibleAtRisk,
 
       callStatus: j ? String(j.status) : null,
+      callJobId: j?.id ? String(j.id) : null,
       callOutcome: unansweredCall(j, sb) ? "no_answer" : recoveryOutcome(sb?.call_outcome, !!recoveredOrderId),
       aiStatus: (sb as any)?.ai_status ? String((sb as any).ai_status) : null,
       buyProbabilityPct,
@@ -1262,7 +1264,10 @@ export default function Checkouts() {
                           <Button onClick={() => setModalKind("transcript")}>View conversation</Button>
                         </s-stack>
 
-                        <CallRecordingPlayer recordingUrl={details?.recordingUrl ?? selected.recordingUrl} />
+                        <CallRecordingPlayer
+                          callJobId={details?.latestJob?.id ?? selected.callJobId}
+                          recordingUrl={details?.recordingUrl ?? selected.recordingUrl}
+                        />
 
                         <s-box border="base" borderRadius="base" padding="base" style={{ background: "rgba(0,91,211,0.06)" }}>
                           <s-stack gap="tight">
