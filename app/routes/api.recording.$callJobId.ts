@@ -14,7 +14,11 @@ function allowedRecordingUrl(value: string): URL | null {
       try { return new URL(process.env.SUPABASE_URL || "").hostname; } catch { return ""; }
     })();
     const host = url.hostname.toLowerCase();
-    const allowed = host === "storage.vapi.ai" || host.endsWith(".vapi.ai") || (!!configuredSupabaseHost && host === configuredSupabaseHost);
+    const allowed =
+      host === "storage.vapi.ai" ||
+      host.endsWith(".vapi.ai") ||
+      host.endsWith(".r2.cloudflarestorage.com") ||
+      (!!configuredSupabaseHost && host === configuredSupabaseHost);
     return allowed ? url : null;
   } catch {
     return null;
