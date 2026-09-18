@@ -15,6 +15,13 @@ test('blank shipping fields fall back to billing and customer names',()=>{
  assert.equal(data.checkoutName({shippingAddress:{},customer:{firstName:'Alex'}}),'Alex');
  assert.equal(data.checkoutName({name:'#123'}),null);
 });
+
+test('checkout labels prefer Shopify merchant-facing references',()=>{
+ assert.equal(data.shopifyCheckoutLabel({name:'#1042'},'token'),'#1042');
+ assert.equal(data.shopifyCheckoutLabel({checkout_number:1043},'token'),'#1043');
+ assert.equal(data.shopifyCheckoutLabel({id:'gid://shopify/AbandonedCheckout/987654321'},'token'),'#987654321');
+ assert.equal(data.shopifyCheckoutLabel({},'long-checkout-recovery-token'),'…very-token');
+});
 test('phone is recovered from checkout addresses in both API formats',()=>{
  assert.equal(data.checkoutPhone({phone:'',billing_address:{phone:'+306900000000'}}),'+306900000000');
  assert.equal(data.checkoutPhone({shippingAddress:{phone:'+12025550123'}}),'+12025550123');

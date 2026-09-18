@@ -101,6 +101,35 @@ export function shopifyOrderLabel(raw: any, fallback: any): string {
   const compact = id.split("/").filter(Boolean).pop() || id;
   return compact ? `#${compact}` : "—";
 }
+
+/**
+ * Prefer the merchant-facing checkout reference Shopify includes in webhook
+ * payloads. Admin GraphQL does not expose a separate checkout number, but its
+ * AbandonedCheckout GID still gives us a stable numeric reference. Never show
+ * the long recovery token unless Shopify supplied no human-readable value.
+ */
+export function shopifyCheckoutLabel(raw: any, fallback: any): string {
+  const checkout = objectData(raw);
+  const explicit = [
+    checkout?.name,
+    checkout?.checkout_number,
+    checkout?.checkoutNumber,
+    checkout?.number,
+  ]
+    .map((value) => value == null ? "" : String(value).trim())
+    .find(Boolean);
+
+  if (explicit) return explicit.startsWith("#") ? explicit : `#${explicit}`;
+
+  const rawId = text(checkout?.id) || text(checkout?.admin_graphql_api_id) || text(checkout?.adminGraphqlApiId);
+  const numericId = rawId.match(/(?:^|\/)(\d+)$/)?.[1];
+  if (numericId) return `#${numericId}`;
+
+  const id = text(fallback);
+  const fallbackNumeric = id.match(/(?:^|\/)(\d+)$/)?.[1];
+  if (fallbackNumeric) return `#${fallbackNumeric}`;
+  return id ? `…${id.slice(-10)}` : "—";
+}
 export function unansweredCall(job: any, summary?: any): boolean {
   const ai = objectData(job?.analysisJson)?.aiAnalysis;
   const reason = String(job?.endedReason ?? "").toLowerCase();

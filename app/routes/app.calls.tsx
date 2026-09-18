@@ -1,5 +1,5 @@
 import { claimCallJob, claimManualCallJob } from "../lib/callDispatch.server";
-import { checkoutName, unansweredCall, waitingReason } from "../lib/checkoutData.shared";
+import { checkoutName, shopifyCheckoutLabel, unansweredCall, waitingReason } from "../lib/checkoutData.shared";
 import { getAttemptAvailability } from "../lib/billing.server";
 import { checkoutNeedsPresentationEnrichment, enrichCheckoutPresentation } from "../lib/checkoutEnrichment.server";
 import { conversationText, recoveryOutcome } from "../lib/conversation.shared";
@@ -208,6 +208,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return {
       id: String(j.id),
       checkoutId: String(j.checkoutId),
+      checkoutLabel: shopifyCheckoutLabel(checkout?.raw, j.checkoutId),
       status: String(j.status),
       statusLabel: j.status === "COMPLETED" && unansweredCall(j, sb) ? "No answer" : String(j.status),
       waitingReason: j.status === "QUEUED" ? (!settings.enabled ? "Automation is paused." : !allowance.allowed ? "No attempts available — check your plan or buy extra attempts." : waitingReason(j.outcome)) : null,

@@ -1,4 +1,4 @@
-import { checkoutName, checkoutPhone, unansweredCall } from "../lib/checkoutData.shared";
+import { checkoutName, checkoutPhone, shopifyCheckoutLabel, unansweredCall } from "../lib/checkoutData.shared";
 import { conversationText, recoveryOutcome } from "../lib/conversation.shared";
 import * as React from "react";
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
@@ -43,6 +43,7 @@ type OfferInfo = {
 type LoaderData = {
   shop: string;
   checkoutId: string;
+  checkoutLabel: string;
   checkout: {
     status: string;
     updatedAt: string;
@@ -151,11 +152,6 @@ function money(amount: number | null | undefined, currency: string) {
   } catch {
     return `${Number.isFinite(value) ? value.toFixed(2) : "0.00"} ${cur}`;
   }
-}
-
-function shortId(value: string) {
-  const v = safeStr(value).trim();
-  return v.length > 14 ? `…${v.slice(-12)}` : v;
 }
 
 function checkoutTone(status: string) {
@@ -289,6 +285,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   return {
     shop,
     checkoutId,
+    checkoutLabel: shopifyCheckoutLabel(checkout.raw, checkout.checkoutId),
     transcript: conversationText(j?.transcript, sb, j?.analysisJson),
     checkout: {
       status: recoveredOrder ? "RECOVERED" : ["RECOVERED", "CONVERTED"].includes(String(checkout.status).toUpperCase()) ? "ABANDONED" : String(checkout.status),
@@ -376,7 +373,7 @@ export default function CheckoutDetail() {
   return (
     <Page
       title={data.checkout.customerName || "Checkout details"}
-      subtitle={`Checkout ${shortId(data.checkoutId)}`}
+      subtitle={`Checkout ${data.checkoutLabel}`}
       backAction={{ content: "Checkouts", url: "/app/checkouts" }}
       titleMetadata={<Badge tone={checkoutTone(data.checkout.status)}>{data.checkout.status}</Badge>}
     >

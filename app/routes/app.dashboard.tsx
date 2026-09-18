@@ -10,7 +10,7 @@ import { resolveTestCatalog } from "../lib/testCatalog.server";
 import { parseTestCallInput } from "../lib/testCall.shared";
 import { randomUUID } from "node:crypto";
 import { startVapiCallForJob } from "../callProvider.server";
-import { shopifyOrderLabel, waitingReason } from "../lib/checkoutData.shared";
+import { shopifyCheckoutLabel, shopifyOrderLabel, waitingReason } from "../lib/checkoutData.shared";
 import { ensureSettings } from "../callRecovery.server";
 import { getAttemptAvailability } from "../lib/billing.server";
 import { PLANS } from "../lib/billingPlans.shared";
@@ -191,24 +191,6 @@ async function supabaseFetchRows(params: URLSearchParams): Promise<VapiRow[]> {
   } catch {
     return [];
   }
-}
-
-function modeText(values: Array<string | null | undefined>) {
-  const m = new Map<string, number>();
-  for (const v of values) {
-    const s = String(v ?? "").trim();
-    if (!s) continue;
-    m.set(s, (m.get(s) ?? 0) + 1);
-  }
-  let best = "";
-  let bestN = 0;
-  for (const [k, n] of m.entries()) {
-    if (n > bestN) {
-      best = k;
-      bestN = n;
-    }
-  }
-  return best;
 }
 
 /* ---------------- Loader ---------------- */
@@ -423,26 +405,43 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     recentCheckouts.filter(isVerifiedRecoveredCheckoutRow).map((c) => String(c.checkoutId)),
   );
 
-  const vapiNeedsFollowRows = vapiRecent.filter((r) => normLower(r.call_outcome) === "needs_followup");
+  const isStillOpenForRecovery = (checkoutId: unknown) => {
+    const id = String(checkoutId ?? "").trim();
+    return Boolean(id) && !verifiedRecoveredCheckoutIds.has(id);
+  };
+
+  const uniqueCheckoutCount = (rows: VapiRow[]) =>
+    new Set(rows.map((r) => String(r.checkout_id ?? "").trim()).filter(Boolean)).size;
+
+  const vapiNeedsFollowRows = vapiRecent.filter(
+    (r) => normLower(r.call_outcome) === "needs_followup" && isStillOpenForRecovery(r.checkout_id),
+  );
   const vapiHighIntentRows = vapiRecent.filter((r) => {
     const buy = typeof r.buy_probability === "number" ? r.buy_probability : -1;
-    const cid = String(r.checkout_id ?? "");
-    if (!cid) return false;
-    if (verifiedRecoveredCheckoutIds.has(cid)) return false;
-    return buy >= 70;
+    return buy >= 70 && isStillOpenForRecovery(r.checkout_id);
   });
-  const vapiDiscountRows = vapiRecent.filter((r) => Boolean(r.discount_suggest) || Number(r.discount_percent ?? 0) > 0);
+  const vapiDiscountRows = vapiRecent.filter(
+    (r) => isStillOpenForRecovery(r.checkout_id) && (Boolean(r.discount_suggest) || Number(r.discount_percent ?? 0) > 0),
+  );
   const vapiHumanRows = vapiRecent.filter((r) => {
     const err = String(r.ai_error ?? "").trim();
     const st = normLower(r.ai_status);
-    return Boolean(err) || st.includes("error");
+    return isStillOpenForRecovery(r.checkout_id) && (Boolean(err) || st.includes("error"));
   });
 
   const vapiFailedRows = vapiRecent.filter((r) => {
     const outcome = normLower(r.call_outcome);
     const disp = normLower(r.disposition);
-    const ended = String(r.ended_reason ?? "").trim();
-    return outcome === "not_recovered" || disp === "not_interested" || Boolean(ended);
+    const ended = normLower(r.ended_reason);
+    const aiError = String(r.ai_error ?? "").trim();
+    const aiStatus = normLower(r.ai_status);
+    return isStillOpenForRecovery(r.checkout_id) && (
+      Boolean(aiError) ||
+      aiStatus.includes("error") ||
+      /^(failed|error)$/.test(outcome) ||
+      /^(failed|error)$/.test(disp) ||
+      /(?:^|[_-])(error|failed|failure)(?:$|[_-])/.test(ended)
+    );
   });
 
   const vapiRecent7d = vapiRecent.filter((r) => {
@@ -464,7 +463,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       if (cid) ids.add(cid);
     }
     for (const j of recentCallJobs) {
-      if (normUpper(j.outcome) === "NEEDS_FOLLOWUP") ids.add(String(j.checkoutId));
+      if (normUpper(j.outcome) === "NEEDS_FOLLOWUP" && isStillOpenForRecovery(j.checkoutId)) ids.add(String(j.checkoutId));
     }
     return ids.size;
   })();
@@ -494,11 +493,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       if (cid) ids.add(cid);
     }
     for (const j of recentCallJobs) {
-      const ended = String(j.endedReason ?? "").trim();
-      if (normUpper(j.status) === "FAILED" || ended) ids.add(String(j.checkoutId));
+      const outcome = normUpper(j.outcome);
+      if (isStillOpenForRecovery(j.checkoutId) && (normUpper(j.status) === "FAILED" || outcome.startsWith("ERROR:"))) {
+        ids.add(String(j.checkoutId));
+      }
     }
     return ids.size;
   })();
+
+  const highIntentDedup = uniqueCheckoutCount(vapiHighIntentRows);
 
   const priorities: DashboardViewProps["priorities"] = [
     {
@@ -506,25 +509,25 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       label: "Send follow-ups",
       count: followupsHeadlineDedup,
       rawCountText: "unique checkouts",
-      nextBestAction: modeText(vapiNeedsFollowRows.map((x) => x.next_best_action)),
+      nextBestAction: "Customers who need a checkout link or follow-up message.",
       href: appendParam(`/app/checkouts${baseSearch}`, "tab", "followups"),
       tone: followupsHeadlineDedup > 0 ? "warning" : "new",
     },
     {
       key: "high_intent",
       label: "Work high-intent leads",
-      count: vapiHighIntentRows.length,
+      count: highIntentDedup,
       rawCountText: `buy_probability ≥ 70`,
-      nextBestAction: modeText(vapiHighIntentRows.map((x) => x.next_best_action)),
+      nextBestAction: "Strong buying intent, but no completed order yet.",
       href: appendParam(`/app/checkouts${baseSearch}`, "tab", "high_intent"),
-      tone: vapiHighIntentRows.length > 0 ? "info" : "new",
+      tone: highIntentDedup > 0 ? "info" : "new",
     },
     {
       key: "discounts",
       label: "Handle discount requests",
       count: discountDedup,
       rawCountText: "unique checkouts",
-      nextBestAction: modeText(vapiDiscountRows.map((x) => x.next_best_action)) || "Review discount rationale and reply with an offer.",
+      nextBestAction: "Review the requested discount before sending an offer.",
       href: appendParam(`/app/checkouts${baseSearch}`, "tab", "discounts"),
       tone: discountDedup > 0 ? "warning" : "new",
     },
@@ -533,7 +536,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       label: "Human intervention needed",
       count: humanDedup,
       rawCountText: `ai_error present`,
-      nextBestAction: modeText(vapiHumanRows.map((x) => x.next_best_action)) || "Review AI error and reprocess the call summary.",
+      nextBestAction: "AI analysis failed and requires manual review.",
       href: appendParam(`/app/calls${baseSearch}`, "tab", "ai_errors"),
       tone: humanDedup > 0 ? "critical" : "new",
     },
@@ -542,7 +545,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       label: "Review failed calls",
       count: failedDedup,
       rawCountText: `vapi + jobs`,
-      nextBestAction: modeText(vapiFailedRows.map((x) => x.next_best_action)) || "Review objections and retry with updated script.",
+      nextBestAction: "Only provider or processing failures are included here.",
       href: appendParam(`/app/calls${baseSearch}`, "tab", "failed"),
       tone: failedDedup > 0 ? "critical" : "new",
     },
@@ -551,7 +554,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       label: "Work abandoned checkouts",
       count: currentMetrics.abandonedEligibleCount,
       rawCountText: `eligible (min ${fmtMoney(minOrderValue, currency)})`,
-      nextBestAction: "Call contactable abandoned carts and send follow-up message if unanswered.",
+      nextBestAction: "Contactable abandoned checkouts that have not converted.",
       href: appendParam(`/app/checkouts${baseSearch}`, "tab", "abandoned"),
       tone: currentMetrics.abandonedEligibleCount > 0 ? "warning" : "new",
     },
@@ -568,6 +571,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     : [];
   const recoveredOrderNumbers = new Map(
     recoveredOrders.map((order) => [order.orderId, shopifyOrderLabel(order.raw, order.orderId)]),
+  );
+  const checkoutLabels = new Map(
+    recentCheckouts.map((checkout) => [
+      String(checkout.checkoutId),
+      shopifyCheckoutLabel(checkout.raw, checkout.checkoutId),
+    ] as const),
   );
 
   const recoveredForList = recentCheckouts
@@ -587,7 +596,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
       return {
         checkoutId: String(c.checkoutId),
-        customerName: String(c.customerName ?? ""),
+        customerName: String(c.customerName ?? "").trim() || `Checkout ${checkoutLabels.get(String(c.checkoutId)) ?? "—"}`,
         amountText: fmtMoney(Math.max(0, amt), String(c.currency ?? currency)),
         whenText: minutesAgo(whenIso),
         recoveredOrderId: c.recoveredOrderId
@@ -702,7 +711,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }
 
     const customer = cid ? customerByCheckoutId.get(cid) : "";
-    const event = customer ? `Call · ${customer}` : cid ? `Call · Checkout ${shortCheckout(cid)}` : "Call";
+    const checkoutLabel = cid ? checkoutLabels.get(cid) || shortCheckout(cid) : "";
+    const event = customer
+      ? `Call · ${customer}${checkoutLabel ? ` · ${checkoutLabel}` : ""}`
+      : cid
+        ? `Call · Checkout ${checkoutLabel}`
+        : "Call";
 
     return {
       ts,
@@ -717,7 +731,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     };
   });
 
-  const liveFromJobs: LiveInternal[] = recentCallJobs.slice(0, 40).map((j) => {
+  const summarizedCallIds = new Set(
+    vapiRecent.map((row) => String(row.call_id ?? "").trim()).filter(Boolean),
+  );
+  const summarizedJobIds = new Set(
+    vapiRecent.map((row) => String(row.call_job_id ?? "").trim()).filter(Boolean),
+  );
+
+  const liveFromJobs: LiveInternal[] = recentCallJobs
+    .filter((job) => {
+      const providerCallId = String(job.providerCallId ?? "").trim();
+      return !summarizedJobIds.has(String(job.id)) && (!providerCallId || !summarizedCallIds.has(providerCallId));
+    })
+    .slice(0, 40)
+    .map((j) => {
     const iso = new Date(j.updatedAt ?? j.createdAt).toISOString();
     const ts = Date.parse(iso);
 
@@ -761,8 +788,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       tone = "info";
     }
 
+    const checkoutLabel = checkoutLabels.get(String(j.checkoutId)) || shortCheckout(String(j.checkoutId));
     const customer = customerByCheckoutId.get(String(j.checkoutId)) || "";
-    const event = customer ? `Call · ${customer}` : `Call · Checkout ${shortCheckout(String(j.checkoutId))}`;
+    const event = customer ? `Call · ${customer} · ${checkoutLabel}` : `Call · Checkout ${checkoutLabel}`;
 
     return {
       ts,
@@ -775,7 +803,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       recordingUrl: j.recordingUrl ? String(j.recordingUrl) : undefined,
       logUrl: undefined,
     };
-  });
+    });
 
   const liveActivity = [...liveFromVapi, ...liveFromJobs]
     .slice()

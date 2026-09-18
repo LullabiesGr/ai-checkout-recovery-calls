@@ -23,6 +23,7 @@ import {
 export type CallActivityRow = {
   id: string;
   checkoutId: string;
+  checkoutLabel: string;
   status: string;
   statusLabel?: string;
   waitingReason?: string | null;
@@ -65,7 +66,6 @@ type Props = {
 type CallFilter = "all" | "queued" | "calling" | "completed" | "failed";
 
 const s = (v: unknown) => (v == null ? "" : String(v).trim());
-const shortId = (v: string) => (s(v).length > 12 ? `…${s(v).slice(-10)}` : s(v) || "—");
 const when = (v: string | null | undefined) => {
   const d = new Date(s(v));
   return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString();
@@ -143,7 +143,7 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
   const [page, setPage] = React.useState(0);
   const filteredRows = React.useMemo(() => rows.filter((row) =>
     (filter === "all" || s(row.status).toLowerCase() === filter) &&
-    [row.customerName, row.email, row.phone, row.checkoutId, row.cartPreview].some((value) => s(value).toLowerCase().includes(query.trim().toLowerCase()))
+    [row.customerName, row.email, row.phone, row.checkoutId, row.checkoutLabel, row.cartPreview].some((value) => s(value).toLowerCase().includes(query.trim().toLowerCase()))
   ), [rows, filter, query]);
   React.useEffect(() => setPage(0), [filter, query]);
   const currentPage = Math.min(page, Math.max(0, Math.ceil(filteredRows.length / 30) - 1));
@@ -234,8 +234,8 @@ export function CallActivityView({ stats, rows, providerConfigured }: Props) {
                       <ProductThumb row={r} />
                       <BlockStack gap="050">
                         <Button variant="plain" textAlign="left" onClick={() => setSelectedId(r.id)}>{r.customerName || "Guest customer"}</Button>
-                        <Text as="span" variant="bodySm" tone="subdued">{r.phone || r.email || `Checkout ${shortId(r.checkoutId)}`}</Text>
-                        <Text as="span" variant="bodySm" tone="subdued">Checkout {shortId(r.checkoutId)}</Text>
+                        <Text as="span" variant="bodySm" tone="subdued">{r.phone || r.email || `Checkout ${r.checkoutLabel}`}</Text>
+                        <Text as="span" variant="bodySm" tone="subdued">Checkout {r.checkoutLabel}</Text>
                       </BlockStack>
                     </InlineStack>
                   </IndexTable.Cell>

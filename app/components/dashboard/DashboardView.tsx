@@ -348,7 +348,7 @@ export function DashboardView(props: DashboardViewProps) {
                   Needs your attention
                 </Text>
                 <Text as="p" variant="bodySm" tone="subdued">
-                  Only the recovery items worth checking now.
+                  Unresolved actions only. Each checkout is counted once.
                 </Text>
               </BlockStack>
             </Box>
