@@ -111,21 +111,50 @@ async function createDiscountCodeBasic(params: {
   return { nodeId: String(nodeId), createdCode: createdCode ? String(createdCode) : null };
 }
 
+function isTestCheckout(raw: string | null | undefined) {
+  try {
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed?.testCall === true;
+  } catch {
+    return false;
+  }
+}
+
+async function allowActiveTestCallWithoutSecret(shop: string, checkoutId: string) {
+  if (!shop || !checkoutId || !checkoutId.startsWith("test-")) return false;
+  const checkout = await db.checkout.findFirst({ where: { shop, checkoutId }, select: { raw: true } });
+  if (!checkout || !isTestCheckout(checkout.raw)) return false;
+
+  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+  const activeJob = await db.callJob.findFirst({
+    where: {
+      shop,
+      checkoutId,
+      status: { in: ["CALLING", "COMPLETED"] },
+      createdAt: { gte: tenMinutesAgo },
+    },
+    select: { id: true },
+  });
+  return Boolean(activeJob);
+}
+
 export async function action({ request }: ActionFunctionArgs) {
   if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
-
-  const secret = request.headers.get("x-internal-secret");
-  if (secret !== requiredEnv("INTERNAL_API_SECRET")) {
-    return new Response(JSON.stringify({ success: false, error: "unauthorized" }), {
-      status: 401,
-      headers: { "content-type": "application/json" },
-    });
-  }
 
   const body = await request.json().catch(() => ({}));
   const shop = String(body?.shop ?? "").trim();
   const checkoutId = String(body?.checkoutId ?? "").trim();
   const percent = Number(body?.percent ?? 10);
+
+  const secret = request.headers.get("x-internal-secret");
+  const internalAuthorized = secret === requiredEnv("INTERNAL_API_SECRET");
+  const testAuthorized = internalAuthorized ? false : await allowActiveTestCallWithoutSecret(shop, checkoutId);
+  if (!internalAuthorized && !testAuthorized) {
+    return new Response(JSON.stringify({ success: false, error: "unauthorized" }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+  }
 
   if (!shop || !checkoutId) {
     return new Response(JSON.stringify({ success: false, error: "shop and checkoutId required" }), {
@@ -143,17 +172,19 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   const settings = await db.settings.findUnique({ where: { shop } });
+  const configuredMax = Math.max(1, Math.min(99, Number((settings as any)?.max_discount_percent ?? 10) || 10));
+  const safePercent = Math.max(1, Math.min(configuredMax, Math.floor(percent || 10)));
   const prefix = String((settings as any)?.coupon_prefix ?? "").trim() || null;
   const validityHours = Number((settings as any)?.coupon_validity_hours ?? 24);
 
   const accessToken = await getOfflineAccessToken(shop);
-  const candidate = makeUniqueCode(prefix, percent);
+  const candidate = makeUniqueCode(prefix, safePercent);
 
   const created = await createDiscountCodeBasic({
     shop,
     accessToken,
     code: candidate,
-    percent,
+    percent: safePercent,
     startsAt: new Date().toISOString(),
     endsAt: hoursFromNowIso(validityHours),
   });
@@ -163,6 +194,7 @@ export async function action({ request }: ActionFunctionArgs) {
       success: true,
       nodeId: created.nodeId,
       code: created.createdCode ?? candidate,
+      percent: safePercent,
       apiVersion: SHOPIFY_ADMIN_API_VERSION,
     }),
     { status: 200, headers: { "content-type": "application/json" } }
