@@ -1,15 +1,99 @@
 import { useAppBridge } from "@shopify/app-bridge-react";
-import { TEST_SHOP_QUERY } from "../lib/testCatalog.server";
+import { TEST_SHOP_QUERY, resolveTestCatalog } from "../lib/testCatalog.server";
 import { useState } from "react";
 import { randomUUID } from "node:crypto";
 import { useLoaderData, useActionData, useNavigation } from "react-router";
-import type { LoaderFunctionArgs } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { Page, Card, BlockStack, Text, Banner, FormLayout, TextField, Thumbnail, Box, InlineGrid, InlineStack, Button } from "@shopify/polaris";
 import { Form } from "react-router";
 import { authenticate } from "../shopify.server";
-import { action as submitTestCall } from "./app.dashboard";
+import db from "../db.server";
+import { startVapiCallForJob } from "../callProvider.server";
 export { ErrorBoundary, headers } from "./app.dashboard";
-export const action = submitTestCall;
+
+function buildCheckoutPermalink(shop: string, itemsJson: string, email?: string | null) {
+  const items = JSON.parse(itemsJson) as Array<{ variantId?: string; quantity?: number }>;
+  const lines = items.map((item) => {
+    const gid = String(item?.variantId ?? "");
+    const variantId = gid.split("/").pop() ?? "";
+    const quantity = Number(item?.quantity ?? 1);
+    if (!/^\d+$/.test(variantId) || !Number.isInteger(quantity) || quantity < 1) {
+      throw new Error("Could not build the Shopify checkout link for the selected products.");
+    }
+    return `${variantId}:${quantity}`;
+  });
+  if (!lines.length) throw new Error("Select at least one product.");
+  const url = new URL(`https://${shop}/cart/${lines.join(",")}`);
+  if (email) url.searchParams.set("checkout[email]", email);
+  return url.toString();
+}
+
+export async function action({ request }: ActionFunctionArgs) {
+  const { session, admin } = await authenticate.admin(request);
+  const fd = await request.formData();
+  const phone = String(fd.get("phone") ?? "").replace(/[\s()-]/g, "");
+  if (!/^\+[1-9]\d{7,14}$/.test(phone)) {
+    return { ok: false, message: "Enter your phone number with country code, for example +306900000000." };
+  }
+
+  let testCart: Awaited<ReturnType<typeof resolveTestCatalog>>;
+  try {
+    testCart = await resolveTestCatalog(admin, fd);
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "Check the test cart details." };
+  }
+
+  const nonce = String(fd.get("testCallId") ?? "");
+  if (!/^[0-9a-f-]{36}$/i.test(nonce)) {
+    return { ok: false, message: "Refresh the page before starting a test call." };
+  }
+
+  const shop = session.shop;
+  const checkoutId = `test-${nonce}`;
+  const id = `${shop}:${checkoutId}`;
+
+  let checkoutUrl: string;
+  try {
+    checkoutUrl = buildCheckoutPermalink(shop, testCart.itemsJson, testCart.email);
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "Could not create the Shopify checkout link." };
+  }
+
+  const raw = JSON.stringify({
+    testCall: true,
+    abandonedCheckoutUrl: checkoutUrl,
+    recoveryUrl: checkoutUrl,
+  });
+
+  const created = await db.$transaction(async (tx) => {
+    const checkout = await tx.checkout.upsert({
+      where: { shop_checkoutId: { shop, checkoutId } },
+      update: { phone, ...testCart, raw },
+      create: { shop, checkoutId, phone, ...testCart, status: "OPEN", raw },
+    });
+    await tx.$queryRaw`SELECT id FROM "Checkout" WHERE id = ${checkout.id} FOR UPDATE`;
+    if (await tx.callJob.findFirst({ where: { shop, id } })) return false;
+    await tx.callJob.create({ data: { id, shop, checkoutId, phone, status: "CALLING", scheduledFor: new Date(), attempts: 1 } });
+    return true;
+  });
+
+  if (!created) return { ok: false, message: "This test call has already been submitted. Refresh to start another." };
+
+  try {
+    await startVapiCallForJob({ shop, callJobId: id });
+    return { ok: true, message: "Test call started. If the customer asks for the link, CartEcho can now send a real Shopify checkout URL by SMS." };
+  } catch (error: unknown) {
+    const code = error instanceof Error ? error.message : "";
+    await db.callJob.updateMany({ where: { shop, id, status: "CALLING" }, data: { status: "FAILED", outcome: "TEST_CALL_FAILED" } });
+    const friendly = code === "ATTEMPT_LIMIT_REACHED"
+      ? "No attempts are available. Add attempts or change plan, then try again."
+      : code === "ACTIVE_SUBSCRIPTION_REQUIRED" || code === "MONTHLY_PLAN_REQUIRED"
+        ? "An active plan is required to place this test call."
+        : "The test call could not start. Check the call provider settings and try again.";
+    return { ok: false, message: friendly };
+  }
+}
+
 export async function loader({ request }: LoaderFunctionArgs) {
   const { admin } = await authenticate.admin(request);
   const response = await admin.graphql(TEST_SHOP_QUERY);
@@ -61,7 +145,7 @@ export default function TestCallRoute() {
             <input type="hidden" name="currency" value={testCurrency} />
             <input type="hidden" name="items" value={JSON.stringify(testItems)} />
             <BlockStack gap="400">
-              <Text as="p">The agent uses your current automation settings and the customer and cart details below. This places a real call to your test number and uses one attempt. It does not create a Shopify order.</Text>
+              <Text as="p">The agent uses your current automation settings and the customer and cart details below. This places a real call to your test number and uses one attempt. CartEcho also creates a real Shopify checkout permalink from the selected variants so the SMS flow can be tested end to end. It does not create an order unless the checkout is completed.</Text>
               {result ? <Banner tone={result.ok ? "success" : "critical"}><p>{result.message}</p></Banner> : null}
               <FormLayout>
                 <TextField label="Customer name" name="customerName" value={testName} onChange={setTestName} autoComplete="name" requiredIndicator disabled={submitting} />
